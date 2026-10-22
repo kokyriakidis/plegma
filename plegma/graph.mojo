@@ -198,6 +198,27 @@ struct Graph(Movable, Sized):
             graph.names.append(names[r])
         return graph^
 
+    def heaviest_path_of(self, order: List[Int], members: List[Int]) -> List[Int]:
+        """`heaviest_path` with only the paths `members` weighing the edges, starts and ends."""
+        var count = len(self.bases)
+        var starts = List[Int](length=count, fill=0)
+        var ends = List[Int](length=count, fill=0)
+        # Each edge's weight among the members, beside `successors`.
+        var weight = List[List[Int]](capacity=count)
+        for node in range(count):
+            weight.append(List[Int](length=len(self.successors[node]), fill=0))
+        for p in members:
+            ref path = self.paths[p]
+            if len(path) == 0:
+                continue
+            starts[path[0]] += 1
+            ends[path[len(path) - 1]] += 1
+            for k in range(len(path) - 1):
+                for i in range(len(self.successors[path[k]])):
+                    if self.successors[path[k]][i] == path[k + 1]:
+                        weight[path[k]][i] += 1
+        return self._heaviest(order, starts, ends, weight)
+
     def heaviest_path(self, order: List[Int]) -> List[Int]:
         """abPOA's heaviest bundle: from a virtual source to a virtual sink, each node followed by its heaviest
         out-edge, the sink's edge weighing the paths that end there (so the consensus stops where most sequences
@@ -209,6 +230,10 @@ struct Graph(Movable, Sized):
             if len(path) > 0:
                 starts[path[0]] += 1
                 ends[path[len(path) - 1]] += 1
+        return self._heaviest(order, starts, ends, self.weights)
+
+    def _heaviest(self, order: List[Int], starts: List[Int], ends: List[Int], weights: List[List[Int]]) -> List[Int]:
+        var count = len(self.bases)
         var score = List[Int](length=count, fill=0)
         var next = List[Int](length=count, fill=-1)
         for k in reversed(range(len(order))):
@@ -218,7 +243,9 @@ struct Graph(Movable, Sized):
             var choice = -1
             for i in range(len(self.successors[node])):
                 var s = self.successors[node][i]
-                var weight = self.weights[node][i]
+                var weight = weights[node][i]
+                if weight == 0:
+                    continue
                 if weight > best_weight or (weight == best_weight and score[s] >= best_score):
                     best_weight = weight
                     best_score = score[s]

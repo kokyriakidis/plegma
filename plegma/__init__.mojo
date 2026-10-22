@@ -22,7 +22,10 @@ is implementation and may change.
 - Whole-graph alignment (abPOA's modes, scoring and adaptive band, memory
   following the band): `align_to_graph` -> `GraphAlignment` under `Scoring`
   (`GLOBAL`, `LOCAL`, `EXTENSION`), over a `Topology`; consensus by
-  `Graph.heaviest_path`.
+  `Graph.heaviest_path` (or `heaviest_path_of` a cluster's paths).
+- Order and clusters: `guide_order` (abPOA's progressive order by minimizer
+  multiset Jaccard), `cluster_rows` (several consensus sequences, by MSA
+  columns where the sequences disagree).
 """
 
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
@@ -30,6 +33,8 @@ from .align import Anchored, anchored_alignment, graph_alignment
 from .anchors import Anchor, find_anchors, mums, rare, rare_or_maximal, smems
 from .backbone import ALL, Level, MUMS, RARE, RARE_OR_MAXIMAL, REFERENCE_UNIQUE, SMEMS, Window, backbone, windows
 from .chain import Chain, ChainCosts, chain, linked_cost, without_overlaps
+from .clusters import cluster_rows
 from .graph import Graph, Runs, cigar_runs
-from .kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, align_to_graph
+from .kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, align_between, align_to_graph
+from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window

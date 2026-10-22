@@ -9,6 +9,7 @@ from sporos import read_fasta
 from plegma.backbone import Level, RARE_OR_MAXIMAL, backbone, windows
 from plegma.chain import ChainCosts
 from plegma.graph import Graph, GAP
+from plegma.clusters import cluster_rows
 from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, align_between, align_to_graph
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
@@ -41,6 +42,9 @@ Options:
     -o FILE     output to FILE [stdout]
     -r INT      output [0]: 0 consensus FASTA, 1 MSA FASTA, 2 both, 3 GFA, 4 GFA with the consensus path
     -a INT      consensus [0]: 0 heaviest path, 1 most frequent letter per column
+    -d INT      at most INT consensus sequences [1]; at 2 or more the sequences are clustered on the MSA's
+                heterozygous columns and each cluster gets its own
+    -q FLOAT    smallest share of the sequences a cluster and a column's second allele must hold [0.25]
     -v          report timings on stderr
     -h          this help
 """
@@ -150,6 +154,8 @@ struct Options(Copyable, Movable):
     var start_msa: String
     var result: Int
     var consensus_rule: Int
+    var max_consensus: Int
+    var min_freq: Float64
     var verbose: Bool
 
     def __init__(out self):
@@ -165,6 +171,8 @@ struct Options(Copyable, Movable):
         self.start_msa = String()
         self.result = 0
         self.consensus_rule = 0
+        self.max_consensus = 1
+        self.min_freq = 0.25
         self.verbose = False
 
 
@@ -263,22 +271,45 @@ def _poa(input: String, options: Options) raises -> String:
 
     var result = options.result
     var text = String()
-    var need_rows = result == 1 or result == 2 or options.consensus_rule == 1
+    var need_rows = result == 1 or result == 2 or options.consensus_rule == 1 or options.max_consensus > 1
     var rows = graph.msa() if need_rows else List[String]()
-    var consensus = String()
+    var consensus: String
     var consensus_path = List[Int]()
+    var clusters = List[List[Int]]()
     if result != 1 and result != 3:
-        if options.consensus_rule == 1:
-            consensus = _consensus_most_frequent(rows)
-        else:
-            var topology = Topology(graph)
-            consensus_path = graph.heaviest_path(topology.order)
-            var letters = List[UInt8]()
-            for node in consensus_path:
-                letters.append(graph.bases[node])
-            consensus = String(unsafe_from_utf8=letters)
-    if result == 0 or result == 2:
-        text += ">Consensus_sequence\n" + consensus + "\n"
+        if options.max_consensus > 1:
+            clusters = cluster_rows(rows, options.max_consensus, options.min_freq)
+        var topology = Topology(graph)
+        if len(clusters) <= 1:
+            if options.consensus_rule == 1:
+                consensus = _consensus_most_frequent(rows)
+            else:
+                consensus_path = graph.heaviest_path(topology.order)
+                var letters = List[UInt8]()
+                for node in consensus_path:
+                    letters.append(graph.bases[node])
+                consensus = String(unsafe_from_utf8=letters)
+            if result == 0 or result == 2:
+                text += ">Consensus_sequence\n" + consensus + "\n"
+        elif result == 0 or result == 2:
+            for k in range(len(clusters)):
+                var cons: String
+                if options.consensus_rule == 1:
+                    var mine = List[String]()
+                    for p in clusters[k]:
+                        mine.append(rows[p])
+                    cons = _consensus_most_frequent(mine)
+                else:
+                    var letters = List[UInt8]()
+                    for node in graph.heaviest_path_of(topology.order, clusters[k]):
+                        letters.append(graph.bases[node])
+                    cons = String(unsafe_from_utf8=letters)
+                var ids = String()
+                for i in range(len(clusters[k])):
+                    if i > 0:
+                        ids += ","
+                    ids += String(clusters[k][i])
+                text += ">Consensus_sequence_" + String(k + 1) + " " + ids + "\n" + cons + "\n"
     if result == 1 or result == 2:
         for p in range(len(graph.paths)):
             text += ">" + graph.names[p] + "\n" + rows[p] + "\n"
@@ -380,6 +411,12 @@ def main() raises:
             i += 1
         elif a == "-a":
             options.consensus_rule = Int(_value(args, i))
+            i += 1
+        elif a == "-d":
+            options.max_consensus = Int(_value(args, i))
+            i += 1
+        elif a == "-q":
+            options.min_freq = Float64(_value(args, i))
             i += 1
         elif a == "-v":
             options.verbose = True
