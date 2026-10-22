@@ -87,11 +87,13 @@ def window_nodes(
     comptime BOTH = UInt8(2)
     var stack = List[Int]()
     if left >= 0:
-        for s in graph.successors(left):
-            stack.append(s)
+        var e = Int(graph.first_out[left])
+        while e >= 0:
+            stack.append(Int(graph.edge_to[e]))
+            e = Int(graph.next_out[e])
     else:
         for node in range(count):
-            if len(graph.predecessors(node)) == 0:
+            if graph.in_degree[node] == 0:
                 stack.append(node)
     while len(stack) > 0:
         var node = stack.pop()
@@ -99,14 +101,18 @@ def window_nodes(
             continue
         scratch.marks[node] = FORWARD
         scratch.touched.append(node)
-        for s in graph.successors(node):
-            stack.append(s)
+        var e = Int(graph.first_out[node])
+        while e >= 0:
+            stack.append(Int(graph.edge_to[e]))
+            e = Int(graph.next_out[e])
     if right >= 0:
-        for p in graph.predecessors(right):
-            stack.append(p)
+        var e = Int(graph.first_in[right])
+        while e >= 0:
+            stack.append(Int(graph.edge_from[e]))
+            e = Int(graph.next_in[e])
     else:
         for node in range(count):
-            if len(graph.successors(node)) == 0:
+            if graph.out_degree[node] == 0:
                 stack.append(node)
     var keys = List[Int]()
     while len(stack) > 0:
@@ -115,8 +121,10 @@ def window_nodes(
             continue
         scratch.marks[node] = BOTH
         keys.append(rank[node])
-        for p in graph.predecessors(node):
-            stack.append(p)
+        var e = Int(graph.first_in[node])
+        while e >= 0:
+            stack.append(Int(graph.edge_from[e]))
+            e = Int(graph.next_in[e])
     for node in scratch.touched:
         scratch.marks[node] = 0
     scratch.touched.clear()

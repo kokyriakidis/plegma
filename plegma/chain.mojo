@@ -121,25 +121,43 @@ struct Chain(Movable):
 def chain(anchors: List[Anchor], ref_len: Int, query_len: Int, costs: ChainCosts) -> Chain:
     """The best chain from the start of both sequences to their ends through `anchors` (in query order, as
     `find_anchors` gives them). Of equal chains, the one taking the earliest predecessor at each anchor. Quadratic
-    in the anchors."""
+    in the anchors at worst; under ChainX-like costs each anchor looks back only as far as its best link can
+    reach."""
     var n = len(anchors)
     var start = Anchor(0, 0, 0)
     var end = Anchor(ref_len, query_len, 0)
     var score = List[Float64](length=n, fill=0.0)
     var paid = List[Float64](length=n, fill=0.0)
     var back = List[Int](length=n, fill=-1)
+    # With anchors earning nothing and indels costing at least `substitution` a letter, a link costs at least
+    # `substitution` per letter of its query gap, and every score is at most 0: predecessors further back than
+    # the best so far can pay for are never taken, and the scan back stops there.
+    var bounded = (
+        costs.gain == 0.0
+        and costs.substitution > 0.0
+        and costs.period == 0
+        and costs.open1 >= 0.0
+        and costs.open2 >= 0.0
+        and min(costs.extend1, costs.extend2) >= costs.substitution
+    )
+    var longest = 0
+    for a in anchors:
+        longest = max(longest, a.length)
     for i in range(n):
         var a = anchors[i]
         var best = costs.earns(start, a) - costs.link(start, a)
         var best_paid = costs.link(start, a)
         var from_index = -1
-        for j in range(i):
+        # Back from the nearest, the earliest of equal predecessors kept (and the start before any of them).
+        for j in reversed(range(i)):
             var b = anchors[j]
+            if bounded and costs.substitution * Float64(a.query_pos - b.query_pos - longest) > -best:
+                break
             if not costs.precedes(b, a):
                 continue
             var link = costs.link(b, a)
             var value = score[j] + costs.earns(b, a) - link
-            if value > best:
+            if value > best or (value == best and from_index >= 0):
                 best = value
                 best_paid = paid[j] + link
                 from_index = j
