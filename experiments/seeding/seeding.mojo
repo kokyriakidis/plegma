@@ -298,8 +298,8 @@ def main() raises:
                 largest = max(largest, gap.size())
                 if gap.ref_end > gap.ref_start or gap.query_end > gap.query_start:
                     var found = aligner.align(
-                        String(a_text[byte = gap.ref_start : gap.ref_end]),
-                        String(b_text[byte = gap.query_start : gap.query_end]),
+                        Span(a)[gap.ref_start : gap.ref_end],
+                        Span(b)[gap.query_start : gap.query_end],
                         costs,
                         Mode.GLOBAL,
                         ties=Ties.LEFT,

@@ -35,10 +35,6 @@ struct Anchored(Movable):
             self.counts.append(count)
 
 
-def _text(bytes: ImmSpan[UInt8, _]) -> String:
-    return String(unsafe_from_utf8=List[UInt8](bytes))
-
-
 def anchored_alignment(
     mut aligner: Aligner,
     partner: ImmSpan[UInt8, _],
@@ -60,8 +56,8 @@ def anchored_alignment(
         var query_len = window.query_end - window.query_start
         if ref_len + query_len > 0:
             var found = aligner.align(
-                _text(partner[window.ref_start : window.ref_end]),
-                _text(query[window.query_start : window.query_end]),
+                partner[window.ref_start : window.ref_end],
+                query[window.query_start : window.query_end],
                 costs,
                 Mode.GLOBAL,
                 ties=Ties.LEFT,
@@ -114,8 +110,8 @@ def graph_alignment(
                     aligned[window.query_start + j] = nodes[j]
             else:
                 var along = aligner.align(
-                    _text(partner[window.ref_start : window.ref_end]),
-                    _text(query[window.query_start : window.query_end]),
+                    partner[window.ref_start : window.ref_end],
+                    query[window.query_start : window.query_end],
                     Costs.affine(Int(costs.mismatch), Int(costs.open), Int(costs.extend)),
                     Mode.GLOBAL,
                     ties=Ties.LEFT,

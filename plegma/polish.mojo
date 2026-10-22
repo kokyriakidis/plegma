@@ -52,10 +52,6 @@ def _code(letter: UInt8) -> Int:
     return 4
 
 
-def _text(bytes: ImmSpan[UInt8, _]) -> String:
-    return String(unsafe_from_utf8=List[UInt8](bytes))
-
-
 struct _Paths(Movable):
     """Every sequence's alignment to the consensus: at consensus boundary i (before letter i), sequence k's path
     enters at read offset `enter[k * stride + i]` and leaves at `leave[k * stride + i]`, the letters between
@@ -87,10 +83,9 @@ struct _Paths(Movable):
         for i in range(self.stride):
             self.discord[i] = 0
         self.total = 0
-        var reference = _text(Span(consensus))
         for k in range(count):
             ref seq = sequences[members[k]]
-            var found = aligner.align(reference, _text(Span(seq)), Costs.edit(), Mode.GLOBAL, ties=Ties.LEFT)
+            var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), Mode.GLOBAL, ties=Ties.LEFT)
             self.total += found.cost
             var runs = cigar_runs(found.cigar)
             var base = k * self.stride
