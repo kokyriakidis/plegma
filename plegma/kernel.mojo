@@ -284,9 +284,9 @@ def align_between(
         var row = pool[slot].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
         _fill(row, 3 * span)
         var multi = len(preds) > 1
-        aux.resize(unsafe_uninit_length=5 * span)
+        aux.resize(unsafe_uninit_length=10 * span)
         var flags = aux.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
-        _zero(flags, 5 * span)
+        _zero(flags, (5 if multi else 2) * span)
         var h = row
         var d1 = row.unsafe_offset(span)
         var d2 = row.unsafe_offset(2 * span)
@@ -377,64 +377,128 @@ def align_between(
                     pick_h[unsafe_offset=at] = Int32(k)
                 j += 1
 
-        # Gaps along the query, left to right: each cell's score, its traceback byte, the row's best cells.
-        var tbase = len(trace)
-        trace_at[r] = tbase
-        trace.resize(unsafe_uninit_length=tbase + span)
-        var bytes = trace.unsafe_ptr().unsafe_offset(tbase)
-        var row_best = _NEG
-        var row_left = low
-        var row_right = low
+        # The best of the diagonal and the deletions, and where it came from.
+        var source_of = flags.unsafe_offset(5 * span)
+        var f1 = flags.unsafe_offset(6 * span)
+        var f2 = flags.unsafe_offset(7 * span)
+        var f1x = flags.unsafe_offset(8 * span)
+        var f2x = flags.unsafe_offset(9 * span)
+        var at = 0
+        while at < span:
+            if at + _V <= span:
+                var value = h.unsafe_load[width=_V](at)
+                var source = _I(0)
+                var deleted1 = d1.unsafe_load[width=_V](at)
+                var take1 = deleted1.gt(value)
+                value = take1.select(deleted1, value)
+                source = take1.select(_I(Int32(_DELETION1)), source)
+                if convex:
+                    var deleted2 = d2.unsafe_load[width=_V](at)
+                    var take2 = deleted2.gt(value)
+                    value = take2.select(deleted2, value)
+                    source = take2.select(_I(Int32(_DELETION2)), source)
+                h.unsafe_store(at, value)
+                source_of.unsafe_store(at, source)
+                at += _V
+                continue
+            var value = h[unsafe_offset=at]
+            var source = Int32(0)
+            if d1[unsafe_offset=at] > value:
+                value = d1[unsafe_offset=at]
+                source = Int32(_DELETION1)
+            if convex and d2[unsafe_offset=at] > value:
+                value = d2[unsafe_offset=at]
+                source = Int32(_DELETION2)
+            h[unsafe_offset=at] = value
+            source_of[unsafe_offset=at] = source
+            at += 1
+        # Gaps along the query, left to right, from those scores: a gap opened after another never beats one
+        # longer gap (with E1 >= E2), so the insertion states need not see each other.
         var run1 = _NEG
         var run2 = _NEG
-        var previous = _NEG
-        for at in range(span):
-            var value = h[unsafe_offset=at]
-            var source = _DIAGONAL
-            var deleted1 = d1[unsafe_offset=at]
-            if deleted1 > value:
-                value = deleted1
-                source = _DELETION1
+        f1[0] = _NEG
+        f2[0] = _NEG
+        f1x[0] = 0
+        f2x[0] = 0
+        for k in range(1, span):
+            var previous = h[unsafe_offset=k - 1]
+            var open1 = previous - gap1
+            var extend1 = run1 - e1
+            run1 = max(open1, extend1)
+            f1[unsafe_offset=k] = run1
+            f1x[unsafe_offset=k] = Int32(1) if extend1 > open1 else Int32(0)
             if convex:
-                var deleted2 = d2[unsafe_offset=at]
-                if deleted2 > value:
-                    value = deleted2
-                    source = _DELETION2
-            var byte = UInt8(0)
-            if x1[unsafe_offset=at] != 0:
-                byte |= _D1_EXTENDS
-            if x2[unsafe_offset=at] != 0:
-                byte |= _D2_EXTENDS
-            if at > 0:
-                var open1 = previous - gap1
-                var extend1 = run1 - e1
-                run1 = max(open1, extend1)
-                if extend1 > open1:
-                    byte |= _F1_EXTENDS
-                if run1 > value:
-                    value = run1
-                    source = _INSERTION1
-                if convex:
-                    var open2 = previous - gap2
-                    var extend2 = run2 - e2
-                    run2 = max(open2, extend2)
-                    if extend2 > open2:
-                        byte |= _F2_EXTENDS
-                    if run2 > value:
-                        value = run2
-                        source = _INSERTION2
+                var open2 = previous - gap2
+                var extend2 = run2 - e2
+                run2 = max(open2, extend2)
+                f2[unsafe_offset=k] = run2
+                f2x[unsafe_offset=k] = Int32(1) if extend2 > open2 else Int32(0)
+        if not convex:
+            _fill(f2, span)
+            _zero(f2x, span)
+        # Each cell's score, its traceback byte, the row's best.
+        var tbase = len(trace)
+        trace_at[r] = tbase
+        trace.resize(unsafe_uninit_length=tbase + span + _V)
+        var bytes = trace.unsafe_ptr().unsafe_offset(tbase)
+        var best_lanes = _I(_NEG)
+        at = 0
+        while at + _V <= span:
+            var value = h.unsafe_load[width=_V](at)
+            var source = source_of.unsafe_load[width=_V](at)
+            var inserted1 = f1.unsafe_load[width=_V](at)
+            var take1 = inserted1.gt(value)
+            value = take1.select(inserted1, value)
+            source = take1.select(_I(Int32(_INSERTION1)), source)
+            var inserted2 = f2.unsafe_load[width=_V](at)
+            var take2 = inserted2.gt(value)
+            value = take2.select(inserted2, value)
+            source = take2.select(_I(Int32(_INSERTION2)), source)
+            if local:
+                var below = value.lt(_I(0))
+                value = below.select(_I(0), value)
+                source = below.select(_I(Int32(_START)), source)
+            var byte = (
+                source
+                | (x1.unsafe_load[width=_V](at) << 3)
+                | (x2.unsafe_load[width=_V](at) << 4)
+                | (f1x.unsafe_load[width=_V](at) << 5)
+                | (f2x.unsafe_load[width=_V](at) << 6)
+            )
+            h.unsafe_store(at, value)
+            bytes.unsafe_store(at, byte.cast[DType.uint8]())
+            best_lanes = max(best_lanes, value)
+            at += _V
+        var row_best = best_lanes.reduce_max()
+        while at < span:
+            var value = h[unsafe_offset=at]
+            var source = source_of[unsafe_offset=at]
+            if f1[unsafe_offset=at] > value:
+                value = f1[unsafe_offset=at]
+                source = Int32(_INSERTION1)
+            if f2[unsafe_offset=at] > value:
+                value = f2[unsafe_offset=at]
+                source = Int32(_INSERTION2)
             if local and value < 0:
                 value = 0
-                source = _START
+                source = Int32(_START)
             h[unsafe_offset=at] = value
-            bytes[unsafe_offset=at] = byte | source
-            previous = value
-            if value > row_best:
-                row_best = value
-                row_left = low + at
-                row_right = low + at
-            elif value == row_best:
-                row_right = low + at
+            bytes[unsafe_offset=at] = UInt8(
+                source
+                | (x1[unsafe_offset=at] << 3)
+                | (x2[unsafe_offset=at] << 4)
+                | (f1x[unsafe_offset=at] << 5)
+                | (f2x[unsafe_offset=at] << 6)
+            )
+            row_best = max(row_best, value)
+            at += 1
+        trace.resize(unsafe_uninit_length=tbase + span)
+        var row_left = low
+        while h[unsafe_offset=row_left - low] != row_best:
+            row_left += 1
+        var row_right = high
+        while h[unsafe_offset=row_right - low] != row_best:
+            row_right -= 1
         left_best[r] = row_left
         right_best[r] = row_right
         if multi:
