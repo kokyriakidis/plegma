@@ -8,9 +8,10 @@ each sequence is woven into. The goal is to be the fastest POA aligner by a wide
 *πλέγμα* (plegma) is Greek for a woven mesh or lattice, and is what a POA graph is: sequences threaded into one
 another where they agree.
 
-Status: early. The package holds the pairwise layer: anchors from sporos, optimal chaining, and backbones that
-recurse into the gaps they leave, for karan to fill (`docs/design.md`; experiments in `experiments/`). The graph,
-the POA and the command-line tool come next.
+Status: early. `build/plegma` (`pixi run build-cli`) runs a POA of one FASTA/FASTQ file with abPOA's flags and
+outputs (consensus, MSA, GFA), in abPOA's global, local and extension modes, under its adaptive band; memory
+follows the band rather than the graph times the sequence. The package also holds the pairwise layer (sporos
+anchors, optimal chaining, recursive backbones; `docs/design.md`, `experiments/`).
 
 ## Building
 

@@ -27,10 +27,13 @@ build-test-alphabet = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I t
 build-test-deps = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_deps.mojo -o build/test_deps", depends-on = ["prepare"] }
 build-test-chain = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_chain.mojo -o build/test_chain", depends-on = ["prepare"] }
 build-test-graph = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_graph.mojo -o build/test_graph", depends-on = ["prepare"] }
-test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_chain && ./build/test_graph", depends-on = ["build-test-alphabet", "build-test-deps", "build-test-chain", "build-test-graph"] }
+build-test-kernel = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_kernel.mojo -o build/test_kernel", depends-on = ["prepare"] }
+test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_chain && ./build/test_graph && ./build/test_kernel", depends-on = ["build-test-alphabet", "build-test-deps", "build-test-chain", "build-test-graph", "build-test-kernel"] }
 # The pairwise experiments E1-E5 (experiments/pairwise): `pixi run pairwise-run <vntr-eval>/regions <out dir> [jobs]`.
+# The command line, abPOA's flags: `pixi run build-cli`, then `build/plegma -h`.
+build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan cli/plegma_cli.mojo -o build/plegma", depends-on = ["prepare"] }
 build-progressive = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/progressive/progressive.mojo -o build/progressive", depends-on = ["prepare"] }
 build-pairwise = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/pairwise/pairwise.mojo -o build/pairwise", depends-on = ["prepare"] }
-format = "mojo format -l 120 plegma tests experiments"
+format = "mojo format -l 120 plegma tests experiments cli"
 # Pulls the latest Mojo skills from github.com/modular/skills into .claude/skills for coding agents.
 sync-skills = "bash .claude/sync-skills.sh"

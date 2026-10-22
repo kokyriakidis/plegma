@@ -89,6 +89,10 @@ def test_window_on_one_path_matches_karan() raises:
             var ro = _order(graph)
             var found = align_window(graph, ro[0], ro[1], SOURCE, SINK, b.as_bytes(), GapAffine(4, 6, 2), 1 << 30)
             assert_equal(found.value().cost, distance(a, b, Costs.affine(4, 6, 2)))
+            var convex = align_window(
+                graph, ro[0], ro[1], SOURCE, SINK, b.as_bytes(), GapAffine(4, 6, 2, 24, 1), 1 << 30
+            )
+            assert_equal(convex.value().cost, distance(a, b, Costs.two_piece(4, 6, 2, 24, 1)))
             # Through the window's own nodes: the same alignment between the first and last letters.
             if a.byte_length() > 2 and b.byte_length() > 2:
                 var path = graph.paths[0].copy()

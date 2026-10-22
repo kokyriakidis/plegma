@@ -86,6 +86,7 @@ def graph_alignment(
     costs: GapAffine,
     max_cells: Int,
     stay: Bool = False,
+    budget: Int = 0,
 ) raises -> List[Int]:
     """For each letter of `query`, the graph node it aligns to (-1: inserted): the backbone against path
     `partner_path` (whose sequence is `partner`) pins its anchors to that path's nodes, and each window between
@@ -96,7 +97,7 @@ def graph_alignment(
     var order = List[Int](length=len(rank), fill=0)
     for node in range(len(rank)):
         order[rank[node]] = node
-    var anchors = backbone(partner, query, levels, chain_costs, 0, stay)
+    var anchors = backbone(partner, query, levels, chain_costs, budget, stay)
     var gaps = windows(anchors, len(partner), len(query))
     var aligned = List[Int](length=len(query), fill=-1)
     for w in range(len(gaps)):

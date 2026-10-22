@@ -19,6 +19,10 @@ is implementation and may change.
   `msa`), `cigar_runs` -> `Runs`; windows aligned to it between two nodes,
   `align_window` -> `WindowAlignment` under `GapAffine`, and a whole sequence
   through a backbone, `graph_alignment`.
+- Whole-graph alignment (abPOA's modes, scoring and adaptive band, memory
+  following the band): `align_to_graph` -> `GraphAlignment` under `Scoring`
+  (`GLOBAL`, `LOCAL`, `EXTENSION`), over a `Topology`; consensus by
+  `Graph.heaviest_path`.
 """
 
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
@@ -27,4 +31,5 @@ from .anchors import Anchor, find_anchors, mums, rare, rare_or_maximal, smems
 from .backbone import ALL, Level, MUMS, RARE, RARE_OR_MAXIMAL, REFERENCE_UNIQUE, SMEMS, Window, backbone, windows
 from .chain import Chain, ChainCosts, chain, linked_cost, without_overlaps
 from .graph import Graph, Runs, cigar_runs
+from .kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, align_to_graph
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window

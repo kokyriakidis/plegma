@@ -161,6 +161,82 @@ struct Graph(Movable, Sized):
             raise Error(t"the nodes form a cycle: {count - next} of {count} unplaced")
         return rank^
 
+    @staticmethod
+    def from_msa(names: List[String], rows: List[String], skip: Int = -1) -> Graph:
+        """The graph of an MSA's rows (all but row `skip`): in each column, one node per letter there, the rows'
+        paths through them."""
+        var graph = Graph()
+        if len(rows) == 0:
+            return graph^
+        var width = rows[0].byte_length()
+        var at = List[Int](length=256, fill=-1)
+        for c in range(width):
+            var column = len(graph.members)
+            graph.members.append(List[Int]())
+            for b in range(256):
+                at[b] = -1
+            for r in range(len(rows)):
+                if r == skip:
+                    continue
+                var letter = rows[r].as_bytes()[c]
+                if letter != GAP and at[Int(letter)] < 0:
+                    at[Int(letter)] = graph._node(letter, column)
+        for r in range(len(rows)):
+            if r == skip:
+                continue
+            var path = List[Int]()
+            var bytes = rows[r].as_bytes()
+            for c in range(width):
+                if bytes[c] == GAP:
+                    continue
+                var landed = -1
+                for m in graph.members[c]:
+                    if graph.bases[m] == bytes[c]:
+                        landed = m
+                graph._on_path(path, landed)
+            graph.paths.append(path^)
+            graph.names.append(names[r])
+        return graph^
+
+    def heaviest_path(self, order: List[Int]) -> List[Int]:
+        """abPOA's heaviest bundle: from a virtual source to a virtual sink, each node followed by its heaviest
+        out-edge, the sink's edge weighing the paths that end there (so the consensus stops where most sequences
+        do), ties to the heavier rest of the path. `order` holds the nodes in topological order."""
+        var count = len(self.bases)
+        var starts = List[Int](length=count, fill=0)
+        var ends = List[Int](length=count, fill=0)
+        for path in self.paths:
+            if len(path) > 0:
+                starts[path[0]] += 1
+                ends[path[len(path) - 1]] += 1
+        var score = List[Int](length=count, fill=0)
+        var next = List[Int](length=count, fill=-1)
+        for k in reversed(range(len(order))):
+            var node = order[k]
+            var best_weight = ends[node] if ends[node] > 0 else -1
+            var best_score = 0
+            var choice = -1
+            for i in range(len(self.successors[node])):
+                var s = self.successors[node][i]
+                var weight = self.weights[node][i]
+                if weight > best_weight or (weight == best_weight and score[s] >= best_score):
+                    best_weight = weight
+                    best_score = score[s]
+                    choice = s
+            next[node] = choice
+            score[node] = max(best_weight, 0) + (score[choice] if choice >= 0 else 0)
+        var at = -1
+        for node in order:
+            if starts[node] > 0 and (
+                at < 0 or starts[node] > starts[at] or (starts[node] == starts[at] and score[node] > score[at])
+            ):
+                at = node
+        var path = List[Int]()
+        while at >= 0:
+            path.append(at)
+            at = next[at]
+        return path^
+
     def column_order(self) raises -> List[Int]:
         """Each column's place left to right: a topological order of the columns (Kahn's)."""
         var count = len(self.members)

@@ -1,16 +1,21 @@
 """E6 start: a progressive POA of one region, every sequence anchored to and aligned with one partner path.
 
-usage: progressive <in.fa> <out.msa.fa> <config> <order> <costs> <partner> [path|graph]
+usage: progressive <in.fa> <out.msa.fa> <config> <order> <costs> <partner> [path|graph] [refinement rounds]
 
 The distinct sequences join longest first (`longest`) or in file order (`given`). Each is anchored against a
 partner path, aligned to it through its backbone and fused into the graph along it. The partner is the first
 sequence (`first`, a star) or the path already in the graph nearest to it in edit distance (`nearest`).
 Every record of the input gets its sequence's row, so duplicates share one.
-- `<config>`: `none` (karan end to end, no anchors) or `mums` (MUMs of 20 letters, ChainX costs, recursing
-  until no MUM is left).
+- `<config>`, the backbone: `none` (no anchors); `mum100` (MUMs of 100 letters, unanchored letters charged
+  0.05 in the chain); `mum20` (MUMs of 20, 0.1); `combo` (MUMs, rare MEMs and SMEMs of 51, 31, 21 then 15
+  letters, seeded again inside every subregion over 500 letters, 0.1); `combo0` (the same down to every
+  subregion).
 - `<costs>`: karan's costs in the windows: `edit`, `affine` (4, 6, 2) or `convex` (4, 6, 2, 24, 1).
+- With refinement rounds (graph fill only), each sequence in turn is taken out (the graph rebuilt from the MSA's
+  other rows) and aligned again to the rest, its nearest other sequence the partner.
 - `path` (the default) aligns each window to the partner path with karan; `graph` aligns it to the graph between
-  the anchors' nodes (gap-affine 4, 6, 2), to the path only past 2e8 cells.
+  the anchors' nodes (gap-affine 4, 6, 2, or with `convex` costs 4, 6, 2, 24, 1), to the path only past 2e8
+  cells.
 """
 
 from std.collections import Dict
@@ -22,7 +27,7 @@ from sporos import read_fasta
 
 from plegma.align import anchored_alignment, graph_alignment
 from plegma.poa import GapAffine
-from plegma.backbone import Level, MUMS
+from plegma.backbone import Level, MUMS, RARE_OR_MAXIMAL
 from plegma.chain import ChainCosts
 from plegma.graph import Graph
 
@@ -45,11 +50,23 @@ def main() raises:
     elif cost_name != "edit":
         raise Error(t"unknown costs {cost_name}")
     var fill = String(args[7]) if len(args) > 7 else String("path")
+    var rounds = Int(args[8]) if len(args) > 8 else 0
     if partner_rule != "first" and partner_rule != "nearest":
         raise Error(t"unknown partner rule {partner_rule}")
     var levels = List[Level]()
-    if config == "mums":
+    var chain_costs = ChainCosts(substitution=0.1)
+    var stay = False
+    var budget = 0
+    if config == "mum100":
+        levels.append(Level(MUMS, 100))
+        chain_costs = ChainCosts(substitution=0.05)
+    elif config == "mum20":
         levels.append(Level(MUMS, 20))
+    elif config == "combo" or config == "combo0":
+        for n in [51, 31, 21, 15]:
+            levels.append(Level(RARE_OR_MAXIMAL, n, 8))
+        stay = True
+        budget = 500 if config == "combo" else 0
     elif config != "none":
         raise Error(t"unknown config {config}")
     var records = read_fasta(String(args[1]))
@@ -102,24 +119,74 @@ def main() raises:
                 records.seq(firsts[partner]),
                 records.seq(i),
                 levels,
-                ChainCosts.chainx(),
-                GapAffine(4, 6, 2),
+                chain_costs,
+                GapAffine(4, 6, 2, 24, 1) if cost_name == "convex" else GapAffine(4, 6, 2),
                 200_000_000,
-                stay=True,
+                stay=stay,
+                budget=budget,
             )
             path_of[d] = graph.fuse_nodes(name, records.seq(i), aligned)
             continue
         var found = anchored_alignment(
-            aligner, records.seq(firsts[partner]), records.seq(i), levels, ChainCosts.chainx(), costs, stay=True
+            aligner, records.seq(firsts[partner]), records.seq(i), levels, chain_costs, costs, budget, stay
         )
         total += found.cost
         path_of[d] = graph.fuse(name, records.seq(i), path_of[partner], found.ops, found.counts)
-    var rows = graph.msa()
+    var msa = graph.msa()
+    var rows = List[String]()
+    var names = List[String]()
+    for d in range(len(firsts)):
+        rows.append(msa[path_of[d]])
+        names.append(records.names[firsts[d]])
+    if rounds > 0 and fill == "graph":
+        # Each sequence's nearest other one, the partner it is realigned against.
+        var nearest = List[Int](length=len(firsts), fill=-1)
+        for d in range(len(firsts)):
+            var best = Int.MAX
+            for e in range(len(firsts)):
+                if e == d:
+                    continue
+                var near = aligner.distance(texts[e], texts[d], max_cost=best - 1) if best < Int.MAX else Optional(
+                    aligner.distance(texts[e], texts[d])
+                )
+                if near:
+                    best = near.value()
+                    nearest[d] = e
+        for _ in range(rounds):
+            for k in range(len(ranked)):
+                var d = ranked[k]
+                if nearest[d] < 0:
+                    continue
+                var rest = Graph.from_msa(names, rows, skip=d)
+                var partner_path = nearest[d] if nearest[d] < d else nearest[d] - 1
+                var aligned = graph_alignment(
+                    aligner,
+                    rest,
+                    partner_path,
+                    records.seq(firsts[nearest[d]]),
+                    records.seq(firsts[d]),
+                    levels,
+                    chain_costs,
+                    GapAffine(4, 6, 2, 24, 1) if cost_name == "convex" else GapAffine(4, 6, 2),
+                    200_000_000,
+                    stay=stay,
+                    budget=budget,
+                )
+                var name = names[d]
+                _ = rest.fuse_nodes(name, records.seq(firsts[d]), aligned)
+                var again = rest.msa()
+                var at = 0
+                for e in range(len(firsts)):
+                    if e == d:
+                        rows[e] = again[len(again) - 1]
+                    else:
+                        rows[e] = again[at]
+                        at += 1
     var out = open(String(args[2]), "w")
     for i in range(len(records)):
-        out.write(">", records.names[i], "\n", rows[path_of[row_of[i]]], "\n")
+        out.write(">", records.names[i], "\n", rows[row_of[i]], "\n")
     out.close()
     var seconds = Float64(perf_counter_ns() - t0) / 1e9
     print(
-        t"{args[1]}\t{config}\t{order}\t{cost_name}\t{partner_rule}\t{fill}\t{len(firsts)}\t{len(graph)}\t{rows[0].byte_length()}\t{total}\t{seconds}"
+        t"{args[1]}\t{config}\t{order}\t{cost_name}\t{partner_rule}\t{fill}\t{rounds}\t{len(firsts)}\t{len(graph)}\t{rows[0].byte_length()}\t{total}\t{seconds}"
     )
