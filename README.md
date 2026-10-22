@@ -13,9 +13,12 @@ next.
 
 ## Building
 
-plegma builds with [pixi](https://pixi.sh), which fetches the pinned Mojo nightly:
+plegma builds with [pixi](https://pixi.sh), which fetches the pinned Mojo nightly. Its seeds come from
+[sporos](https://github.com/kokyriakidis/sporos) and its pairwise alignment from
+[karan](https://github.com/kokyriakidis/karan), both git submodules:
 
 ```sh
+git clone --recurse-submodules https://github.com/kokyriakidis/plegma
 pixi run test     # build and run the tests
 pixi run build    # precompile the package to build/plegma.mojoc
 pixi run format   # mojo format, 120 columns

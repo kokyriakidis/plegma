@@ -1,0 +1,6 @@
+[submodule "deps/sporos"]
+	path = deps/sporos
+	url = https://github.com/kokyriakidis/sporos.git
+[submodule "deps/karan"]
+	path = deps/karan
+	url = https://github.com/kokyriakidis/karan.git

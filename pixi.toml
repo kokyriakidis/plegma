@@ -12,13 +12,20 @@ license-file = "LICENSE"
 [dependencies]
 # Pinned: nightlies change the language from day to day. Move it on purpose, rebuild and test.
 mojo = "==1.2.0.dev2026102005"
+# karan's GPU paths import max.gpu and max.algorithm; the max nightly of the same day.
+max = "==26.7.0.dev2026102005"
+# sporos: libdeflate reads gzip/BGZF, libsais builds its FM-index (dlopen).
+libdeflate = ">=1.26,<2"
+libsais = ">=2.12,<3"
 
 [tasks]
 # `mojo build -o` writes into a directory but will not create one.
 prepare = "mkdir -p build"
-build = { cmd = "mojo precompile plegma -o build/plegma.mojoc", depends-on = ["prepare"] }
-build-test-alphabet = { cmd = "mojo build -I . -I tests tests/test_alphabet.mojo -o build/test_alphabet", depends-on = ["prepare"] }
-test = { cmd = "./build/test_alphabet", depends-on = ["build-test-alphabet"] }
+# The submodules deps/sporos (seeds: MUMs, SMEMs) and deps/karan (pairwise alignment) are on every include path.
+build = { cmd = "mojo precompile -I deps/sporos -I deps/karan plegma -o build/plegma.mojoc", depends-on = ["prepare"] }
+build-test-alphabet = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_alphabet.mojo -o build/test_alphabet", depends-on = ["prepare"] }
+build-test-deps = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_deps.mojo -o build/test_deps", depends-on = ["prepare"] }
+test = { cmd = "./build/test_alphabet && ./build/test_deps", depends-on = ["build-test-alphabet", "build-test-deps"] }
 format = "mojo format -l 120 plegma tests"
 # Pulls the latest Mojo skills from github.com/modular/skills into .claude/skills for coding agents.
 sync-skills = "bash .claude/sync-skills.sh"

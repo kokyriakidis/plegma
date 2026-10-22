@@ -1,7 +1,20 @@
 # plegma
 
-Fast partial order alignment (POA) of DNA in Mojo: multiple sequence alignment and consensus. DNA only. The goal
-is to be the fastest POA aligner by a wide margin; rivals are abPOA, SPOA, POASTA and Theseus (Marco-Sola-Lab/theseus-lib).
+Partial order alignment (POA) of DNA in Mojo: multiple sequence alignment and consensus. DNA only. The goal is to be
+the fastest, the leanest in memory and the most accurate POA aligner; rivals are abPOA, SPOA, POASTA and Theseus
+(Marco-Sola-Lab/theseus-lib). The first job is re-aligning the VNTRs the HPRC Minigraph-Cactus graph aligns wrongly
+(test regions and scoring: github.com/benedictpaten/vntr-eval; the realignment pipeline it feeds, and plegma's closest
+rival there: github.com/benedictpaten/pgrealign).
+
+The design: sequences join the graph one at a time, each anchored pairwise against it. sporos's MUMs, else its biggest
+SMEMs, are chained into an optimal backbone, recursing inside each gap for anchors again; only then are the gaps filled
+with karan's banded alignment and the result fused into the graph. No k-mer seeds and no multi-MUMs.
+
+## Dependencies
+
+`deps/sporos` (seeds: MUMs, SMEMs, FM-index) and `deps/karan` (exact pairwise alignment) are git submodules of the
+user's own libraries; every build puts both on the include path. Change them where plegma needs it: commit and push in
+the library first (its own tests passing), then move the submodule here. All three pin the same Mojo nightly.
 
 ## Mojo skills
 
@@ -21,10 +34,10 @@ habits:
 
 - The public API is what `plegma/__init__.mojo` exports; keep its docstring and the README in step when adding or
   renaming anything public.
-- Build and test on xaros: `rsync -az --exclude .pixi --exclude build --exclude .git ~/plegma/
-  xaros.tail2f508.ts.net:plegma/`, then `~/.pixi/bin/pixi run test` there. Format there with `pixi run format`
+- Build and test on xaros: `rsync -az --delete --exclude .pixi --exclude build --exclude .git ~/plegma/
+  xaros.tail2f508.ts.net:plegma/` (this carries the submodules' files), then `~/.pixi/bin/pixi run test` there. Format there with `pixi run format`
   (120 columns) and rsync the `.mojo` files back.
-- Toolchain: one Mojo nightly, pinned exactly in `pixi.toml` (1.2.0.dev2026102005, the same as sporos). Move it on
+- Toolchain: one Mojo nightly, pinned exactly in `pixi.toml` with its `max` (1.2.0.dev2026102005, the same as sporos and karan). Move it on
   purpose: change the pin, `pixi lock`, build and test on xaros.
 - `plegma/alphabet.mojo` started as a copy of sporos's; the two may drift.
 - Benchmark with min-of-N timings; other jobs share the machine.
