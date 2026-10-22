@@ -12,7 +12,8 @@ Status: early. `build/plegma` (`pixi run build-cli`) runs a POA of one FASTA/FAS
 outputs (consensus, MSA, GFA), in abPOA's global, local and extension modes, under its adaptive band; memory
 follows the band rather than the graph times the sequence. In global mode the consensus is then polished
 (`-P`): one-letter and whole-repeat-unit edits are kept while they lower the sequences' summed edit distance to
-it, which mends most of the errors a POA consensus makes in tandem repeats and short runs. The package also holds the pairwise layer (sporos
+it, then while they raise the sequences' likelihood under a pair HMM, which mends most of the errors a POA
+consensus makes in tandem repeats and short runs. The package also holds the pairwise layer (sporos
 anchors, optimal chaining, recursive backbones; `docs/design.md`, `experiments/`).
 
 ## Building

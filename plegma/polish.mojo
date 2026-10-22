@@ -16,6 +16,8 @@ best alone inside a tandem repeat, where one edit gains alike at every copy. Rou
 segments the last round changed, until none gains.
 """
 
+from std.math import log
+
 from karan import Aligner, Costs, Mode, Ties
 
 from .backbone import RepeatMask
@@ -63,6 +65,13 @@ struct _Paths(Movable):
     """Per consensus boundary i: how many sequences insert before letter i, or delete or substitute it."""
     var total: Int
     var stride: Int
+    var matched: Int
+    var substituted: Int
+    var inserted: Int
+    var deleted: Int
+    """The alignments' letters of each kind, summed over the sequences."""
+    var copying: Int
+    """Inserted letters the same as a consensus letter beside them."""
 
     def __init__(out self):
         self.enter = List[Int32]()
@@ -70,6 +79,11 @@ struct _Paths(Movable):
         self.discord = List[Int32]()
         self.total = 0
         self.stride = 0
+        self.matched = 0
+        self.substituted = 0
+        self.inserted = 0
+        self.deleted = 0
+        self.copying = 0
 
     def fill(
         mut self, mut aligner: Aligner, consensus: List[UInt8], sequences: List[List[UInt8]], members: List[Int]
@@ -83,6 +97,11 @@ struct _Paths(Movable):
         for i in range(self.stride):
             self.discord[i] = 0
         self.total = 0
+        self.matched = 0
+        self.substituted = 0
+        self.inserted = 0
+        self.deleted = 0
+        self.copying = 0
         for k in range(count):
             ref seq = sequences[members[k]]
             var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), Mode.GLOBAL, ties=Ties.LEFT)
@@ -94,8 +113,18 @@ struct _Paths(Movable):
             self.enter[base] = 0
             for r in range(len(runs.ops)):
                 var op = runs.ops[r]
+                if op == INSERTION:
+                    self.inserted += runs.counts[r]
+                elif op == DELETION:
+                    self.deleted += runs.counts[r]
+                elif op == MATCH:
+                    self.matched += runs.counts[r]
+                else:
+                    self.substituted += runs.counts[r]
                 for _ in range(runs.counts[r]):
                     if op == INSERTION:
+                        if (i > 0 and seq[j] == consensus[i - 1]) or (i < length and seq[j] == consensus[i]):
+                            self.copying += 1
                         self.discord[i] += 1
                         j += 1
                         continue
@@ -139,6 +168,13 @@ struct _Bands(Movable):
         """Column c's cell at read offset j, INF outside the band."""
         if j < self.low[c] or j > self.high[c]:
             return INF
+        return matrix[self.start[c] + j - self.low[c]]
+
+    @always_inline
+    def at_float(self, matrix: List[Float64], c: Int, j: Int) -> Float64:
+        """Column c's probability at read offset j, 0 outside the band."""
+        if j < self.low[c] or j > self.high[c]:
+            return 0.0
         return matrix[self.start[c] + j - self.low[c]]
 
 
@@ -198,13 +234,15 @@ def polish(
     rounds: Int,
     support: Int = 2,
     share: Float64 = 0.5,
+    likely_rounds: Int = 20,
 ) raises -> List[UInt8]:
-    """`consensus` polished against the `members` of `sequences`, for at most `rounds` rounds: edits are tried at
-    positions where, within two letters, `support` sequences disagree with it and as many as `share` of them (the
-    reads' own errors alone rarely reach half: on real VNTR read sets, 0 to 0.7 mended the same errors)."""
+    """`consensus` polished against the `members` of `sequences`, for at most `rounds` rounds of edits scored by
+    edit distance, then at most `likely_rounds` scored by likelihood (see `_likely`): edits are tried at positions
+    where, within two letters, `support` sequences disagree with it and as many as `share` of them (the reads' own
+    errors alone rarely reach half: on real VNTR read sets, 0 to 0.7 mended the same errors)."""
     var current = consensus.copy()
     var count = len(members)
-    if count == 0 or rounds <= 0:
+    if count == 0:
         return current^
     var aligner = Aligner()
     var paths = _Paths()
@@ -470,6 +508,359 @@ def polish(
             next.append(current[q])
         previous = current^
         previous_dirty = dirty^
+        current = next^
+        dirty = List[Bool](length=len(current) + 1, fill=False)
+        for m in marks:
+            for q in range(max(0, m - 2 * SEGMENT), min(len(current) + 1, m + 2 * SEGMENT)):
+                dirty[q] = True
+    return _likely(current^, sequences, members, likely_rounds, support, share)
+
+
+comptime MAX_COPYING = 0.7
+"""Past this share of inserted letters copying a neighbour, the sequences' indels lengthen and shorten runs (as
+nanopore reads' do), which the pair HMM's uniform insertions misjudge: on such read sets its edits made the
+consensus worse, and `_likely` leaves it as it is. Uniform errors copy a neighbour some 45% of the time."""
+comptime MIN_GAIN = 0.01
+"""A likelihood edit gains at least this much (natural log, summed over the sequences)."""
+
+
+@always_inline
+def _log(x: Float64) -> Float64:
+    return log(x) if x > 0 else -1e300
+
+
+def _sites(paths: _Paths, count: Int, support: Int, share: Float64, mut site: List[Bool]):
+    """Per consensus boundary: whether, within two letters, `support` sequences disagree and `share` of them."""
+    var stride = paths.stride
+    site.resize(stride, False)
+    var needed = max(support, Int(Float64(count) * share + 0.999))
+    var near = 0
+    for i in range(min(2, stride)):
+        near += Int(paths.discord[i])
+    for i in range(stride):
+        if i + 2 < stride:
+            near += Int(paths.discord[i + 2])
+        if i - 3 >= 0:
+            near -= Int(paths.discord[i - 3])
+        site[i] = near >= needed
+
+
+def _likely(
+    var current: List[UInt8],
+    sequences: List[List[UInt8]],
+    members: List[Int],
+    rounds: Int,
+    support: Int,
+    share: Float64,
+) raises -> List[UInt8]:
+    """The edits of `polish`, scored by the sequences' summed log-likelihood instead of their edit distance.
+
+    The model, a pair HMM: before each template letter and after the last, k letters are inserted with probability
+    pi^k (1 - pi), each uniform; a template letter is deleted with probability pd, else read as itself with
+    probability 1 - ps, as each other letter ps / 3. Every alignment counts, so a read one letter short in a run of
+    L counts L ways, where its edit distance counts one; on read sets whose edit distance prefers the consensus to
+    the truth, this likelihood prefers the truth. The rates come from the sequences' alignments to the consensus,
+    every round. Each sequence's forward and backward matrices, in probability, each column rescaled, span the
+    band around its alignment that `polish`'s do, in the same segments; a segment takes its best edit alone a round
+    (gains add up only nearly within one)."""
+    var count = len(members)
+    if count == 0 or rounds <= 0 or len(current) == 0:
+        return current^
+    var aligner = Aligner()
+    var paths = _Paths()
+    var bands = _Bands()
+    var forward = List[Float64]()
+    var slotted = List[Float64]()
+    var backward = List[Float64]()
+    var forward_scale = List[Float64]()
+    var backward_scale = List[Float64]()
+    var copied = List[Float64]()
+    var ahead = List[Float64]()
+    var gains = List[Float64]()
+    var site = List[Bool]()
+    var periods = List[Int]()
+    var block_at = List[Int]()
+    var block_period = List[Int]()
+    var block_copy = List[Bool]()
+    var block_gain = List[Float64]()
+    var dirty = List[Bool](length=len(current) + 1, fill=True)
+    comptime LETTERS = "ACGT"
+    for _ in range(rounds):
+        paths.fill(aligner, current, sequences, members)
+        if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
+            break
+        var length = len(current)
+        # The model's rates, each kept within [1e-4, 0.3].
+        var letters = Float64(max(1, length * count))
+        var pd = min(0.3, max(1e-4, Float64(paths.deleted) / letters))
+        var ps = min(0.3, max(1e-4, Float64(paths.substituted) / Float64(max(1, paths.matched + paths.substituted))))
+        var per_slot = Float64(paths.inserted) / Float64((length + 1) * count)
+        var pi = min(0.3, max(1e-4, per_slot / (1.0 + per_slot)))
+        var stay = pi / 4.0
+        var leave = 1.0 - pi
+        var kept = 1.0 - pd
+        var right = 1.0 - ps
+        var wrong = ps / 3.0
+        _sites(paths, count, support, share, site)
+        var mask = RepeatMask(Span(current), REPEAT_K, REPEAT_DISTANCE)
+        var bounds = _segments(current, paths.discord, mask)
+        var edit_start = List[Int]()
+        var edit_end = List[Int]()
+        var edit_text = List[List[UInt8]]()
+        for g in range(len(bounds) - 1):
+            var s = bounds[g]
+            var e = bounds[g + 1]
+            var top = e + 1 if e == length else e
+            var any_site = False
+            var any_dirty = False
+            for i in range(s, top):
+                any_site = any_site or site[i]
+                any_dirty = any_dirty or dirty[i]
+            if not any_site or not any_dirty:
+                continue
+            gains.resize((top - s) * SLOTS, 0.0)
+            for x in range(len(gains)):
+                gains[x] = 0.0
+            block_at.clear()
+            block_period.clear()
+            block_copy.clear()
+            for i in range(s, top):
+                if site[i]:
+                    _periods(current, i, s, periods)
+                    for p in periods:
+                        for copy in range(2):
+                            block_at.append(i)
+                            block_period.append(p)
+                            block_copy.append(copy == 1)
+            block_gain.resize(len(block_at), 0.0)
+            for b in range(len(block_gain)):
+                block_gain[b] = 0.0
+            var columns = e - s + 1
+            var c_last = columns - 1
+            forward_scale.resize(columns, 0.0)
+            backward_scale.resize(columns, 0.0)
+            for k in range(count):
+                ref seq = sequences[members[k]]
+                var kb = k * paths.stride
+                var first = Int(paths.enter[kb + s])
+                var last = Int(paths.enter[kb + e]) if e < length else Int(paths.leave[kb + length])
+                bands.fill(paths, k, s, e, first, last)
+                var cells = bands.start[columns]
+                forward.resize(cells, 0.0)
+                slotted.resize(cells, 0.0)
+                backward.resize(cells, 0.0)
+                # Forward: column c holds the read's first ..< j generated by consensus s ..< s + c, before the
+                # slot at s + c; `slotted` the same after it.
+                for j in range(bands.low[0], bands.high[0] + 1):
+                    forward[j - bands.low[0]] = 1.0 if j == first else 0.0
+                forward_scale[0] = 0.0
+                for c in range(columns):
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    var h = 0.0
+                    for j in range(lo, hi + 1):
+                        h = forward[at + j - lo] + stay * h
+                        slotted[at + j - lo] = leave * h
+                    if c == c_last:
+                        break
+                    var letter = current[s + c]
+                    var nlo = bands.low[c + 1]
+                    var nhi = bands.high[c + 1]
+                    var nat = bands.start[c + 1]
+                    var most = 0.0
+                    for j in range(nlo, nhi + 1):
+                        var v = slotted[at + j - lo] * pd if j >= lo and j <= hi else 0.0
+                        if j - 1 >= lo and j - 1 <= hi:
+                            v += slotted[at + j - 1 - lo] * kept * (right if seq[j - 1] == letter else wrong)
+                        forward[nat + j - nlo] = v
+                        most = max(most, v)
+                    if most <= 0:
+                        most = 1e-300
+                    for j in range(nlo, nhi + 1):
+                        forward[nat + j - nlo] /= most
+                    forward_scale[c + 1] = forward_scale[c] + log(most)
+                # Backward: column c holds the read's j ..< last generated from the slot at s + c on.
+                var lo_last = bands.low[c_last]
+                var at_last = bands.start[c_last]
+                for j in reversed(range(lo_last, bands.high[c_last] + 1)):
+                    if e == length:
+                        backward[at_last + j - lo_last] = (
+                            leave if j == last else stay * backward[at_last + j + 1 - lo_last]
+                        )
+                    else:
+                        backward[at_last + j - lo_last] = 1.0 if j == last else 0.0
+                backward_scale[c_last] = 0.0
+                for c in reversed(range(c_last)):
+                    var letter = current[s + c]
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    var nlo = bands.low[c + 1]
+                    var nhi = bands.high[c + 1]
+                    var nat = bands.start[c + 1]
+                    var b = 0.0
+                    var most = 0.0
+                    for j in reversed(range(lo, hi + 1)):
+                        var through = pd * backward[nat + j - nlo] if j >= nlo and j <= nhi else 0.0
+                        if j < last and j + 1 >= nlo and j + 1 <= nhi:
+                            through += kept * (right if seq[j] == letter else wrong) * backward[nat + j + 1 - nlo]
+                        b = leave * through + stay * b
+                        backward[at + j - lo] = b
+                        most = max(most, b)
+                    if most <= 0:
+                        most = 1e-300
+                    for j in range(lo, hi + 1):
+                        backward[at + j - lo] /= most
+                    backward_scale[c] = backward_scale[c + 1] + log(most)
+                var base = _log(backward[bands.start[0] + first - bands.low[0]]) + backward_scale[0]
+                for c in range(columns):
+                    var i = s + c
+                    if i >= top or not site[i]:
+                        continue
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    # Delete letter i: forward before slot i against backward from slot i + 1 (the two slots one).
+                    # Substitute x: after slot i, x read as read letter j or deleted, then backward from slot i + 1.
+                    # Insert x before i: after slot i, x, then backward from slot i (a new slot after x).
+                    var deleted = 0.0
+                    var skipped = 0.0
+                    var read = 0.0
+                    var read_by = SIMD[DType.float64, 4](0)
+                    var skipped_here = 0.0
+                    var read_here = 0.0
+                    var read_here_by = SIMD[DType.float64, 4](0)
+                    for j in range(lo, hi + 1):
+                        var after = slotted[at + j - lo]
+                        var code = _code(seq[j]) if j < last else 4
+                        skipped_here += after * backward[at + j - lo]
+                        if j < last and j + 1 <= hi:
+                            var u = after * backward[at + j + 1 - lo]
+                            read_here += u
+                            if code < 4:
+                                read_here_by[code] += u
+                        if i < e:
+                            var next = bands.at_float(backward, c + 1, j)
+                            deleted += forward[at + j - lo] * next
+                            skipped += after * next
+                            if j < last:
+                                var t = after * bands.at_float(backward, c + 1, j + 1)
+                                read += t
+                                if code < 4:
+                                    read_by[code] += t
+                    var row = c * SLOTS
+                    var here = forward_scale[c] + backward_scale[c] - base
+                    for x in range(4):
+                        var p = pd * skipped_here + kept * (wrong * read_here + (right - wrong) * read_here_by[x])
+                        gains[row + x] += _log(p) + here
+                    if i < e:
+                        var onward = forward_scale[c] + backward_scale[c + 1] - base
+                        gains[row + 4] += _log(deleted) + onward
+                        for x in range(4):
+                            var p = pd * skipped + kept * (wrong * read + (right - wrong) * read_by[x])
+                            gains[row + 5 + x] += _log(p) + onward
+                # Whole units: deleted, forward before slot i - p against backward from slot i; copied, the units'
+                # letters (each with its slot after) between slot i and backward from slot i again.
+                for b in range(len(block_at)):
+                    var c = block_at[b] - s
+                    var p = block_period[b]
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    var total = 0.0
+                    var scale: Float64
+                    if not block_copy[b]:
+                        for j in range(lo, hi + 1):
+                            total += bands.at_float(forward, c - p, j) * backward[at + j - lo]
+                        scale = forward_scale[c - p] + backward_scale[c]
+                    else:
+                        var wide = min(last, hi + p)
+                        copied.resize(wide - lo + 1, 0.0)
+                        ahead.resize(wide - lo + 1, 0.0)
+                        for j in range(lo, wide + 1):
+                            copied[j - lo] = slotted[at + j - lo] if j <= hi else 0.0
+                        scale = forward_scale[c]
+                        for t in range(p):
+                            if t > 0:
+                                var h = 0.0
+                                for j in range(lo, wide + 1):
+                                    h = copied[j - lo] + stay * h
+                                    copied[j - lo] = leave * h
+                            var letter = current[s + c - p + t]
+                            var most = 0.0
+                            for j in range(lo, wide + 1):
+                                var v = copied[j - lo] * pd
+                                if j > lo:
+                                    v += copied[j - 1 - lo] * kept * (right if seq[j - 1] == letter else wrong)
+                                ahead[j - lo] = v
+                                most = max(most, v)
+                            if most <= 0:
+                                most = 1e-300
+                            for j in range(lo, wide + 1):
+                                ahead[j - lo] /= most
+                            scale += log(most)
+                            swap(copied, ahead)
+                        for j in range(lo, hi + 1):
+                            total += copied[j - lo] * backward[at + j - lo]
+                        scale += backward_scale[c]
+                    block_gain[b] += _log(total) + scale - base
+            # The segment's best edit alone.
+            var best = MIN_GAIN
+            var best_x = -1
+            for x in range(len(gains)):
+                var slot = x % SLOTS
+                # After the last letter only insertions are scored.
+                if slot >= 4 and s + x // SLOTS >= length:
+                    continue
+                if slot >= 5 and _code(current[s + x // SLOTS]) == slot - 5:
+                    continue
+                if gains[x] > best:
+                    best = gains[x]
+                    best_x = x
+            for b in range(len(block_gain)):
+                if block_gain[b] > best:
+                    best = block_gain[b]
+                    best_x = len(gains) + b
+            if best_x < 0:
+                continue
+            var text = List[UInt8]()
+            if best_x < len(gains):
+                var slot = best_x % SLOTS
+                var start = s + best_x // SLOTS
+                edit_start.append(start)
+                edit_end.append(start if slot < 4 else start + 1)
+                if slot < 4:
+                    text.append(LETTERS.as_bytes()[slot])
+                elif slot > 4:
+                    text.append(LETTERS.as_bytes()[slot - 5])
+            else:
+                var b = best_x - len(gains)
+                var i = block_at[b]
+                var p = block_period[b]
+                if block_copy[b]:
+                    edit_start.append(i)
+                    edit_end.append(i)
+                    for t in range(i - p, i):
+                        text.append(current[t])
+                else:
+                    edit_start.append(i - p)
+                    edit_end.append(i)
+            edit_text.append(text^)
+        if len(edit_start) == 0:
+            break
+        # Segments are disjoint and listed left to right, and so are their edits.
+        var next = List[UInt8](capacity=length + len(edit_start) * MAX_PERIOD)
+        var marks = List[Int]()
+        var at = 0
+        for t in range(len(edit_start)):
+            for q in range(at, edit_start[t]):
+                next.append(current[q])
+            marks.append(len(next))
+            next.extend(edit_text[t].copy())
+            at = edit_end[t]
+        for q in range(at, length):
+            next.append(current[q])
         current = next^
         dirty = List[Bool](length=len(current) + 1, fill=False)
         for m in marks:

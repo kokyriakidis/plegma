@@ -96,5 +96,25 @@ def test_polish_mends_a_tandem_repeat_consensus() raises:
     assert_true(after < before)
 
 
+def test_likelihood_alone_mends_a_letter_and_a_unit() raises:
+    seed(13)
+    var truth = _random(150)
+    for _ in range(12):
+        for c in "TGGTGA".as_bytes():
+            truth.append(c)
+    truth.extend(_random(150))
+    var reads = List[List[UInt8]]()
+    var members = List[Int]()
+    for k in range(12):
+        reads.append(_mutated(truth, 0.04))
+        members.append(k)
+    # One letter missing from the flank, one unit from the array.
+    var start = List[UInt8](truth[0:60])
+    start.extend(List[UInt8](truth[61:180]))
+    start.extend(List[UInt8](truth[186:]))
+    var polished = polish(start, reads, members, 0, likely_rounds=20)
+    assert_equal(distance(_text(polished), _text(truth)), 0)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

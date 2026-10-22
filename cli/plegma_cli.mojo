@@ -46,8 +46,9 @@ Options:
   Refinement:
     -R INT      rounds of realignment [0]: each round starts a graph from the consensus so far and aligns every
                 sequence to it again; the consensus is then the sequences' own (the backbone carries no weight)
-    -P INT      rounds of consensus polishing, at most [50] (global mode): each sequence aligned to the consensus, and
-                every one-letter edit kept that lowers their summed edit distance to it; 0 off
+    -P INT[,INT] rounds of consensus polishing, at most [50,20] (global mode): each sequence aligned to the
+                consensus, and every one-letter or whole-repeat-unit edit kept that lowers their summed edit distance
+                to it (the first), then that raises their likelihood under a pair HMM (the second); 0,0 off
   Input/Output:
     -l          the input is a list of sequence files, one per line, each aligned on its own
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
@@ -198,6 +199,7 @@ struct Options(Copyable, Movable):
     var max_consensus: Int
     var rounds: Int
     var polish_rounds: Int
+    var likely_rounds: Int
     var min_freq: Float64
     var verbose: Bool
 
@@ -221,6 +223,7 @@ struct Options(Copyable, Movable):
         self.max_consensus = 1
         self.rounds = 0
         self.polish_rounds = 50
+        self.likely_rounds = 20
         self.min_freq = 0.25
         self.verbose = False
 
@@ -360,11 +363,13 @@ def _write_steps(path: List[Int32], segment: List[Int32], heads: List[Int], mut 
         first = False
 
 
-def _polished(consensus: String, seqs: List[List[UInt8]], members: List[Int], rounds: Int) raises -> String:
+def _polished(consensus: String, seqs: List[List[UInt8]], members: List[Int], options: Options) raises -> String:
     if len(members) == 0:
         return consensus
     var letters = List[UInt8](consensus.as_bytes())
-    return String(unsafe_from_utf8=polish(letters, seqs, members, rounds))
+    return String(
+        unsafe_from_utf8=polish(letters, seqs, members, options.polish_rounds, likely_rounds=options.likely_rounds)
+    )
 
 
 def _poa(input: String, options: Options) raises -> String:
@@ -472,7 +477,7 @@ def _poa(input: String, options: Options) raises -> String:
     var consensus: String
     var consensus_path = List[Int]()
     var clusters = List[List[Int]]()
-    var polishing = options.polish_rounds > 0 and options.mode == GLOBAL
+    var polishing = (options.polish_rounds > 0 or options.likely_rounds > 0) and options.mode == GLOBAL
     if result != 1 and result != 3:
         if options.max_consensus > 1:
             clusters = cluster_rows(rows, options.max_consensus, options.min_freq)
@@ -492,7 +497,7 @@ def _poa(input: String, options: Options) raises -> String:
                     var members = List[Int]()
                     for r in range(len(seqs)):
                         members.append(r)
-                    consensus = _polished(consensus, seqs, members, options.polish_rounds)
+                    consensus = _polished(consensus, seqs, members, options)
                 text.write(">Consensus_sequence\n", consensus, "\n")
         elif result == 0 or result == 2:
             for k in range(len(clusters)):
@@ -516,7 +521,7 @@ def _poa(input: String, options: Options) raises -> String:
                     for member in clusters[k]:
                         if member >= len(shown) - len(seqs):
                             members.append(member - (len(shown) - len(seqs)))
-                    cons = _polished(cons, seqs, members, options.polish_rounds)
+                    cons = _polished(cons, seqs, members, options)
                 var ids = String()
                 for i in range(len(clusters[k])):
                     if i > 0:
@@ -624,7 +629,10 @@ def main() raises:
             options.rounds = Int(_value(args, i))
             i += 1
         elif a == "-P":
-            options.polish_rounds = Int(_value(args, i))
+            var both = _pair(_value(args, i))
+            options.polish_rounds = both[0]
+            if both[1] >= 0:
+                options.likely_rounds = both[1]
             i += 1
         elif a == "-d":
             options.max_consensus = Int(_value(args, i))
