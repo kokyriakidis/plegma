@@ -14,6 +14,7 @@ from plegma.clusters import cluster_rows
 from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
+from plegma.polish import polish
 
 
 comptime USAGE = """Usage: plegma [options] <in.fa/fq> > cons.fa/msa.fa/plegma.gfa
@@ -36,7 +37,7 @@ Options:
     -n INT      gaps of at most INT letters are not seeded again [500]
     -T INT      letters each anchor gives back to the DP at both ends [10]
     -H INT      anchors each anchor's chain search looks back over, at most [200]; 0: all
-    -M INT:INT  k:d, no anchor where one of its k-mers recurs within d letters of the path (a tandem
+    -K INT:INT  k:d, no anchor where one of its k-mers recurs within d letters of the path (a tandem
                 repeat) [12:500]; 0:0 keeps them
   Order and strand:
     -L          align the sequences longest first
@@ -45,6 +46,8 @@ Options:
   Refinement:
     -R INT      rounds of realignment [0]: each round starts a graph from the consensus so far and aligns every
                 sequence to it again; the consensus is then the sequences' own (the backbone carries no weight)
+    -P INT      rounds of consensus polishing, at most [50] (global mode): each sequence aligned to the consensus, and
+                every one-letter edit kept that lowers their summed edit distance to it; 0 off
   Input/Output:
     -l          the input is a list of sequence files, one per line, each aligned on its own
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
@@ -194,6 +197,7 @@ struct Options(Copyable, Movable):
     var consensus_rule: Int
     var max_consensus: Int
     var rounds: Int
+    var polish_rounds: Int
     var min_freq: Float64
     var verbose: Bool
 
@@ -216,6 +220,7 @@ struct Options(Copyable, Movable):
         self.consensus_rule = 0
         self.max_consensus = 1
         self.rounds = 0
+        self.polish_rounds = 50
         self.min_freq = 0.25
         self.verbose = False
 
@@ -355,6 +360,13 @@ def _write_steps(path: List[Int32], segment: List[Int32], heads: List[Int], mut 
         first = False
 
 
+def _polished(consensus: String, seqs: List[List[UInt8]], members: List[Int], rounds: Int) raises -> String:
+    if len(members) == 0:
+        return consensus
+    var letters = List[UInt8](consensus.as_bytes())
+    return String(unsafe_from_utf8=polish(letters, seqs, members, rounds))
+
+
 def _poa(input: String, options: Options) raises -> String:
     """The POA of the sequences of one file, as `options` asks for its output."""
     var t0 = perf_counter_ns()
@@ -460,6 +472,7 @@ def _poa(input: String, options: Options) raises -> String:
     var consensus: String
     var consensus_path = List[Int]()
     var clusters = List[List[Int]]()
+    var polishing = options.polish_rounds > 0 and options.mode == GLOBAL
     if result != 1 and result != 3:
         if options.max_consensus > 1:
             clusters = cluster_rows(rows, options.max_consensus, options.min_freq)
@@ -475,6 +488,11 @@ def _poa(input: String, options: Options) raises -> String:
                     letters.append(graph.bases[node])
                 consensus = String(unsafe_from_utf8=letters)
             if result == 0 or result == 2:
+                if polishing:
+                    var members = List[Int]()
+                    for r in range(len(seqs)):
+                        members.append(r)
+                    consensus = _polished(consensus, seqs, members, options.polish_rounds)
                 text.write(">Consensus_sequence\n", consensus, "\n")
         elif result == 0 or result == 2:
             for k in range(len(clusters)):
@@ -492,6 +510,13 @@ def _poa(input: String, options: Options) raises -> String:
                     for node in graph.heaviest_path_of(topology.order, paths):
                         letters.append(graph.bases[node])
                     cons = String(unsafe_from_utf8=letters)
+                if polishing:
+                    # A cluster's members past the starting MSA's rows are input records.
+                    var members = List[Int]()
+                    for member in clusters[k]:
+                        if member >= len(shown) - len(seqs):
+                            members.append(member - (len(shown) - len(seqs)))
+                    cons = _polished(cons, seqs, members, options.polish_rounds)
                 var ids = String()
                 for i in range(len(clusters[k])):
                     if i > 0:
@@ -573,7 +598,7 @@ def main() raises:
         elif a == "-T":
             options.trim = Int(_value(args, i))
             i += 1
-        elif a == "-M":
+        elif a == "-K":
             var both = _pair(_value(args, i).replace(":", ","))
             options.repeat_k = both[0]
             options.repeat_distance = max(both[1], 0)
@@ -597,6 +622,9 @@ def main() raises:
             i += 1
         elif a == "-R":
             options.rounds = Int(_value(args, i))
+            i += 1
+        elif a == "-P":
+            options.polish_rounds = Int(_value(args, i))
             i += 1
         elif a == "-d":
             options.max_consensus = Int(_value(args, i))

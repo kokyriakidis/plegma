@@ -52,6 +52,9 @@ def main():
     distance = int(sys.argv[5]) if len(sys.argv) > 5 else 500
     truth = read_one(truth_path)
     out = subprocess.run([karan, truth_path, cons_path], capture_output=True, text=True).stdout.strip().splitlines()
+    if len(out) < 2:
+        # No alignment line (an empty or missing consensus): a failure, not a perfect score.
+        sys.exit(1)
     fields = out[-1].split("\t")
     cigar = fields[9]
     positions = {}

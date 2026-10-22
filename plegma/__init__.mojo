@@ -24,6 +24,8 @@ is implementation and may change.
   (`GLOBAL`, `LOCAL`, `EXTENSION`), over a `Topology`, through a reusable
   `Workspace` for runs of alignments; consensus by
   `Graph.heaviest_path` (or `heaviest_path_of` a cluster's paths).
+- Consensus polishing: `polish` (one-letter and whole-repeat-unit edits kept
+  while they lower the sequences' summed edit distance to the consensus).
 - Order and clusters: `guide_order` (abPOA's progressive order by minimizer
   multiset Jaccard), `cluster_rows` (several consensus sequences, by MSA
   columns where the sequences disagree).
@@ -49,3 +51,4 @@ from .kernel import (
 )
 from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window
+from .polish import polish
