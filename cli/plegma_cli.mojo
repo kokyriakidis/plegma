@@ -237,7 +237,12 @@ def _poa(input: String, options: Options) raises -> String:
     var records = read_fasta(input)
     var seqs = List[List[UInt8]]()
     for r in range(len(records)):
-        seqs.append(List[UInt8](records.seq(r)))
+        # Upper case, as abPOA reads its input: a and A are one letter to the kernel and to the graph alike.
+        var letters = List[UInt8](records.seq(r))
+        for k in range(len(letters)):
+            if letters[k] >= UInt8(ord("a")) and letters[k] <= UInt8(ord("z")):
+                letters[k] -= 32
+        seqs.append(letters^)
     var order = List[Int]()
     for r in range(len(seqs)):
         order.append(r)
@@ -258,8 +263,17 @@ def _poa(input: String, options: Options) raises -> String:
         var rows = List[String]()
         for r in range(len(start)):
             names.append(start.names[r])
-            rows.append(String(unsafe_from_utf8=List[UInt8](start.seq(r))))
+            var letters = List[UInt8](start.seq(r))
+            for k in range(len(letters)):
+                if letters[k] >= UInt8(ord("a")) and letters[k] <= UInt8(ord("z")):
+                    letters[k] -= 32
+            rows.append(String(unsafe_from_utf8=letters))
         graph = Graph.from_msa(names, rows)
+    # Outputs list the starting MSA's rows, then every record in input order, whatever order they joined in.
+    var path_of = List[Int](length=len(seqs), fill=-1)
+    var shown = List[Int]()
+    for p in range(len(graph.paths)):
+        shown.append(p)
     var t1 = perf_counter_ns()
     var cells = 0
     var peak = 0
@@ -270,7 +284,7 @@ def _poa(input: String, options: Options) raises -> String:
         var r = order[k]
         var name = records.names[r]
         if len(graph) == 0:
-            _ = graph.add(name, Span(seqs[r]))
+            path_of[r] = graph.add(name, Span(seqs[r]))
             continue
         var found = _align(graph, Span(seqs[r]), options, row_of, scratch)
         cells += found.cells
@@ -287,13 +301,19 @@ def _poa(input: String, options: Options) raises -> String:
                     found = other^
                     name += "_reverse_complement"
                     reversed_count += 1
-        _ = graph.fuse_nodes(name, Span(seqs[r]), found.nodes)
+        path_of[r] = graph.fuse_nodes(name, Span(seqs[r]), found.nodes)
     var t2 = perf_counter_ns()
+    for r in range(len(seqs)):
+        shown.append(path_of[r])
 
     var result = options.result
     var text = String()
     var need_rows = result == 1 or result == 2 or options.consensus_rule == 1 or options.max_consensus > 1
-    var rows = graph.msa() if need_rows else List[String]()
+    var by_path = graph.msa() if need_rows else List[String]()
+    var rows = List[String]()
+    if need_rows:
+        for p in shown:
+            rows.append(by_path[p])
     var consensus: String
     var consensus_path = List[Int]()
     var clusters = List[List[Int]]()
@@ -322,7 +342,10 @@ def _poa(input: String, options: Options) raises -> String:
                     cons = _consensus_most_frequent(mine)
                 else:
                     var letters = List[UInt8]()
-                    for node in graph.heaviest_path_of(topology.order, clusters[k]):
+                    var paths = List[Int]()
+                    for member in clusters[k]:
+                        paths.append(shown[member])
+                    for node in graph.heaviest_path_of(topology.order, paths):
                         letters.append(graph.bases[node])
                     cons = String(unsafe_from_utf8=letters)
                 var ids = String()
@@ -332,8 +355,8 @@ def _poa(input: String, options: Options) raises -> String:
                     ids += String(clusters[k][i])
                 text += ">Consensus_sequence_" + String(k + 1) + " " + ids + "\n" + cons + "\n"
     if result == 1 or result == 2:
-        for p in range(len(graph.paths)):
-            text += ">" + graph.names[p] + "\n" + rows[p] + "\n"
+        for k in range(len(shown)):
+            text += ">" + graph.names[shown[k]] + "\n" + rows[k] + "\n"
     if result == 3 or result == 4:
         text += "H\tVN:Z:1.0\n"
         for node in range(len(graph)):
@@ -341,7 +364,7 @@ def _poa(input: String, options: Options) raises -> String:
         for node in range(len(graph)):
             for s in graph.successors(node):
                 text.write("L\t", node + 1, "\t+\t", s + 1, "\t+\t0M\n")
-        for p in range(len(graph.paths)):
+        for p in shown:
             text += "P\t" + graph.names[p] + "\t"
             for k in range(len(graph.paths[p])):
                 if k > 0:
