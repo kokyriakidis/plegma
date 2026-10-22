@@ -2,8 +2,8 @@
 
 Fast partial order alignment (POA) of DNA in Mojo: multiple sequence alignment and consensus from a graph that
 each sequence is woven into. The goal is to be the fastest POA aligner by a wide margin; rivals are
-[abPOA](https://github.com/yangao07/abPOA), [SPOA](https://github.com/rvaser/spoa) and
-[Theseus](https://github.com/abcAlignment/theseus).
+[abPOA](https://github.com/yangao07/abPOA), [SPOA](https://github.com/rvaser/spoa),
+[POASTA](https://github.com/broadinstitute/poasta) and [Theseus](https://github.com/Marco-Sola-Lab/theseus-lib).
 
 *πλέγμα* (plegma) is Greek for a woven mesh or lattice, and is what a POA graph is: sequences threaded into one
 another where they agree.

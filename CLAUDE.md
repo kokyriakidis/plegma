@@ -1,7 +1,7 @@
 # plegma
 
 Fast partial order alignment (POA) of DNA in Mojo: multiple sequence alignment and consensus. DNA only. The goal
-is to be the fastest POA aligner by a wide margin; rivals are abPOA, SPOA and Theseus.
+is to be the fastest POA aligner by a wide margin; rivals are abPOA, SPOA, POASTA and Theseus (Marco-Sola-Lab/theseus-lib).
 
 ## Mojo skills
 
