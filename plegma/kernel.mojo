@@ -416,10 +416,10 @@ def align_between(
         # longer gap (with E1 >= E2), so the insertion states need not see each other.
         var run1 = _NEG
         var run2 = _NEG
-        f1[0] = _NEG
-        f2[0] = _NEG
-        f1x[0] = 0
-        f2x[0] = 0
+        f1[unsafe_offset=0] = _NEG
+        f2[unsafe_offset=0] = _NEG
+        f1x[unsafe_offset=0] = 0
+        f2x[unsafe_offset=0] = 0
         for k in range(1, span):
             var previous = h[unsafe_offset=k - 1]
             var open1 = previous - gap1

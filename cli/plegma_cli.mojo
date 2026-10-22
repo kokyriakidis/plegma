@@ -9,6 +9,7 @@ from sporos import read_fasta
 from plegma.backbone import Level, RARE_OR_MAXIMAL, backbone, windows
 from plegma.chain import ChainCosts
 from plegma.graph import Graph, GAP
+from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, align_between, align_to_graph
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
 
@@ -30,9 +31,12 @@ Options:
     -S          anchor each sequence to the consensus path with sporos's exact matches (MUMs, rare MEMs and
                 SMEMs, seeded again inside every gap), and align only the windows between anchors
     -n INT      gaps of at most INT letters are not seeded again [500]
-  Order:
+  Order and strand:
     -L          align the sequences longest first
+    -p          progressive: abPOA's guide order, most similar minimizer multisets first
+    -s          ambiguous strand: a sequence scoring poorly is tried reverse-complemented, the better kept
   Input/Output:
+    -l          the input is a list of sequence files, one per line, each aligned on its own
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
     -o FILE     output to FILE [stdout]
     -r INT      output [0]: 0 consensus FASTA, 1 MSA FASTA, 2 both, 3 GFA, 4 GFA with the consensus path
@@ -133,105 +137,94 @@ def _seeded(
     return GraphAlignment(aligned^, score, cells, peak)
 
 
-def main() raises:
-    var raw = argv()
-    var args = List[String]()
-    for i in range(1, len(raw)):
-        args.append(String(raw[i]))
-    var mode = GLOBAL
-    var scoring = Scoring()
-    var band_b = 10
-    var band_f = 0.01
-    var longest_first = False
-    var start_msa = String()
-    var output = String()
-    var result = 0
-    var consensus_rule = 0
-    var verbose = False
-    var seeding = False
-    var window = 500
-    var input = String()
-    var i = 0
-    while i < len(args):
-        var a = args[i]
-        if a == "-h" or a == "--help":
-            print(USAGE)
-            return
-        elif a == "-m":
-            mode = Int(_value(args, i))
-            i += 1
-        elif a == "-M":
-            scoring.match_score = Int32(Int(_value(args, i)))
-            i += 1
-        elif a == "-X":
-            scoring.mismatch = Int32(Int(_value(args, i)))
-            i += 1
-        elif a == "-O":
-            var o = _pair(_value(args, i))
-            scoring.open1 = Int32(o[0])
-            if o[1] >= 0:
-                scoring.open2 = Int32(o[1])
-            i += 1
-        elif a == "-E":
-            var e = _pair(_value(args, i))
-            scoring.extend1 = Int32(e[0])
-            if e[1] >= 0:
-                scoring.extend2 = Int32(e[1])
-            i += 1
-        elif a == "-b":
-            band_b = Int(_value(args, i))
-            i += 1
-        elif a == "-f":
-            band_f = Float64(_value(args, i))
-            i += 1
-        elif a == "-L":
-            longest_first = True
-        elif a == "-S":
-            seeding = True
-        elif a == "-n":
-            window = Int(_value(args, i))
-            i += 1
-        elif a == "-i":
-            start_msa = _value(args, i)
-            i += 1
-        elif a == "-o":
-            output = _value(args, i)
-            i += 1
-        elif a == "-r":
-            result = Int(_value(args, i))
-            i += 1
-        elif a == "-a":
-            consensus_rule = Int(_value(args, i))
-            i += 1
-        elif a == "-v":
-            verbose = True
-        elif a.startswith("-") and a.byte_length() > 1:
-            raise Error(t"unknown option {a}\n{USAGE}")
-        else:
-            input = a
-        i += 1
-    if input.byte_length() == 0:
-        print(USAGE)
-        exit(1)
-    if mode != GLOBAL and mode != LOCAL and mode != EXTENSION:
-        raise Error(t"-m {mode}: the modes are 0, 1 and 2")
+struct Options(Copyable, Movable):
+    var mode: Int
+    var scoring: Scoring
+    var band_b: Int
+    var band_f: Float64
+    var longest_first: Bool
+    var progressive: Bool
+    var strand: Bool
+    var seeding: Bool
+    var window: Int
+    var start_msa: String
+    var result: Int
+    var consensus_rule: Int
+    var verbose: Bool
 
+    def __init__(out self):
+        self.mode = GLOBAL
+        self.scoring = Scoring()
+        self.band_b = 10
+        self.band_f = 0.01
+        self.longest_first = False
+        self.progressive = False
+        self.strand = False
+        self.seeding = False
+        self.window = 500
+        self.start_msa = String()
+        self.result = 0
+        self.consensus_rule = 0
+        self.verbose = False
+
+
+def _reverse_complement(seq: Span[UInt8, _]) -> List[UInt8]:
+    var out = List[UInt8](capacity=len(seq))
+    for i in reversed(range(len(seq))):
+        var c = seq[i]
+        var lower = c | 0x20
+        if lower == UInt8(ord("a")):
+            out.append(UInt8(ord("T")))
+        elif lower == UInt8(ord("c")):
+            out.append(UInt8(ord("G")))
+        elif lower == UInt8(ord("g")):
+            out.append(UInt8(ord("C")))
+        elif lower == UInt8(ord("t")) or lower == UInt8(ord("u")):
+            out.append(UInt8(ord("A")))
+        else:
+            out.append(c)
+    return out^
+
+
+def _align(
+    graph: Graph,
+    seq: Span[UInt8, _],
+    options: Options,
+    mut row_of: List[Int],
+    mut scratch: WindowScratch,
+) raises -> GraphAlignment:
+    var topology = Topology(graph)
+    if options.seeding and options.mode == GLOBAL:
+        row_of.resize(len(graph), -1)
+        return _seeded(
+            graph, topology, seq, options.scoring, options.band_b, options.band_f, options.window, row_of, scratch
+        )
+    return align_to_graph(graph, topology, seq, options.scoring, options.mode, options.band_b, options.band_f)
+
+
+def _poa(input: String, options: Options) raises -> String:
+    """The POA of the sequences of one file, as `options` asks for its output."""
     var t0 = perf_counter_ns()
     var records = read_fasta(input)
-    var order = List[Int]()
+    var seqs = List[List[UInt8]]()
     for r in range(len(records)):
+        seqs.append(List[UInt8](records.seq(r)))
+    var order = List[Int]()
+    for r in range(len(seqs)):
         order.append(r)
-    if longest_first:
+    if options.progressive:
+        order = guide_order(seqs)
+    elif options.longest_first:
         # Longest first, file order among equals: sort keys (2^32 - length) << 32 | index.
         var keys = List[UInt64]()
-        for r in range(len(records)):
-            keys.append((UInt64((1 << 32) - len(records.seq(r))) << 32) | UInt64(r))
+        for r in range(len(seqs)):
+            keys.append((UInt64((1 << 32) - len(seqs[r])) << 32) | UInt64(r))
         sort(keys)
         for k in range(len(keys)):
             order[k] = Int(keys[k] & 0xFFFFFFFF)
     var graph = Graph()
-    if start_msa.byte_length() > 0:
-        var start = read_fasta(start_msa)
+    if options.start_msa.byte_length() > 0:
+        var start = read_fasta(options.start_msa)
         var names = List[String]()
         var rows = List[String]()
         for r in range(len(start)):
@@ -241,33 +234,41 @@ def main() raises:
     var t1 = perf_counter_ns()
     var cells = 0
     var peak = 0
+    var reversed_count = 0
     var row_of = List[Int]()
     var scratch = WindowScratch()
     for k in range(len(order)):
         var r = order[k]
         var name = records.names[r]
         if len(graph) == 0:
-            _ = graph.add(name, records.seq(r))
+            _ = graph.add(name, Span(seqs[r]))
             continue
-        var topology = Topology(graph)
-        var found: GraphAlignment
-        if seeding and mode == GLOBAL:
-            row_of.resize(len(graph), -1)
-            found = _seeded(graph, topology, records.seq(r), scoring, band_b, band_f, window, row_of, scratch)
-        else:
-            found = align_to_graph(graph, topology, records.seq(r), scoring, mode, band_b, band_f)
+        var found = _align(graph, Span(seqs[r]), options, row_of, scratch)
         cells += found.cells
         peak = max(peak, found.peak_bytes)
-        _ = graph.fuse_nodes(name, records.seq(r), found.nodes)
+        if options.strand:
+            # abPOA's rule: a score under a third of the best a match run of the shorter length could earn.
+            var floor = Int(options.scoring.match_score) * min(len(seqs[r]), len(graph.paths[0])) // 3
+            if found.score < floor:
+                var flipped = _reverse_complement(Span(seqs[r]))
+                var other = _align(graph, Span(flipped), options, row_of, scratch)
+                cells += other.cells
+                if other.score > found.score:
+                    seqs[r] = flipped^
+                    found = other^
+                    name += "_reverse_complement"
+                    reversed_count += 1
+        _ = graph.fuse_nodes(name, Span(seqs[r]), found.nodes)
     var t2 = perf_counter_ns()
 
+    var result = options.result
     var text = String()
-    var need_rows = result == 1 or result == 2 or consensus_rule == 1
+    var need_rows = result == 1 or result == 2 or options.consensus_rule == 1
     var rows = graph.msa() if need_rows else List[String]()
     var consensus = String()
     var consensus_path = List[Int]()
     if result != 1 and result != 3:
-        if consensus_rule == 1:
+        if options.consensus_rule == 1:
             consensus = _consensus_most_frequent(rows)
         else:
             var topology = Topology(graph)
@@ -302,16 +303,110 @@ def main() raises:
                     text += ","
                 text += String(consensus_path[k] + 1) + "+"
             text += "\t*\n"
+    if options.verbose:
+        var t3 = perf_counter_ns()
+        print(
+            t"plegma: {input}: {len(records)} sequences ({reversed_count} reverse-complemented), {len(graph)} nodes,",
+            t" {cells} cells, DP peak {peak // 1024} KB; read {Float64(t1 - t0) / 1e9} s,",
+            t" align {Float64(t2 - t1) / 1e9} s, write {Float64(t3 - t2) / 1e9} s",
+            file=stderr,
+        )
+    return text^
+
+
+def main() raises:
+    var raw = argv()
+    var args = List[String]()
+    for i in range(1, len(raw)):
+        args.append(String(raw[i]))
+    var options = Options()
+    var output = String()
+    var listed = False
+    var input = String()
+    var i = 0
+    while i < len(args):
+        var a = args[i]
+        if a == "-h" or a == "--help":
+            print(USAGE)
+            return
+        elif a == "-m":
+            options.mode = Int(_value(args, i))
+            i += 1
+        elif a == "-M":
+            options.scoring.match_score = Int32(Int(_value(args, i)))
+            i += 1
+        elif a == "-X":
+            options.scoring.mismatch = Int32(Int(_value(args, i)))
+            i += 1
+        elif a == "-O":
+            var o = _pair(_value(args, i))
+            options.scoring.open1 = Int32(o[0])
+            if o[1] >= 0:
+                options.scoring.open2 = Int32(o[1])
+            i += 1
+        elif a == "-E":
+            var e = _pair(_value(args, i))
+            options.scoring.extend1 = Int32(e[0])
+            if e[1] >= 0:
+                options.scoring.extend2 = Int32(e[1])
+            i += 1
+        elif a == "-b":
+            options.band_b = Int(_value(args, i))
+            i += 1
+        elif a == "-f":
+            options.band_f = Float64(_value(args, i))
+            i += 1
+        elif a == "-L":
+            options.longest_first = True
+        elif a == "-p":
+            options.progressive = True
+        elif a == "-s":
+            options.strand = True
+        elif a == "-S":
+            options.seeding = True
+        elif a == "-n":
+            options.window = Int(_value(args, i))
+            i += 1
+        elif a == "-l":
+            listed = True
+        elif a == "-i":
+            options.start_msa = _value(args, i)
+            i += 1
+        elif a == "-o":
+            output = _value(args, i)
+            i += 1
+        elif a == "-r":
+            options.result = Int(_value(args, i))
+            i += 1
+        elif a == "-a":
+            options.consensus_rule = Int(_value(args, i))
+            i += 1
+        elif a == "-v":
+            options.verbose = True
+        elif a.startswith("-") and a.byte_length() > 1:
+            raise Error(t"unknown option {a}\n{USAGE}")
+        else:
+            input = a
+        i += 1
+    if input.byte_length() == 0:
+        print(USAGE)
+        exit(1)
+    if options.mode != GLOBAL and options.mode != LOCAL and options.mode != EXTENSION:
+        raise Error(t"-m {options.mode}: the modes are 0, 1 and 2")
+    var inputs = List[String]()
+    if listed:
+        with open(input, "r") as f:
+            for line in f.read().splitlines():
+                var name = String(line.strip())
+                if name.byte_length() > 0:
+                    inputs.append(name)
+    else:
+        inputs.append(input)
+    var text = String()
+    for path in inputs:
+        text += _poa(path, options)
     if output.byte_length() > 0:
         with open(output, "w") as f:
             f.write(text)
     else:
         print(text, end="")
-    if verbose:
-        var t3 = perf_counter_ns()
-        print(
-            t"plegma: {len(records)} sequences, {len(graph)} nodes, {cells} cells, DP peak {peak // 1024} KB;",
-            t" read {Float64(t1 - t0) / 1e9} s,",
-            t" align {Float64(t2 - t1) / 1e9} s, write {Float64(t3 - t2) / 1e9} s",
-            file=stderr,
-        )
