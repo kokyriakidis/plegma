@@ -7,6 +7,9 @@ recursion): at the next level, or with `stay` at the same level until a gap yiel
 next. What is left between the anchors are the windows an exact aligner fills.
 """
 
+from std.collections import Dict
+
+from .alphabet import encode_base
 from .anchors import Anchor, find_anchors, mums, mums_or_smems, rare, rare_or_maximal, smems
 from .chain import ChainCosts, chain, without_overlaps
 
@@ -81,6 +84,48 @@ struct Window(ImplicitlyCopyable):
         return max(self.ref_end - self.ref_start, self.query_end - self.query_start)
 
 
+struct RepeatMask(Movable):
+    """The stretches of a sequence inside tandem repeats: a k-mer start is masked when the same k-mer starts
+    again within `distance` letters. An anchor any of whose k-mers is masked sits in a repeat, where an exact
+    match, unique or not, may pair different copies."""
+
+    var k: Int
+    var masked_before: List[Int32]
+    """How many masked k-mer starts precede each position."""
+
+    def __init__(out self, sequence: ImmSpan[UInt8, _], k: Int, distance: Int):
+        self.k = k
+        var n = len(sequence)
+        self.masked_before = List[Int32](length=n + 1, fill=0)
+        if k <= 0 or n < k:
+            return
+        var marked = List[Bool](length=n, fill=False)
+        var last = Dict[UInt64, Int]()
+        var mask = (UInt64(1) << UInt64(2 * k)) - 1
+        var key = UInt64(0)
+        var valid = 0
+        for i in range(n):
+            var code = encode_base(sequence[i])
+            valid = valid + 1 if code < 4 else 0
+            key = ((key << 2) | UInt64(code & 3)) & mask
+            if valid < k:
+                continue
+            var start = i - k + 1
+            var seen = last.get(key)
+            if seen and start - seen.value() <= distance:
+                marked[start] = True
+                marked[seen.value()] = True
+            last[key] = start
+        for i in range(n):
+            self.masked_before[i + 1] = self.masked_before[i] + Int32(1 if marked[i] else 0)
+
+    def covers(self, start: Int, end: Int) -> Bool:
+        """Whether any k-mer of `start ..< end` is masked."""
+        if self.k <= 0 or end - start < self.k:
+            return False
+        return self.masked_before[end - self.k + 1] > self.masked_before[start]
+
+
 def backbone(
     partner: ImmSpan[UInt8, _],
     query: ImmSpan[UInt8, _],
@@ -90,13 +135,17 @@ def backbone(
     stay: Bool = False,
     max_anchors: Int = 50_000,
     lookback: Int = 0,
+    repeat_k: Int = 0,
+    repeat_distance: Int = 0,
 ) raises -> List[Anchor]:
     """Non-overlapping anchors, in order on both sequences: level 0 over the whole pair, then inside every gap
     still longer than `budget` letters the next level, or with `stay` the same one until a gap yields nothing.
     A gap with more than `max_anchors` anchors is left to the next level; `lookback` caps how far back each
-    anchor's chain search goes (0: no cap)."""
+    anchor's chain search goes (0: no cap). With `repeat_k`, every level drops, before chaining, the anchors
+    inside tandem repeats of the partner (`RepeatMask` of `repeat_k`-mers within `repeat_distance`)."""
     var out = List[Anchor]()
-    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, lookback, out)
+    var repeats = RepeatMask(partner, repeat_k, repeat_distance)
+    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, lookback, repeats, out)
     return out^
 
 
@@ -112,19 +161,38 @@ def _refine(
     stay: Bool,
     max_anchors: Int,
     lookback: Int,
+    repeats: RepeatMask,
     mut out: List[Anchor],
 ) raises:
     if level >= len(levels) or max(len(partner), len(query)) <= budget:
         return
     var current = levels[level]
     var found = current.select(find_anchors(partner, query, current.min_len, current.counted_to()))
+    if repeats.k > 0:
+        var outside = List[Anchor]()
+        for a in found:
+            if not repeats.covers(ref_offset + a.ref_pos, ref_offset + a.ref_end()):
+                outside.append(a)
+        found = outside^
     var picked = List[Anchor]()
     if len(found) <= max_anchors:
         picked = without_overlaps(chain(found, len(partner), len(query), costs, lookback).anchors)
     var next = level if stay else level + 1
     if len(picked) == 0:
         _refine(
-            partner, query, ref_offset, query_offset, levels, level + 1, costs, budget, stay, max_anchors, lookback, out
+            partner,
+            query,
+            ref_offset,
+            query_offset,
+            levels,
+            level + 1,
+            costs,
+            budget,
+            stay,
+            max_anchors,
+            lookback,
+            repeats,
+            out,
         )
         return
     var ref_at = 0
@@ -142,6 +210,7 @@ def _refine(
             stay,
             max_anchors,
             lookback,
+            repeats,
             out,
         )
         out.append(a.shifted(ref_offset, query_offset))
@@ -159,6 +228,7 @@ def _refine(
         stay,
         max_anchors,
         lookback,
+        repeats,
         out,
     )
 

@@ -11,7 +11,8 @@ per pair (`simulate_vntr.py`). A strategy is `levels[;option ...]`:
 - `stay`: seed every gap again at the same level until it yields nothing, then the next level.
 - `s=F`: what the chain charges an unanchored letter (0.1); `T=N`: letters each anchor gives back to the DP at
   both ends (10); `n=N`: gaps of at most N letters are not seeded again (0); `H=N`: chain look-back (200).
-- `R=k:d`: drop an anchor any of whose k-mers occurs again in a within d letters of it (inside a repeat).
+- `R=k:d`: after chaining, drop an anchor any of whose k-mers occurs again in a within d letters of it.
+- `M=k:d`: the same test on every level's seeds before they are chained (the backbone's repeat mask).
 - `V`: keep an anchor only when forcing it costs nothing: the alignment from the last kept anchor to the
   next candidate costs no more through it than around it (karan, both ways).
 The fill and the optimum use two-piece gap-affine costs (4, 6, 2, 24, 1), ties left.
@@ -51,6 +52,8 @@ struct Strategy(Copyable, Movable):
     var verify: Bool
     var repeat_k: Int
     var repeat_distance: Int
+    var mask_k: Int
+    var mask_distance: Int
 
     def __init__(out self, text: String) raises:
         self.text = text
@@ -63,6 +66,8 @@ struct Strategy(Copyable, Movable):
         self.verify = False
         self.repeat_k = 0
         self.repeat_distance = 0
+        self.mask_k = 0
+        self.mask_distance = 0
         var parts = text.split(";")
         for k in range(1, len(parts)):
             var part = String(parts[k])
@@ -76,6 +81,11 @@ struct Strategy(Copyable, Movable):
                 self.budget = Int(String(part[byte=2:]))
             elif part == "V":
                 self.verify = True
+            elif part.startswith("M="):
+                var both = String(part[byte=2:])
+                var halves = both.split(":")
+                self.mask_k = Int(String(halves[0]))
+                self.mask_distance = Int(String(halves[1]))
             elif part.startswith("R="):
                 var both = String(part[byte=2:])
                 var halves = both.split(":")
@@ -173,15 +183,16 @@ def _outside_repeats(a: Span[UInt8, _], anchors: List[Anchor], k: Int, distance:
         var repeated = False
         var low = max(0, x.ref_pos - distance)
         var high = min(len(a) - k, x.ref_end() + distance)
+        # Every k-mer of the anchor, against every position near it outside the anchor's own.
         var t = x.ref_pos
         while t + k <= x.ref_end() and not repeated:
             var mine = codes[t]
             if mine != UInt64.MAX:
                 for u in range(low, high + 1):
-                    if (u < x.ref_pos or u >= x.ref_end() - k + 1) and codes[u] == mine:
+                    if u != t and (u < x.ref_pos or u > x.ref_end() - k) and codes[u] == mine:
                         repeated = True
                         break
-            t += k
+            t += 1
         if not repeated:
             out.append(x)
     return out^
@@ -257,6 +268,8 @@ def main() raises:
                     strategy.budget,
                     strategy.stay,
                     lookback=strategy.lookback,
+                    repeat_k=strategy.mask_k,
+                    repeat_distance=strategy.mask_distance,
                 ) if len(strategy.levels)
                 > 0 else List[Anchor]()
             )

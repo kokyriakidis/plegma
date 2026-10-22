@@ -7,7 +7,7 @@ from std.time import perf_counter_ns
 from sporos import read_fasta
 
 from plegma.anchors import Anchor
-from plegma.backbone import Level, RARE_OR_MAXIMAL, backbone, windows
+from plegma.backbone import Level, MUMS, backbone, windows
 from plegma.chain import ChainCosts
 from plegma.graph import Graph, GAP
 from plegma.clusters import cluster_rows
@@ -30,11 +30,14 @@ Options:
     -b INT      extra band b [10]; < 0 disables the band
     -f FLOAT    extra band f [0.01]: b+f*L letters either side, L the sequence's length
   Seeding and partition (global mode):
-    -S          anchor each sequence to the consensus path with sporos's exact matches (MUMs, rare MEMs and
-                SMEMs, seeded again inside every gap), and align only the windows between anchors
+    -S          anchor each sequence to the consensus path with sporos's MUMs (51, then 31, then 21 letters,
+                seeded again inside every gap, none inside tandem repeats), and align only the windows
+                between anchors
     -n INT      gaps of at most INT letters are not seeded again [500]
     -T INT      letters each anchor gives back to the DP at both ends [10]
     -H INT      anchors each anchor's chain search looks back over, at most [200]; 0: all
+    -M INT:INT  k:d, no anchor where one of its k-mers recurs within d letters of the path (a tandem
+                repeat) [12:500]; 0:0 keeps them
   Order and strand:
     -L          align the sequences longest first
     -p          progressive: abPOA's guide order, most similar minimizer multisets first
@@ -99,6 +102,8 @@ def _seeded(
     window: Int,
     trim: Int,
     lookback: Int,
+    repeat_k: Int,
+    repeat_distance: Int,
     mut row_of: List[Int],
     mut scratch: WindowScratch,
     mut workspace: Workspace,
@@ -109,10 +114,23 @@ def _seeded(
     var letters = List[UInt8](capacity=len(path))
     for node in path:
         letters.append(graph.bases[node])
+    # MUMs, placed by uniqueness, of 51 letters, then 31, then 21, each gap seeded again until it yields nothing;
+    # none inside a tandem repeat of the path (its k-mers recurring nearby), where even a unique exact match may
+    # pair different copies: there the DP aligns the whole array.
     var levels = List[Level]()
-    for n in [51, 31, 21, 15]:
-        levels.append(Level(RARE_OR_MAXIMAL, n, 8))
-    var chained = backbone(Span(letters), query, levels, ChainCosts(substitution=0.1), window, True, lookback=lookback)
+    for n in [51, 31, 21]:
+        levels.append(Level(MUMS, n))
+    var chained = backbone(
+        Span(letters),
+        query,
+        levels,
+        ChainCosts(substitution=0.1),
+        window,
+        True,
+        lookback=lookback,
+        repeat_k=repeat_k,
+        repeat_distance=repeat_distance,
+    )
     # Each anchor loses `trim` letters at both ends: the DP, not the anchor, decides where a gap next to it goes.
     var anchors = List[Anchor]()
     for a in chained:
@@ -169,6 +187,8 @@ struct Options(Copyable, Movable):
     var window: Int
     var trim: Int
     var lookback: Int
+    var repeat_k: Int
+    var repeat_distance: Int
     var start_msa: String
     var result: Int
     var consensus_rule: Int
@@ -189,6 +209,8 @@ struct Options(Copyable, Movable):
         self.window = 500
         self.trim = 10
         self.lookback = 200
+        self.repeat_k = 12
+        self.repeat_distance = 500
         self.start_msa = String()
         self.result = 0
         self.consensus_rule = 0
@@ -237,6 +259,8 @@ def _align(
             options.window,
             options.trim,
             options.lookback,
+            options.repeat_k,
+            options.repeat_distance,
             row_of,
             scratch,
             workspace,
@@ -548,6 +572,11 @@ def main() raises:
             i += 1
         elif a == "-T":
             options.trim = Int(_value(args, i))
+            i += 1
+        elif a == "-M":
+            var both = _pair(_value(args, i).replace(":", ","))
+            options.repeat_k = both[0]
+            options.repeat_distance = max(both[1], 0)
             i += 1
         elif a == "-H":
             options.lookback = Int(_value(args, i))

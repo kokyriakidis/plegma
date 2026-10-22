@@ -3,7 +3,7 @@ from std.testing import assert_equal, assert_true, TestSuite
 from karan import distance
 
 from plegma.anchors import Anchor, find_anchors, mums, smems
-from plegma.backbone import Level, MUMS, ALL, backbone, windows
+from plegma.backbone import Level, MUMS, ALL, RepeatMask, backbone, windows
 from plegma.chain import ChainCosts, chain, linked_cost, without_overlaps
 
 
@@ -140,6 +140,18 @@ def test_without_overlaps_clears_each_predecessor() raises:
     assert_equal(cut[1].query_pos, 10)
     assert_equal(cut[1].length, 5)
     assert_equal(cut[2].ref_pos, 20)
+
+
+def test_repeat_mask_marks_tandem_copies() raises:
+    var flank = _random(200, 77)
+    var text = List[UInt8](flank)
+    for _ in range(20):
+        text.extend("ACGTTGCAGGTACCATG".as_bytes())
+    text.extend(_random(200, 78))
+    var mask = RepeatMask(Span(text), 12, 500)
+    assert_true(mask.covers(220, 260))
+    assert_true(not mask.covers(10, 150))
+    assert_true(not mask.covers(len(text) - 150, len(text) - 10))
 
 
 def main() raises:
