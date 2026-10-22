@@ -126,13 +126,15 @@ struct Topology(Movable):
         self.remaining = List[Int](length=n, fill=0)
         for r in reversed(range(n)):
             var node = self.order[r]
-            var best_weight = -1
-            for i in range(len(graph.successors[node])):
-                var s = graph.successors[node][i]
-                var weight = graph.weights[node][i]
+            var best_weight = Int32(-1)
+            var e = Int(graph.first_out[node])
+            while e >= 0:
+                var s = Int(graph.edge_to[e])
+                var weight = graph.edge_weight[e]
                 if weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > self.remaining[node]):
                     best_weight = weight
                     self.remaining[node] = self.remaining[s] + 1
+                e = Int(graph.next_out[e])
 
 
 def align_to_graph(
@@ -222,8 +224,7 @@ def align_between(
     # The left end may reach the right one directly, every letter inserted between them: keep its row.
     var direct = n == 0
     if left >= 0 and right >= 0:
-        for s in graph.successors[left]:
-            direct = direct or s == right
+        direct = direct or graph.edge(left, right) >= 0
     if direct:
         waiting[0] += 1
     pool.append(List[Int32](length=3 * (hi[0] + 1), fill=_NEG))
@@ -245,12 +246,15 @@ def align_between(
             preds.append(pred_rows[k])
         var ends_here = False
         waiting[r] = 0
-        for s in graph.successors[node]:
+        var e = Int(graph.first_out[node])
+        while e >= 0:
+            var s = Int(graph.edge_to[e])
             if row_of[s] >= 0:
                 waiting[r] += 1
             ends_here = ends_here or s == right
+            e = Int(graph.next_out[e])
         if right == SINK:
-            ends_here = len(graph.successors[node]) == 0
+            ends_here = graph.out_degree[node] == 0
         var low = width
         var high = -1
         var left = width
@@ -591,23 +595,23 @@ def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut r
     """Appends the rows of `node`'s predecessors in the alignment, heaviest edge first (the earlier edge first
     among equals): row 0 for `left` (or for none at all), so of equally good moves the alignment takes the one
     most sequences took."""
-    ref preds = graph.predecessors[node]
-    var keys = List[UInt64](capacity=len(preds))
-    for k in range(len(preds)):
-        var p = preds[k]
-        if p != left and row_of[p] < 0:
-            continue
-        var weight = 0
-        for i in range(len(graph.successors[p])):
-            if graph.successors[p][i] == node:
-                weight = graph.weights[p][i]
-        keys.append((UInt64((1 << 31) - weight) << 32) | UInt64(k))
+    var keys = List[UInt64](capacity=Int(graph.in_degree[node]))
+    var e = Int(graph.first_in[node])
+    var k = 0
+    while e >= 0:
+        var p = Int(graph.edge_from[e])
+        if p == left or row_of[p] >= 0:
+            keys.append((UInt64((1 << 31) - Int(graph.edge_weight[e])) << 32) | UInt64(e))
+        e = Int(graph.next_in[e])
+        k += 1
     if len(keys) == 0:
         rows.append(0)
         return
-    sort(keys)
+    if len(keys) > 1:
+        # Equal weights keep the edges' order: edge ids grow as the edges are made.
+        sort(keys)
     for key in keys:
-        var p = preds[Int(key & 0xFFFFFFFF)]
+        var p = Int(graph.edge_from[Int(key & 0xFFFFFFFF)])
         rows.append(0 if p == left else row_of[p])
 
 

@@ -318,7 +318,7 @@ def _poa(input: String, options: Options) raises -> String:
         for node in range(len(graph)):
             text.write("S\t", node + 1, "\t", chr(Int(graph.bases[node])), "\n")
         for node in range(len(graph)):
-            for s in graph.successors[node]:
+            for s in graph.successors(node):
                 text.write("L\t", node + 1, "\t+\t", s + 1, "\t+\t0M\n")
         for p in range(len(graph.paths)):
             text += "P\t" + graph.names[p] + "\t"

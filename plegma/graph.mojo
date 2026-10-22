@@ -6,8 +6,6 @@ CIGAR letters, the path the reference): a match lands on the path's node, a subs
 in the path node's column (made if missing), an insertion on a node of its own column.
 """
 
-from std.collections import Dict
-
 
 comptime MATCH = UInt8(ord("="))
 comptime MISMATCH = UInt8(ord("X"))
@@ -17,66 +15,139 @@ comptime GAP = UInt8(ord("-"))
 
 
 struct Graph(Movable, Sized):
-    """Nodes (`bases`, `columns`), weighted edges and the paths of the sequences added so far."""
+    """Nodes (`bases`, `columns`), weighted edges and the paths of the sequences added so far, in flat arrays:
+    a node costs a few 32-bit fields, an edge five.
+
+    Walk a node's out-edges with `var e = graph.first_out[node]`, `while e >= 0`, `e = graph.next_out[e]`
+    (in insertion order; `edge_to[e]`, `edge_weight[e]`), its in-edges likewise through `first_in`, `next_in`
+    and `edge_from`; a column's nodes through `column_first` and `column_next`."""
 
     var bases: List[UInt8]
     """Each node's letter, as the sequence spelled it."""
-    var columns: List[Int]
+    var columns: List[Int32]
     """Each node's column."""
-    var members: List[List[Int]]
-    """Each column's nodes, one per letter."""
-    var successors: List[List[Int]]
-    var predecessors: List[List[Int]]
-    var weights: List[List[Int]]
-    """How many paths take each edge, beside `successors`."""
-    var paths: List[List[Int]]
+    var column_first: List[Int32]
+    var column_next: List[Int32]
+    """The next node in the node's column (-1: the last)."""
+    var first_out: List[Int32]
+    var last_out: List[Int32]
+    var first_in: List[Int32]
+    var last_in: List[Int32]
+    var out_degree: List[Int32]
+    var in_degree: List[Int32]
+    var edge_from: List[Int32]
+    var edge_to: List[Int32]
+    var edge_weight: List[Int32]
+    """How many paths take each edge."""
+    var next_out: List[Int32]
+    var next_in: List[Int32]
+    var paths: List[List[Int32]]
     var names: List[String]
 
     def __init__(out self):
         self.bases = List[UInt8]()
-        self.columns = List[Int]()
-        self.members = List[List[Int]]()
-        self.successors = List[List[Int]]()
-        self.predecessors = List[List[Int]]()
-        self.weights = List[List[Int]]()
-        self.paths = List[List[Int]]()
+        self.columns = List[Int32]()
+        self.column_first = List[Int32]()
+        self.column_next = List[Int32]()
+        self.first_out = List[Int32]()
+        self.last_out = List[Int32]()
+        self.first_in = List[Int32]()
+        self.last_in = List[Int32]()
+        self.out_degree = List[Int32]()
+        self.in_degree = List[Int32]()
+        self.edge_from = List[Int32]()
+        self.edge_to = List[Int32]()
+        self.edge_weight = List[Int32]()
+        self.next_out = List[Int32]()
+        self.next_in = List[Int32]()
+        self.paths = List[List[Int32]]()
         self.names = List[String]()
 
     def __len__(self) -> Int:
         """The number of nodes."""
         return len(self.bases)
 
+    def column_count(self) -> Int:
+        return len(self.column_first)
+
+    def successors(self, node: Int) -> List[Int]:
+        """`node`'s successors, in the order their edges were made (a copy: walk `first_out` in hot loops)."""
+        var out = List[Int](capacity=Int(self.out_degree[node]))
+        var e = Int(self.first_out[node])
+        while e >= 0:
+            out.append(Int(self.edge_to[e]))
+            e = Int(self.next_out[e])
+        return out^
+
+    def predecessors(self, node: Int) -> List[Int]:
+        """`node`'s predecessors, in the order their edges were made (a copy)."""
+        var out = List[Int](capacity=Int(self.in_degree[node]))
+        var e = Int(self.first_in[node])
+        while e >= 0:
+            out.append(Int(self.edge_from[e]))
+            e = Int(self.next_in[e])
+        return out^
+
     def _node(mut self, base: UInt8, column: Int) -> Int:
         var node = len(self.bases)
         self.bases.append(base)
         var at = column
         if at < 0:
-            at = len(self.members)
-            self.members.append(List[Int]())
-        self.columns.append(at)
-        self.members[at].append(node)
-        self.successors.append(List[Int]())
-        self.predecessors.append(List[Int]())
-        self.weights.append(List[Int]())
+            at = len(self.column_first)
+            self.column_first.append(-1)
+        self.columns.append(Int32(at))
+        # Appended at the column's head: a column holds at most one node per letter.
+        self.column_next.append(self.column_first[at])
+        self.column_first[at] = Int32(node)
+        self.first_out.append(-1)
+        self.last_out.append(-1)
+        self.first_in.append(-1)
+        self.last_in.append(-1)
+        self.out_degree.append(0)
+        self.in_degree.append(0)
         return node
 
-    def _link(mut self, before: Int, after: Int):
-        for i in range(len(self.successors[before])):
-            if self.successors[before][i] == after:
-                self.weights[before][i] += 1
-                return
-        self.successors[before].append(after)
-        self.predecessors[after].append(before)
-        self.weights[before].append(1)
+    def edge(self, before: Int, after: Int) -> Int:
+        """The edge from `before` to `after`, or -1."""
+        var e = Int(self.first_out[before])
+        while e >= 0:
+            if Int(self.edge_to[e]) == after:
+                return e
+            e = Int(self.next_out[e])
+        return -1
 
-    def _on_path(mut self, mut path: List[Int], node: Int):
+    def _link(mut self, before: Int, after: Int):
+        var found = self.edge(before, after)
+        if found >= 0:
+            self.edge_weight[found] += 1
+            return
+        var e = Int32(len(self.edge_to))
+        self.edge_from.append(Int32(before))
+        self.edge_to.append(Int32(after))
+        self.edge_weight.append(1)
+        self.next_out.append(-1)
+        self.next_in.append(-1)
+        if self.last_out[before] >= 0:
+            self.next_out[Int(self.last_out[before])] = e
+        else:
+            self.first_out[before] = e
+        self.last_out[before] = e
+        if self.last_in[after] >= 0:
+            self.next_in[Int(self.last_in[after])] = e
+        else:
+            self.first_in[after] = e
+        self.last_in[after] = e
+        self.out_degree[before] += 1
+        self.in_degree[after] += 1
+
+    def _on_path(mut self, mut path: List[Int32], node: Int):
         if len(path) > 0:
-            self._link(path[len(path) - 1], node)
-        path.append(node)
+            self._link(Int(path[len(path) - 1]), node)
+        path.append(Int32(node))
 
     def add(mut self, name: String, sequence: Span[UInt8, _]) -> Int:
         """Adds `sequence` as a path of new nodes, each its own column; returns the path's index."""
-        var path = List[Int](capacity=len(sequence))
+        var path = List[Int32](capacity=len(sequence))
         for c in sequence:
             self._on_path(path, self._node(c, -1))
         self.paths.append(path^)
@@ -88,7 +159,7 @@ struct Graph(Movable, Sized):
     ) raises -> Int:
         """Adds `sequence` aligned to path `partner` by the runs `ops[i]` x `counts[i]`, which must span both;
         returns the new path's index."""
-        var path = List[Int](capacity=len(sequence))
+        var path = List[Int32](capacity=len(sequence))
         var along = self.paths[partner].copy()
         var i = 0
         var j = 0
@@ -104,7 +175,7 @@ struct Graph(Movable, Sized):
                     continue
                 if i >= len(along) or j >= len(sequence):
                     raise Error(t"alignment of {name} runs past its sequences")
-                self._on_path(path, self._lands(along[i], sequence[j]))
+                self._on_path(path, self._lands(Int(along[i]), sequence[j]))
                 i += 1
                 j += 1
         if i != len(along) or j != len(sequence):
@@ -118,16 +189,18 @@ struct Graph(Movable, Sized):
         column, made if missing."""
         if self.bases[node] == base:
             return node
-        var column = self.columns[node]
-        for m in self.members[column]:
+        var column = Int(self.columns[node])
+        var m = Int(self.column_first[column])
+        while m >= 0:
             if self.bases[m] == base:
                 return m
+            m = Int(self.column_next[m])
         return self._node(base, column)
 
     def fuse_nodes(mut self, name: String, sequence: Span[UInt8, _], aligned: List[Int]) -> Int:
         """Adds `sequence`, its letter `j` aligned to node `aligned[j]` (-1: inserted); returns the new path's
         index."""
-        var path = List[Int](capacity=len(sequence))
+        var path = List[Int32](capacity=len(sequence))
         for j in range(len(sequence)):
             var node = aligned[j]
             self._on_path(path, self._lands(node, sequence[j]) if node >= 0 else self._node(sequence[j], -1))
@@ -138,12 +211,11 @@ struct Graph(Movable, Sized):
     def node_order(self) raises -> List[Int]:
         """Each node's rank in a topological order of the nodes (Kahn's, lowest node first among the ready)."""
         var count = len(self.bases)
-        var incoming = List[Int](length=count, fill=0)
-        for node in range(count):
-            incoming[node] = len(self.predecessors[node])
+        var incoming = List[Int32](capacity=count)
         var ready = List[Int]()
         for node in range(count):
-            if incoming[node] == 0:
+            incoming.append(self.in_degree[node])
+            if self.in_degree[node] == 0:
                 ready.append(node)
         var rank = List[Int](length=count, fill=-1)
         var next = 0
@@ -153,10 +225,13 @@ struct Graph(Movable, Sized):
             head += 1
             rank[node] = next
             next += 1
-            for s in self.successors[node]:
+            var e = Int(self.first_out[node])
+            while e >= 0:
+                var s = Int(self.edge_to[e])
                 incoming[s] -= 1
                 if incoming[s] == 0:
                     ready.append(s)
+                e = Int(self.next_out[e])
         if next != count:
             raise Error(t"the nodes form a cycle: {count - next} of {count} unplaced")
         return rank^
@@ -171,8 +246,8 @@ struct Graph(Movable, Sized):
         var width = rows[0].byte_length()
         var at = List[Int](length=256, fill=-1)
         for c in range(width):
-            var column = len(graph.members)
-            graph.members.append(List[Int]())
+            var column = graph.column_count()
+            graph.column_first.append(-1)
             for b in range(256):
                 at[b] = -1
             for r in range(len(rows)):
@@ -184,15 +259,14 @@ struct Graph(Movable, Sized):
         for r in range(len(rows)):
             if r == skip:
                 continue
-            var path = List[Int]()
+            var path = List[Int32]()
             var bytes = rows[r].as_bytes()
             for c in range(width):
                 if bytes[c] == GAP:
                     continue
-                var landed = -1
-                for m in graph.members[c]:
-                    if graph.bases[m] == bytes[c]:
-                        landed = m
+                var landed = Int(graph.column_first[c])
+                while landed >= 0 and graph.bases[landed] != bytes[c]:
+                    landed = Int(graph.column_next[landed])
                 graph._on_path(path, landed)
             graph.paths.append(path^)
             graph.names.append(names[r])
@@ -203,20 +277,15 @@ struct Graph(Movable, Sized):
         var count = len(self.bases)
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
-        # Each edge's weight among the members, beside `successors`.
-        var weight = List[List[Int]](capacity=count)
-        for node in range(count):
-            weight.append(List[Int](length=len(self.successors[node]), fill=0))
+        var weight = List[Int32](length=len(self.edge_to), fill=0)
         for p in members:
             ref path = self.paths[p]
             if len(path) == 0:
                 continue
-            starts[path[0]] += 1
-            ends[path[len(path) - 1]] += 1
+            starts[Int(path[0])] += 1
+            ends[Int(path[len(path) - 1])] += 1
             for k in range(len(path) - 1):
-                for i in range(len(self.successors[path[k]])):
-                    if self.successors[path[k]][i] == path[k + 1]:
-                        weight[path[k]][i] += 1
+                weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
         return self._heaviest(order, starts, ends, weight)
 
     def heaviest_path(self, order: List[Int]) -> List[Int]:
@@ -228,11 +297,11 @@ struct Graph(Movable, Sized):
         var ends = List[Int](length=count, fill=0)
         for path in self.paths:
             if len(path) > 0:
-                starts[path[0]] += 1
-                ends[path[len(path) - 1]] += 1
-        return self._heaviest(order, starts, ends, self.weights)
+                starts[Int(path[0])] += 1
+                ends[Int(path[len(path) - 1])] += 1
+        return self._heaviest(order, starts, ends, self.edge_weight)
 
-    def _heaviest(self, order: List[Int], starts: List[Int], ends: List[Int], weights: List[List[Int]]) -> List[Int]:
+    def _heaviest(self, order: List[Int], starts: List[Int], ends: List[Int], weights: List[Int32]) -> List[Int]:
         var count = len(self.bases)
         var score = List[Int](length=count, fill=0)
         var next = List[Int](length=count, fill=-1)
@@ -241,15 +310,15 @@ struct Graph(Movable, Sized):
             var best_weight = ends[node] if ends[node] > 0 else -1
             var best_score = 0
             var choice = -1
-            for i in range(len(self.successors[node])):
-                var s = self.successors[node][i]
-                var weight = weights[node][i]
-                if weight == 0:
-                    continue
-                if weight > best_weight or (weight == best_weight and score[s] >= best_score):
+            var e = Int(self.first_out[node])
+            while e >= 0:
+                var s = Int(self.edge_to[e])
+                var weight = Int(weights[e])
+                if weight > 0 and (weight > best_weight or (weight == best_weight and score[s] >= best_score)):
                     best_weight = weight
                     best_score = score[s]
                     choice = s
+                e = Int(self.next_out[e])
             next[node] = choice
             score[node] = max(best_weight, 0) + (score[choice] if choice >= 0 else 0)
         var at = -1
@@ -266,15 +335,10 @@ struct Graph(Movable, Sized):
 
     def column_order(self) raises -> List[Int]:
         """Each column's place left to right: a topological order of the columns (Kahn's)."""
-        var count = len(self.members)
-        var incoming = List[Int](length=count, fill=0)
-        var after = List[List[Int]](length=count, fill=List[Int]())
-        for node in range(len(self.bases)):
-            for s in self.successors[node]:
-                var a = self.columns[node]
-                var b = self.columns[s]
-                after[a].append(b)
-                incoming[b] += 1
+        var count = self.column_count()
+        var incoming = List[Int32](length=count, fill=0)
+        for e in range(len(self.edge_to)):
+            incoming[Int(self.columns[Int(self.edge_to[e])])] += 1
         var ready = List[Int]()
         for c in range(count):
             if incoming[c] == 0:
@@ -287,10 +351,16 @@ struct Graph(Movable, Sized):
             head += 1
             place[c] = next
             next += 1
-            for b in after[c]:
-                incoming[b] -= 1
-                if incoming[b] == 0:
-                    ready.append(b)
+            var m = Int(self.column_first[c])
+            while m >= 0:
+                var e = Int(self.first_out[m])
+                while e >= 0:
+                    var b = Int(self.columns[Int(self.edge_to[e])])
+                    incoming[b] -= 1
+                    if incoming[b] == 0:
+                        ready.append(b)
+                    e = Int(self.next_out[e])
+                m = Int(self.column_next[m])
         if next != count:
             raise Error(t"the columns form a cycle: {count - next} of {count} unplaced")
         return place^
@@ -300,9 +370,9 @@ struct Graph(Movable, Sized):
         var place = self.column_order()
         var rows = List[String]()
         for path in self.paths:
-            var row = List[UInt8](length=len(self.members), fill=GAP)
+            var row = List[UInt8](length=self.column_count(), fill=GAP)
             for node in path:
-                row[place[self.columns[node]]] = self.bases[node]
+                row[place[Int(self.columns[Int(node)])]] = self.bases[Int(node)]
             rows.append(String(unsafe_from_utf8=row))
         return rows^
 

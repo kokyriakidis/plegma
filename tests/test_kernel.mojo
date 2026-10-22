@@ -103,18 +103,18 @@ def test_local_and_extension() raises:
     var local = align_to_graph(graph, topology, flanked.as_bytes(), s, LOCAL)
     assert_true(local.score >= 2 * 120)
     for j in range(30, 150):
-        assert_equal(local.nodes[j], graph.paths[0][100 + j - 30])
+        assert_equal(local.nodes[j], Int(graph.paths[0][100 + j - 30]))
     var prefix = String(a[byte=0:150]) + _random(60, 14)
     var extended = align_to_graph(graph, topology, prefix.as_bytes(), s, EXTENSION)
     assert_true(extended.score >= 2 * 150)
-    assert_equal(extended.nodes[0], graph.paths[0][0])
+    assert_equal(extended.nodes[0], Int(graph.paths[0][0]))
 
 
 def _paths(graph: Graph, node: Int, mut prefix: List[UInt8], mut out: List[String]):
     prefix.append(graph.bases[node])
-    if len(graph.successors[node]) == 0:
+    if len(graph.successors(node)) == 0:
         out.append(String(unsafe_from_utf8=prefix.copy()))
-    for s in graph.successors[node]:
+    for s in graph.successors(node):
         _paths(graph, s, prefix, out)
     _ = prefix.pop()
 
@@ -133,7 +133,7 @@ def test_graph_score_is_the_best_path_score() raises:
         var query = _mutated(base, 7, 300 + case_id)
         var spelled = List[String]()
         for node in range(len(graph)):
-            if len(graph.predecessors[node]) == 0:
+            if len(graph.predecessors(node)) == 0:
                 var prefix = List[UInt8]()
                 _paths(graph, node, prefix, spelled)
         var want = Int.MIN

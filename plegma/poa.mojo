@@ -87,11 +87,11 @@ def window_nodes(
     comptime BOTH = UInt8(2)
     var stack = List[Int]()
     if left >= 0:
-        for s in graph.successors[left]:
+        for s in graph.successors(left):
             stack.append(s)
     else:
         for node in range(count):
-            if len(graph.predecessors[node]) == 0:
+            if len(graph.predecessors(node)) == 0:
                 stack.append(node)
     while len(stack) > 0:
         var node = stack.pop()
@@ -99,14 +99,14 @@ def window_nodes(
             continue
         scratch.marks[node] = FORWARD
         scratch.touched.append(node)
-        for s in graph.successors[node]:
+        for s in graph.successors(node):
             stack.append(s)
     if right >= 0:
-        for p in graph.predecessors[right]:
+        for p in graph.predecessors(right):
             stack.append(p)
     else:
         for node in range(count):
-            if len(graph.successors[node]) == 0:
+            if len(graph.successors(node)) == 0:
                 stack.append(node)
     var keys = List[Int]()
     while len(stack) > 0:
@@ -115,7 +115,7 @@ def window_nodes(
             continue
         scratch.marks[node] = BOTH
         keys.append(rank[node])
-        for p in graph.predecessors[node]:
+        for p in graph.predecessors(node):
             stack.append(p)
     for node in scratch.touched:
         scratch.marks[node] = 0
@@ -153,9 +153,9 @@ def align_window(
     var preds = List[List[Int]](length=n + 1, fill=List[Int]())
     for r in range(n):
         var node = nodes[r]
-        if len(graph.predecessors[node]) == 0 and left == SOURCE:
+        if len(graph.predecessors(node)) == 0 and left == SOURCE:
             preds[r + 1].append(0)
-        for p in graph.predecessors[node]:
+        for p in graph.predecessors(node):
             if p == left:
                 preds[r + 1].append(0)
             elif p in row_of:
@@ -164,20 +164,20 @@ def align_window(
     for r in range(n):
         var node = nodes[r]
         if right == SINK:
-            if len(graph.successors[node]) == 0:
+            if len(graph.successors(node)) == 0:
                 ends.append(r + 1)
         else:
-            for s in graph.successors[node]:
+            for s in graph.successors(node):
                 if s == right:
                     ends.append(r + 1)
     var direct = False
     if left >= 0 and right >= 0:
-        for s in graph.successors[left]:
+        for s in graph.successors(left):
             direct = direct or s == right
     elif left >= 0:
-        direct = len(graph.successors[left]) == 0
+        direct = len(graph.successors(left)) == 0
     elif right >= 0:
-        direct = len(graph.predecessors[right]) == 0
+        direct = len(graph.predecessors(right)) == 0
     else:
         direct = n == 0
     if direct:

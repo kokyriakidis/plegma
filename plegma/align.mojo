@@ -102,8 +102,8 @@ def graph_alignment(
     var aligned = List[Int](length=len(query), fill=-1)
     for w in range(len(gaps)):
         var window = gaps[w]
-        var left = path[window.ref_start - 1] if window.ref_start > 0 else SOURCE
-        var right = path[window.ref_end] if window.ref_end < len(path) else SINK
+        var left = Int(path[window.ref_start - 1]) if window.ref_start > 0 else SOURCE
+        var right = Int(path[window.ref_end]) if window.ref_end < len(path) else SINK
         if window.query_end > window.query_start:
             var found = align_window(
                 graph, rank, order, left, right, query[window.query_start : window.query_end], costs, max_cells
@@ -131,11 +131,11 @@ def graph_alignment(
                         elif op == INSERTION:
                             j += 1
                         else:
-                            aligned[j] = path[i]
+                            aligned[j] = Int(path[i])
                             i += 1
                             j += 1
         if w < len(anchors):
             var a = anchors[w]
             for k in range(a.length):
-                aligned[a.query_pos + k] = path[a.ref_pos + k]
+                aligned[a.query_pos + k] = Int(path[a.ref_pos + k])
     return aligned^
