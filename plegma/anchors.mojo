@@ -135,6 +135,17 @@ def smems(anchors: List[Anchor]) -> List[Anchor]:
     return out^
 
 
+def mums_or_smems(anchors: List[Anchor]) -> List[Anchor]:
+    """MUMs (placed by uniqueness) with SMEMs (the longest match at each query position, the structure),
+    every partner occurrence of an SMEM kept: no shorter repeated MEM. `anchors` must be in query order."""
+    var keep = _maximal(anchors)
+    var out = List[Anchor]()
+    for i in range(len(anchors)):
+        if keep[i] or anchors[i].is_mum():
+            out.append(anchors[i])
+    return out^
+
+
 def rare_or_maximal(anchors: List[Anchor], max_copies: Int) -> List[Anchor]:
     """The anchors that are rare (at most `max_copies` copies in each sequence, MUMs among them) or SMEMs: the
     unique matches with the longest ones, however often those occur. `anchors` must be in query order."""

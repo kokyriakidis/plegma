@@ -7,7 +7,7 @@ recursion): at the next level, or with `stay` at the same level until a gap yiel
 next. What is left between the anchors are the windows an exact aligner fills.
 """
 
-from .anchors import Anchor, find_anchors, mums, rare, rare_or_maximal, smems
+from .anchors import Anchor, find_anchors, mums, mums_or_smems, rare, rare_or_maximal, smems
 from .chain import ChainCosts, chain, without_overlaps
 
 
@@ -23,6 +23,8 @@ comptime ALL = 4
 """Every MEM."""
 comptime RARE_OR_MAXIMAL = 5
 """Anchors that are rare (`Level.cap` copies at most, MUMs among them) or SMEMs."""
+comptime MUMS_OR_SMEMS = 6
+"""MUMs and SMEMs, no other MEM."""
 
 
 struct Level(ImplicitlyCopyable):
@@ -52,6 +54,8 @@ struct Level(ImplicitlyCopyable):
             return smems(anchors)
         if self.kind == RARE_OR_MAXIMAL:
             return rare_or_maximal(anchors, self.cap)
+        if self.kind == MUMS_OR_SMEMS:
+            return mums_or_smems(anchors)
         return anchors^
 
     def counted_to(self) -> Int:

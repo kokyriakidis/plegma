@@ -563,7 +563,10 @@ def main() raises:
     var inputs = List[String]()
     if listed:
         with open(input, "r") as f:
-            for line in f.read().splitlines():
+            # The lines are views of the text: keep it alive while they are read. Split on newlines alone:
+            # this nightly's splitlines also splits at tabs, which a file name may hold.
+            var content = f.read()
+            for line in content.split("\n"):
                 var name = String(line.strip())
                 if name.byte_length() > 0:
                     inputs.append(name)
