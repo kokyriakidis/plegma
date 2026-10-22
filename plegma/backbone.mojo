@@ -85,12 +85,14 @@ def backbone(
     budget: Int,
     stay: Bool = False,
     max_anchors: Int = 50_000,
+    lookback: Int = 0,
 ) raises -> List[Anchor]:
     """Non-overlapping anchors, in order on both sequences: level 0 over the whole pair, then inside every gap
     still longer than `budget` letters the next level, or with `stay` the same one until a gap yields nothing.
-    A gap with more than `max_anchors` anchors is left to the next level."""
+    A gap with more than `max_anchors` anchors is left to the next level; `lookback` caps how far back each
+    anchor's chain search goes (0: no cap)."""
     var out = List[Anchor]()
-    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, out)
+    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, lookback, out)
     return out^
 
 
@@ -105,6 +107,7 @@ def _refine(
     budget: Int,
     stay: Bool,
     max_anchors: Int,
+    lookback: Int,
     mut out: List[Anchor],
 ) raises:
     if level >= len(levels) or max(len(partner), len(query)) <= budget:
@@ -113,10 +116,12 @@ def _refine(
     var found = current.select(find_anchors(partner, query, current.min_len, current.counted_to()))
     var picked = List[Anchor]()
     if len(found) <= max_anchors:
-        picked = without_overlaps(chain(found, len(partner), len(query), costs).anchors)
+        picked = without_overlaps(chain(found, len(partner), len(query), costs, lookback).anchors)
     var next = level if stay else level + 1
     if len(picked) == 0:
-        _refine(partner, query, ref_offset, query_offset, levels, level + 1, costs, budget, stay, max_anchors, out)
+        _refine(
+            partner, query, ref_offset, query_offset, levels, level + 1, costs, budget, stay, max_anchors, lookback, out
+        )
         return
     var ref_at = 0
     var query_at = 0
@@ -132,6 +137,7 @@ def _refine(
             budget,
             stay,
             max_anchors,
+            lookback,
             out,
         )
         out.append(a.shifted(ref_offset, query_offset))
@@ -148,6 +154,7 @@ def _refine(
         budget,
         stay,
         max_anchors,
+        lookback,
         out,
     )
 

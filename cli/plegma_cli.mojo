@@ -34,6 +34,7 @@ Options:
                 SMEMs, seeded again inside every gap), and align only the windows between anchors
     -n INT      gaps of at most INT letters are not seeded again [500]
     -T INT      letters each anchor gives back to the DP at both ends [10]
+    -H INT      anchors each anchor's chain search looks back over, at most [200]; 0: all
   Order and strand:
     -L          align the sequences longest first
     -p          progressive: abPOA's guide order, most similar minimizer multisets first
@@ -94,6 +95,7 @@ def _seeded(
     band_f: Float64,
     window: Int,
     trim: Int,
+    lookback: Int,
     mut row_of: List[Int],
     mut scratch: WindowScratch,
     mut workspace: Workspace,
@@ -107,7 +109,7 @@ def _seeded(
     var levels = List[Level]()
     for n in [51, 31, 21, 15]:
         levels.append(Level(RARE_OR_MAXIMAL, n, 8))
-    var chained = backbone(Span(letters), query, levels, ChainCosts(substitution=0.1), window, True)
+    var chained = backbone(Span(letters), query, levels, ChainCosts(substitution=0.1), window, True, lookback=lookback)
     # Each anchor loses `trim` letters at both ends: the DP, not the anchor, decides where a gap next to it goes.
     var anchors = List[Anchor]()
     for a in chained:
@@ -163,6 +165,7 @@ struct Options(Copyable, Movable):
     var seeding: Bool
     var window: Int
     var trim: Int
+    var lookback: Int
     var start_msa: String
     var result: Int
     var consensus_rule: Int
@@ -181,6 +184,7 @@ struct Options(Copyable, Movable):
         self.seeding = False
         self.window = 500
         self.trim = 10
+        self.lookback = 200
         self.start_msa = String()
         self.result = 0
         self.consensus_rule = 0
@@ -227,6 +231,7 @@ def _align(
             options.band_f,
             options.window,
             options.trim,
+            options.lookback,
             row_of,
             scratch,
             workspace,
@@ -519,6 +524,9 @@ def main() raises:
             i += 1
         elif a == "-T":
             options.trim = Int(_value(args, i))
+            i += 1
+        elif a == "-H":
+            options.lookback = Int(_value(args, i))
             i += 1
         elif a == "-l":
             listed = True

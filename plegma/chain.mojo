@@ -118,11 +118,12 @@ struct Chain(Movable):
         self.cost = cost
 
 
-def chain(anchors: List[Anchor], ref_len: Int, query_len: Int, costs: ChainCosts) -> Chain:
+def chain(anchors: List[Anchor], ref_len: Int, query_len: Int, costs: ChainCosts, lookback: Int = 0) -> Chain:
     """The best chain from the start of both sequences to their ends through `anchors` (in query order, as
     `find_anchors` gives them). Of equal chains, the one taking the earliest predecessor at each anchor. Quadratic
     in the anchors at worst; under ChainX-like costs each anchor looks back only as far as its best link can
-    reach."""
+    reach, and with `lookback` at most that many anchors back (minimap2's cap: inexact, but nearer predecessors
+    are the ones a chain of close anchors takes)."""
     var n = len(anchors)
     var start = Anchor(0, 0, 0)
     var end = Anchor(ref_len, query_len, 0)
@@ -149,7 +150,8 @@ def chain(anchors: List[Anchor], ref_len: Int, query_len: Int, costs: ChainCosts
         var best_paid = costs.link(start, a)
         var from_index = -1
         # Back from the nearest, the earliest of equal predecessors kept (and the start before any of them).
-        for j in reversed(range(i)):
+        var stop = max(0, i - lookback) if lookback > 0 else 0
+        for j in reversed(range(stop, i)):
             var b = anchors[j]
             if bounded and costs.substitution * Float64(a.query_pos - b.query_pos - longest) > -best:
                 break
