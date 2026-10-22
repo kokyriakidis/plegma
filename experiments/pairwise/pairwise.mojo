@@ -1,6 +1,8 @@
 """E1-E5: pairwise anchors, chains and filled backbones on one vntr-eval region.
 
-usage: pairwise <hap32.fa> <region> <partner name prefix> <flank left> <flank right> <period> <out prefix>
+usage: pairwise <hap32.fa> <region> <partner name prefix> <flank left> <flank right> <period> <out prefix> [chains]
+
+With `chains`, E1 is skipped.
 
 Each distinct sequence other than the partner is a query. `<out prefix>.census.tsv` holds E1: per anchor kind
 and minimum length, how many anchors fall in the repeat array and how many lie on some optimal alignment (unit
@@ -16,7 +18,7 @@ from karan import Aligner
 from sporos import read_fasta
 
 from plegma.anchors import Anchor, find_anchors, mums, rare, smems
-from plegma.backbone import ALL, Level, MUMS, RARE, REFERENCE_UNIQUE, SMEMS, backbone, windows
+from plegma.backbone import ALL, Level, MUMS, RARE, RARE_OR_MAXIMAL, REFERENCE_UNIQUE, SMEMS, backbone, windows
 from plegma.chain import ChainCosts, linked_cost
 
 
@@ -33,42 +35,39 @@ struct Config(Copyable, Movable):
     var levels: List[Level]
     var costs: ChainCosts
     var budget: Int
-    var repeat_last: Bool
+    var stay: Bool
 
     def __init__(
-        out self, name: String, var levels: List[Level], costs: ChainCosts, budget: Int = 0, repeat_last: Bool = False
+        out self, name: String, var levels: List[Level], costs: ChainCosts, budget: Int = 0, stay: Bool = False
     ):
         self.name = name
         self.levels = levels^
         self.costs = costs
         self.budget = budget
-        self.repeat_last = repeat_last
+        self.stay = stay
 
 
 def _configs(period: Int) -> List[Config]:
+    """The backbones compared. `sN` charges a link's unanchored letters N/100 each (ChainX: 100)."""
     var out = List[Config]()
-    var concave = ChainCosts(open1=2.0, extend1=1.0, open2=20.0, extend2=0.1)
-    var periodic = ChainCosts(open1=2.0, extend1=1.0, open2=20.0, extend2=0.1, period=period, off_period=1.0)
-    var weighted = ChainCosts(gain=1.0, rarity=True)
-    for min_len in [20, 50, 100]:
-        out.append(Config(String(t"heaviest.mum.L{min_len}"), [Level(MUMS, min_len)], ChainCosts.heaviest()))
-        out.append(Config(String(t"chainx.mum.L{min_len}"), [Level(MUMS, min_len)], ChainCosts.chainx()))
-        out.append(Config(String(t"chainx.mum.L{min_len}.rec"), [Level(MUMS, min_len)], ChainCosts.chainx(), 0, True))
-    out.append(Config("heaviest.mum.L20.rec", [Level(MUMS, 20)], ChainCosts.heaviest(), 0, True))
-    out.append(Config("chainx.mumref.L20", [Level(REFERENCE_UNIQUE, 20)], ChainCosts.chainx()))
-    out.append(Config("chainx.rare8.L20", [Level(RARE, 20, 8)], ChainCosts.chainx()))
-    out.append(Config("chainx.rare50.L31", [Level(RARE, 31, 50)], ChainCosts.chainx()))
-    out.append(Config("chainx.smem.L20", [Level(SMEMS, 20)], ChainCosts.chainx()))
+    var lengths: List[Int] = [51, 31, 21, 15]
+    var mums_only = List[Level]()
+    var combined = List[Level]()
+    for n in lengths:
+        mums_only.append(Level(MUMS, n))
+        combined.append(Level(RARE_OR_MAXIMAL, n, 8))
+    out.append(Config("heaviest.mum.L20", [Level(MUMS, 20)], ChainCosts.heaviest()))
     out.append(Config("chainx.all.L31", [Level(ALL, 31)], ChainCosts.chainx()))
-    out.append(Config("concave.mum.L20", [Level(MUMS, 20)], concave))
-    out.append(Config("concave.rare8.L20", [Level(RARE, 20, 8)], concave))
-    out.append(Config("periodic.mum.L20", [Level(MUMS, 20)], periodic))
-    out.append(Config("periodic.rare8.L20", [Level(RARE, 20, 8)], periodic))
-    out.append(Config("weighted.rare8.L20", [Level(RARE, 20, 8)], weighted))
-    var schedule: List[Level] = [Level(MUMS, 51), Level(MUMS, 31), Level(MUMS, 21), Level(MUMS, 15)]
-    for budget in [1000, 2000, 5000]:
-        out.append(Config(String(t"chainx.mum.51-15.W{budget}"), schedule.copy(), ChainCosts.chainx(), budget))
-    out.append(Config("chainx.flank.L50", [Level(MUMS, 50)], ChainCosts.chainx()))
+    for sigma in [100, 50, 30, 20, 10, 5]:
+        var costs = ChainCosts(substitution=Float64(sigma) / 100.0)
+        out.append(Config(String(t"s{sigma}.mum.L20"), [Level(MUMS, 20)], costs))
+        out.append(Config(String(t"s{sigma}.mum.L100"), [Level(MUMS, 100)], costs))
+        out.append(Config(String(t"s{sigma}.rare8.L20"), [Level(RARE, 20, 8)], costs))
+        out.append(Config(String(t"s{sigma}.all.L31"), [Level(ALL, 31)], costs))
+        # Seeded again inside every subregion at the same length until it yields nothing, then shorter.
+        out.append(Config(String(t"s{sigma}.stay.mum.51-15"), mums_only.copy(), costs, 0, True))
+        out.append(Config(String(t"s{sigma}.stay.combo8.51-15"), combined.copy(), costs, 0, True))
+        out.append(Config(String(t"s{sigma}.stay.combo8.51-15.W500"), combined.copy(), costs, 500, True))
     return out^
 
 
@@ -92,8 +91,11 @@ def _optimal_through(mut aligner: Aligner, partner: String, query: String, a: An
 
 def main() raises:
     var args = argv()
-    if len(args) != 8:
-        raise Error("usage: pairwise <hap32.fa> <region> <partner prefix> <flank left> <flank right> <period> <out>")
+    if len(args) < 8:
+        raise Error(
+            "usage: pairwise <hap32.fa> <region> <partner prefix> <flank left> <flank right> <period> <out> [chains]"
+        )
+    var census_too = len(args) < 9 or String(args[8]) != "chains"
     var region = String(args[2])
     var prefix = String(args[3])
     var flank_left = Int(args[4])
@@ -136,7 +138,7 @@ def main() raises:
         var head = String(t"{region}\t{name}\t{len(query_bytes)}\t{len(partner_bytes)}\t{best}")
 
         # E1: which anchors lie on an optimal alignment.
-        for min_len in [15, 21, 31, 51]:
+        for min_len in [15, 21, 31, 51] if census_too else List[Int]():
             var every = find_anchors(partner_bytes, query_bytes, min_len, 51)
             var kinds = List[Tuple[String, List[Anchor]]]()
             kinds.append(("mum", mums(every)))
@@ -177,9 +179,7 @@ def main() raises:
         # E2-E5: backbones and their exact fill.
         for config in configs:
             var t1 = perf_counter_ns()
-            var picked = backbone(
-                partner_bytes, query_bytes, config.levels, config.costs, config.budget, config.repeat_last
-            )
+            var picked = backbone(partner_bytes, query_bytes, config.levels, config.costs, config.budget, config.stay)
             var backbone_ms = Float64(perf_counter_ns() - t1) / 1e6
             var anchored = 0
             for a in picked:

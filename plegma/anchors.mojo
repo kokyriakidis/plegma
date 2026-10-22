@@ -103,10 +103,10 @@ def rare(anchors: List[Anchor], max_copies: Int) -> List[Anchor]:
     return out^
 
 
-def smems(anchors: List[Anchor]) -> List[Anchor]:
-    """The anchors whose query interval no other anchor's strictly contains: a string's every partner
-    occurrence is kept. `anchors` must be in query order, as `find_anchors` gives them."""
-    var out = List[Anchor]()
+def _maximal(anchors: List[Anchor]) -> List[Bool]:
+    """Whether each anchor's query interval is one no other anchor's strictly contains. `anchors` must be in
+    query order."""
+    var keep = List[Bool](length=len(anchors), fill=False)
     var reach = -1  # the furthest query end of the anchors starting before the current start
     var i = 0
     while i < len(anchors):
@@ -118,8 +118,30 @@ def smems(anchors: List[Anchor]) -> List[Anchor]:
             j += 1
         if start + longest > reach:
             for k in range(i, j):
-                if anchors[k].length == longest:
-                    out.append(anchors[k])
+                keep[k] = anchors[k].length == longest
         reach = max(reach, start + longest)
         i = j
+    return keep^
+
+
+def smems(anchors: List[Anchor]) -> List[Anchor]:
+    """The anchors whose query interval no other anchor's strictly contains: a string's every partner
+    occurrence is kept. `anchors` must be in query order, as `find_anchors` gives them."""
+    var keep = _maximal(anchors)
+    var out = List[Anchor]()
+    for i in range(len(anchors)):
+        if keep[i]:
+            out.append(anchors[i])
+    return out^
+
+
+def rare_or_maximal(anchors: List[Anchor], max_copies: Int) -> List[Anchor]:
+    """The anchors that are rare (at most `max_copies` copies in each sequence, MUMs among them) or SMEMs: the
+    unique matches with the longest ones, however often those occur. `anchors` must be in query order."""
+    var keep = _maximal(anchors)
+    var out = List[Anchor]()
+    for i in range(len(anchors)):
+        var a = anchors[i]
+        if keep[i] or (a.ref_copies <= max_copies and a.query_copies <= max_copies):
+            out.append(a)
     return out^

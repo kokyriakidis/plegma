@@ -1,12 +1,13 @@
 """The backbone of a pairwise alignment: chained anchors, refined inside the gaps they leave.
 
-Each level finds anchors, chains them between fixed ends and cuts the overlaps away; every gap still longer than
-the budget is searched again at the next level, its anchors counted inside the gap, where a string repeated
-across the whole sequence may be unique (LAGAN's recursion). What is left between the anchors are the windows an
-exact aligner fills.
+A level finds anchors in a stretch of both sequences, chains them between the stretch's fixed ends and cuts the
+overlaps away. Every gap between them still longer than the budget is searched again, its anchors found and
+counted inside the gap alone, where a string repeated across the whole sequence may be unique (LAGAN's
+recursion): at the next level, or with `stay` at the same level until a gap yields nothing, and only then at the
+next. What is left between the anchors are the windows an exact aligner fills.
 """
 
-from .anchors import Anchor, find_anchors, mums, rare, smems
+from .anchors import Anchor, find_anchors, mums, rare, rare_or_maximal, smems
 from .chain import ChainCosts, chain, without_overlaps
 
 
@@ -20,6 +21,8 @@ comptime SMEMS = 3
 """Anchors no other anchor's query interval strictly contains."""
 comptime ALL = 4
 """Every MEM."""
+comptime RARE_OR_MAXIMAL = 5
+"""Anchors that are rare (`Level.cap` copies at most, MUMs among them) or SMEMs."""
 
 
 struct Level(ImplicitlyCopyable):
@@ -47,11 +50,13 @@ struct Level(ImplicitlyCopyable):
             return rare(anchors, self.cap)
         if self.kind == SMEMS:
             return smems(anchors)
+        if self.kind == RARE_OR_MAXIMAL:
+            return rare_or_maximal(anchors, self.cap)
         return anchors^
 
     def counted_to(self) -> Int:
-        """The cap its anchors are counted to: past `cap`, so copies above it show."""
-        return max(self.cap, 1) + 1 if self.kind == RARE else 2
+        """The cap its anchors are counted to: past `cap`, so copies above it show (and weigh)."""
+        return max(self.cap, 1) + 1 if self.kind == RARE or self.kind == RARE_OR_MAXIMAL else 2
 
 
 struct Window(ImplicitlyCopyable):
@@ -78,15 +83,14 @@ def backbone(
     levels: List[Level],
     costs: ChainCosts,
     budget: Int,
-    repeat_last: Bool = False,
+    stay: Bool = False,
     max_anchors: Int = 50_000,
 ) raises -> List[Anchor]:
-    """Non-overlapping anchors, in order on both sequences, from `levels` in turn: level 0 over the whole pair,
-    each later level inside the gaps still longer than `budget` letters; with `repeat_last`, the last level
-    again inside its own gaps until it finds nothing. A gap with more than `max_anchors` anchors is left to the
-    next level."""
+    """Non-overlapping anchors, in order on both sequences: level 0 over the whole pair, then inside every gap
+    still longer than `budget` letters the next level, or with `stay` the same one until a gap yields nothing.
+    A gap with more than `max_anchors` anchors is left to the next level."""
     var out = List[Anchor]()
-    _refine(partner, query, 0, 0, levels, 0, costs, budget, repeat_last, max_anchors, out)
+    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, out)
     return out^
 
 
@@ -99,7 +103,7 @@ def _refine(
     level: Int,
     costs: ChainCosts,
     budget: Int,
-    repeat_last: Bool,
+    stay: Bool,
     max_anchors: Int,
     mut out: List[Anchor],
 ) raises:
@@ -110,13 +114,9 @@ def _refine(
     var picked = List[Anchor]()
     if len(found) <= max_anchors:
         picked = without_overlaps(chain(found, len(partner), len(query), costs).anchors)
-    var next = level + 1
-    if repeat_last and next == len(levels) and len(picked) > 0:
-        next = level
+    var next = level if stay else level + 1
     if len(picked) == 0:
-        _refine(
-            partner, query, ref_offset, query_offset, levels, level + 1, costs, budget, repeat_last, max_anchors, out
-        )
+        _refine(partner, query, ref_offset, query_offset, levels, level + 1, costs, budget, stay, max_anchors, out)
         return
     var ref_at = 0
     var query_at = 0
@@ -130,7 +130,7 @@ def _refine(
             next,
             costs,
             budget,
-            repeat_last,
+            stay,
             max_anchors,
             out,
         )
@@ -146,7 +146,7 @@ def _refine(
         next,
         costs,
         budget,
-        repeat_last,
+        stay,
         max_anchors,
         out,
     )
