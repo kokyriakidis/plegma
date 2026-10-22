@@ -12,7 +12,7 @@ from plegma.chain import ChainCosts
 from plegma.graph import Graph, GAP
 from plegma.clusters import cluster_rows
 from plegma.order import guide_order
-from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, align_between, align_to_graph
+from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
 
 
@@ -96,6 +96,7 @@ def _seeded(
     trim: Int,
     mut row_of: List[Int],
     mut scratch: WindowScratch,
+    mut workspace: Workspace,
 ) raises -> GraphAlignment:
     """`query` aligned to the graph through anchors on the consensus path: each window between two anchors
     aligned to the subgraph between their nodes, the anchors' letters matched."""
@@ -125,7 +126,7 @@ def _seeded(
         var right = path[gap.ref_end] if gap.ref_end < len(path) else SINK
         if gap.query_end > gap.query_start:
             var nodes = window_nodes(graph, topology.rank, topology.order, left, right, scratch)
-            var found = align_between(
+            var found = workspace.align(
                 graph,
                 topology,
                 nodes,
@@ -212,10 +213,11 @@ def _align(
     options: Options,
     mut row_of: List[Int],
     mut scratch: WindowScratch,
+    mut workspace: Workspace,
 ) raises -> GraphAlignment:
     var topology = Topology(graph)
+    row_of.resize(len(graph), -1)
     if options.seeding and options.mode == GLOBAL:
-        row_of.resize(len(graph), -1)
         return _seeded(
             graph,
             topology,
@@ -227,8 +229,21 @@ def _align(
             options.trim,
             row_of,
             scratch,
+            workspace,
         )
-    return align_to_graph(graph, topology, seq, options.scoring, options.mode, options.band_b, options.band_f)
+    return workspace.align(
+        graph,
+        topology,
+        topology.order,
+        SOURCE,
+        SINK,
+        seq,
+        options.scoring,
+        row_of,
+        options.mode,
+        options.band_b,
+        options.band_f,
+    )
 
 
 def _poa(input: String, options: Options) raises -> String:
@@ -280,13 +295,14 @@ def _poa(input: String, options: Options) raises -> String:
     var reversed_count = 0
     var row_of = List[Int]()
     var scratch = WindowScratch()
+    var workspace = Workspace()
     for k in range(len(order)):
         var r = order[k]
         var name = records.names[r]
         if len(graph) == 0:
             path_of[r] = graph.add(name, Span(seqs[r]))
             continue
-        var found = _align(graph, Span(seqs[r]), options, row_of, scratch)
+        var found = _align(graph, Span(seqs[r]), options, row_of, scratch, workspace)
         cells += found.cells
         peak = max(peak, found.peak_bytes)
         if options.strand:
@@ -294,7 +310,7 @@ def _poa(input: String, options: Options) raises -> String:
             var floor = Int(options.scoring.match_score) * min(len(seqs[r]), len(graph.paths[0])) // 3
             if found.score < floor:
                 var flipped = _reverse_complement(Span(seqs[r]))
-                var other = _align(graph, Span(flipped), options, row_of, scratch)
+                var other = _align(graph, Span(flipped), options, row_of, scratch, workspace)
                 cells += other.cells
                 if other.score > found.score:
                     seqs[r] = flipped^
