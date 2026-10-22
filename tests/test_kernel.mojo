@@ -3,7 +3,8 @@ from std.testing import assert_equal, assert_true, TestSuite
 from karan import Costs, distance
 
 from plegma.graph import Graph
-from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology, align_to_graph
+from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology, Workspace, align_to_graph
+from plegma.poa import SINK, SOURCE
 
 
 def _random(n: Int, seed: Int) -> String:
@@ -142,6 +143,33 @@ def test_graph_score_is_the_best_path_score() raises:
         var topology = Topology(graph)
         assert_equal(align_to_graph(graph, topology, query.as_bytes(), s, GLOBAL, -1).score, want)
         assert_equal(align_to_graph(graph, topology, query.as_bytes(), s, GLOBAL, 10, 0.01).score, want)
+
+
+def test_16_and_32_bit_lanes_agree() raises:
+    for mode in [GLOBAL, LOCAL, EXTENSION]:
+        for case_id in range(6):
+            var base = _random(150 + 90 * case_id, 400 + case_id)
+            var graph = Graph()
+            _ = graph.add("s0", base.as_bytes())
+            for k in range(1, 5):
+                var next = _mutated(base, 7, 500 + 10 * case_id + k)
+                var topology = Topology(graph)
+                var found = align_to_graph(graph, topology, next.as_bytes(), Scoring(), GLOBAL)
+                _ = graph.fuse_nodes(String(t"s{k}"), next.as_bytes(), found.nodes)
+            var query = _mutated(base, 6, 600 + case_id)
+            var topology = Topology(graph)
+            var row_of = List[Int](length=len(graph), fill=-1)
+            var narrow = Workspace()
+            var wide = Workspace()
+            var a = narrow._align[DType.int16](
+                graph, topology, topology.order, SOURCE, SINK, query.as_bytes(), Scoring(), row_of, mode
+            )
+            var b = wide._align[DType.int32](
+                graph, topology, topology.order, SOURCE, SINK, query.as_bytes(), Scoring(), row_of, mode
+            )
+            assert_equal(a.score, b.score)
+            for j in range(len(a.nodes)):
+                assert_equal(a.nodes[j], b.nodes[j])
 
 
 def main() raises:
