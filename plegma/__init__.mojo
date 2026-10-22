@@ -36,6 +36,16 @@ from .backbone import ALL, Level, MUMS, RARE, RARE_OR_MAXIMAL, REFERENCE_UNIQUE,
 from .chain import Chain, ChainCosts, chain, linked_cost, without_overlaps
 from .clusters import cluster_rows
 from .graph import Graph, Runs, cigar_runs
-from .kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace, align_between, align_to_graph
+from .kernel import (
+    EXTENSION,
+    GLOBAL,
+    LOCAL,
+    GraphAlignment,
+    Scoring,
+    Topology,
+    Workspace,
+    align_between,
+    align_to_graph,
+)
 from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window

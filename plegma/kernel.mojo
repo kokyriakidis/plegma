@@ -10,6 +10,7 @@ last successor is computed; what the traceback needs is one byte per cell (where
 at nodes with several predecessors three more (which predecessor each move came from).
 """
 
+from std.math import iota
 from std.sys import simd_width_of
 
 from .alphabet import encode_base
@@ -564,25 +565,12 @@ struct Workspace(Movable):
                     at += 1
             # Gaps along the query, left to right, from those scores: a gap opened after another never beats one
             # longer gap (with E1 >= E2), so the insertion states need not see each other.
-            var run1 = _NEG
-            var run2 = _NEG
-            f1[unsafe_offset=0] = _NEG
-            f2[unsafe_offset=0] = _NEG
-            f1x[unsafe_offset=0] = 0
-            f2x[unsafe_offset=0] = 0
-            for k in range(1, span):
-                var previous = h[unsafe_offset=k - 1]
-                var open1 = previous - gap1
-                var extend1 = run1 - e1
-                run1 = max(open1, extend1)
-                f1[unsafe_offset=k] = run1
-                f1x[unsafe_offset=k] = Int32(1) if extend1 > open1 else Int32(0)
-                if convex:
-                    var open2 = previous - gap2
-                    var extend2 = run2 - e2
-                    run2 = max(open2, extend2)
-                    f2[unsafe_offset=k] = run2
-                    f2x[unsafe_offset=k] = Int32(1) if extend2 > open2 else Int32(0)
+            # As running maxima: F[k] = max over t < k of (H[t] + e t) - (o + e) - e (k - 1), a prefix maximum
+            # in lane shifts, carried from block to block; a cell extends when its left neighbour's gap, less e,
+            # beats opening from its left neighbour.
+            _gap_scan(h, f1, f1x, span, gap1, e1)
+            if convex:
+                _gap_scan(h, f2, f2x, span, gap2, e2)
             if not convex:
                 _fill(f2, span)
                 _zero(f2x, span)
@@ -780,6 +768,59 @@ def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut r
     for key in keys:
         var p = Int(graph.edge_from[Int(key & 0xFFFFFFFF)])
         rows.append(0 if p == left else row_of[p])
+
+
+@inline(.always)
+def _prefix_max(v: _I) -> _I:
+    """Each lane's maximum over itself and the lanes before it."""
+    var lane = iota[DType.int32, _V]()
+    var out = v
+    comptime for step in range(5):
+        comptime shift = 1 << step
+        comptime if shift < _V:
+            out = max(out, lane.lt(Int32(shift)).select(_I(_NEG), out.shift_right[shift]()))
+    return out
+
+
+@inline(.always)
+def _gap_scan(
+    h: MutPointer[Int32, _], f: MutPointer[Int32, _], fx: MutPointer[Int32, _], span: Int, gap: Int32, e: Int32
+):
+    """One gap piece along the query: `f[k] = max(h[k - 1] - gap, f[k - 1] - e)` (`f[0]` unreachable) and
+    `fx[k]` 1 where extending won, from the scores `h` of a row of `span` cells."""
+    var lane = iota[DType.int32, _V]()
+    var carry = _NEG  # the largest h[t] + e t of the cells before the block
+    var last_f = _NEG
+    var last_h = _NEG
+    var at = 0
+    while at + _V <= span:
+        var here = h.unsafe_load[width=_V](at)
+        var index = lane + Int32(at)
+        var reach = _prefix_max(here + e * index)
+        var before = max(lane.eq(0).select(_I(carry), reach.shift_right[1]()), _I(carry))
+        var gaps = before - gap - e * (index - 1)
+        if at == 0:
+            gaps = lane.eq(0).select(_I(_NEG), gaps)
+        var left_f = lane.eq(0).select(_I(last_f), gaps.shift_right[1]())
+        var left_h = lane.eq(0).select(_I(last_h), here.shift_right[1]())
+        f.unsafe_store(at, gaps)
+        fx.unsafe_store(at, (left_f - e).gt(left_h - gap).select(_I(1), _I(0)))
+        carry = max(carry, reach[_V - 1])
+        last_f = gaps[_V - 1]
+        last_h = here[_V - 1]
+        at += _V
+    while at < span:
+        if at == 0:
+            f[unsafe_offset=0] = _NEG
+            fx[unsafe_offset=0] = 0
+        else:
+            var open = last_h - gap
+            var extend = last_f - e
+            last_f = max(open, extend)
+            f[unsafe_offset=at] = last_f
+            fx[unsafe_offset=at] = Int32(1) if extend > open else Int32(0)
+        last_h = h[unsafe_offset=at]
+        at += 1
 
 
 @inline(.always)
