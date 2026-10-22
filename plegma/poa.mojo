@@ -55,13 +55,36 @@ struct WindowAlignment(Copyable, Movable):
         self.cost = cost
 
 
+struct WindowScratch(Movable):
+    """Reusable marks for `window_nodes`: one byte a node, reset after each call for the nodes it touched."""
+
+    var marks: List[UInt8]
+    var touched: List[Int]
+
+    def __init__(out self):
+        self.marks = List[UInt8]()
+        self.touched = List[Int]()
+
+
 def window_nodes(graph: Graph, rank: List[Int], order: List[Int], left: Int, right: Int) -> List[Int]:
     """The nodes strictly between `left` and `right` (or `SOURCE`, `SINK`) that a path from one to the other
     can visit, in topological order (`rank` each node's place in `order`)."""
+    var scratch = WindowScratch()
+    return window_nodes(graph, rank, order, left, right, scratch)
+
+
+def window_nodes(
+    graph: Graph, rank: List[Int], order: List[Int], left: Int, right: Int, mut scratch: WindowScratch
+) -> List[Int]:
+    """`window_nodes`, touching only the nodes between the two ends (and, at the graph's ends, its sources or
+    sinks), through `scratch`."""
     var count = len(graph)
+    if len(scratch.marks) < count:
+        scratch.marks.resize(count, 0)
     var low = rank[left] if left >= 0 else -1
     var high = rank[right] if right >= 0 else count
-    var forward = List[Bool](length=count, fill=False)
+    comptime FORWARD = UInt8(1)
+    comptime BOTH = UInt8(2)
     var stack = List[Int]()
     if left >= 0:
         for s in graph.successors[left]:
@@ -72,12 +95,12 @@ def window_nodes(graph: Graph, rank: List[Int], order: List[Int], left: Int, rig
                 stack.append(node)
     while len(stack) > 0:
         var node = stack.pop()
-        if rank[node] >= high or forward[node]:
+        if rank[node] >= high or scratch.marks[node] != 0:
             continue
-        forward[node] = True
+        scratch.marks[node] = FORWARD
+        scratch.touched.append(node)
         for s in graph.successors[node]:
             stack.append(s)
-    var both = List[Bool](length=count, fill=False)
     if right >= 0:
         for p in graph.predecessors[right]:
             stack.append(p)
@@ -85,17 +108,22 @@ def window_nodes(graph: Graph, rank: List[Int], order: List[Int], left: Int, rig
         for node in range(count):
             if len(graph.successors[node]) == 0:
                 stack.append(node)
+    var keys = List[Int]()
     while len(stack) > 0:
         var node = stack.pop()
-        if rank[node] <= low or both[node] or not forward[node]:
+        if rank[node] <= low or scratch.marks[node] != FORWARD:
             continue
-        both[node] = True
+        scratch.marks[node] = BOTH
+        keys.append(rank[node])
         for p in graph.predecessors[node]:
             stack.append(p)
-    var out = List[Int]()
-    for r in range(low + 1, high):
-        if both[order[r]]:
-            out.append(order[r])
+    for node in scratch.touched:
+        scratch.marks[node] = 0
+    scratch.touched.clear()
+    sort(keys)
+    var out = List[Int](capacity=len(keys))
+    for r in keys:
+        out.append(order[r])
     return out^
 
 

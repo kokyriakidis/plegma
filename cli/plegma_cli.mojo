@@ -6,8 +6,11 @@ from std.time import perf_counter_ns
 
 from sporos import read_fasta
 
+from plegma.backbone import Level, RARE_OR_MAXIMAL, backbone, windows
+from plegma.chain import ChainCosts
 from plegma.graph import Graph, GAP
-from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology, align_to_graph
+from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, align_between, align_to_graph
+from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
 
 
 comptime USAGE = """Usage: plegma [options] <in.fa/fq> > cons.fa/msa.fa/plegma.gfa
@@ -23,6 +26,10 @@ Options:
   Adaptive banded DP:
     -b INT      extra band b [10]; < 0 disables the band
     -f FLOAT    extra band f [0.01]: b+f*L letters either side, L the sequence's length
+  Seeding and partition (global mode):
+    -S          anchor each sequence to the consensus path with sporos's exact matches (MUMs, rare MEMs and
+                SMEMs, seeded again inside every gap), and align only the windows between anchors
+    -n INT      gaps of at most INT letters are not seeded again [500]
   Order:
     -L          align the sequences longest first
   Input/Output:
@@ -68,6 +75,64 @@ def _consensus_most_frequent(rows: List[String]) -> String:
     return String(unsafe_from_utf8=out)
 
 
+def _seeded(
+    graph: Graph,
+    topology: Topology,
+    query: Span[UInt8, _],
+    scoring: Scoring,
+    band_b: Int,
+    band_f: Float64,
+    window: Int,
+    mut row_of: List[Int],
+    mut scratch: WindowScratch,
+) raises -> GraphAlignment:
+    """`query` aligned to the graph through anchors on the consensus path: each window between two anchors
+    aligned to the subgraph between their nodes, the anchors' letters matched."""
+    var path = graph.heaviest_path(topology.order)
+    var letters = List[UInt8](capacity=len(path))
+    for node in path:
+        letters.append(graph.bases[node])
+    var levels = List[Level]()
+    for n in [51, 31, 21, 15]:
+        levels.append(Level(RARE_OR_MAXIMAL, n, 8))
+    var anchors = backbone(Span(letters), query, levels, ChainCosts(substitution=0.1), window, True)
+    var gaps = windows(anchors, len(letters), len(query))
+    var aligned = List[Int](length=len(query), fill=-1)
+    var score = 0
+    var cells = 0
+    var peak = 0
+    for w in range(len(gaps)):
+        var gap = gaps[w]
+        var left = path[gap.ref_start - 1] if gap.ref_start > 0 else SOURCE
+        var right = path[gap.ref_end] if gap.ref_end < len(path) else SINK
+        if gap.query_end > gap.query_start:
+            var nodes = window_nodes(graph, topology.rank, topology.order, left, right, scratch)
+            var found = align_between(
+                graph,
+                topology,
+                nodes,
+                left,
+                right,
+                query[gap.query_start : gap.query_end],
+                scoring,
+                row_of,
+                GLOBAL,
+                band_b,
+                band_f,
+            )
+            for j in range(len(found.nodes)):
+                aligned[gap.query_start + j] = found.nodes[j]
+            score += found.score
+            cells += found.cells
+            peak = max(peak, found.peak_bytes)
+        if w < len(anchors):
+            var a = anchors[w]
+            for k in range(a.length):
+                aligned[a.query_pos + k] = path[a.ref_pos + k]
+            score += Int(scoring.match_score) * a.length
+    return GraphAlignment(aligned^, score, cells, peak)
+
+
 def main() raises:
     var raw = argv()
     var args = List[String]()
@@ -83,6 +148,8 @@ def main() raises:
     var result = 0
     var consensus_rule = 0
     var verbose = False
+    var seeding = False
+    var window = 500
     var input = String()
     var i = 0
     while i < len(args):
@@ -119,6 +186,11 @@ def main() raises:
             i += 1
         elif a == "-L":
             longest_first = True
+        elif a == "-S":
+            seeding = True
+        elif a == "-n":
+            window = Int(_value(args, i))
+            i += 1
         elif a == "-i":
             start_msa = _value(args, i)
             i += 1
@@ -169,6 +241,8 @@ def main() raises:
     var t1 = perf_counter_ns()
     var cells = 0
     var peak = 0
+    var row_of = List[Int]()
+    var scratch = WindowScratch()
     for k in range(len(order)):
         var r = order[k]
         var name = records.names[r]
@@ -176,7 +250,12 @@ def main() raises:
             _ = graph.add(name, records.seq(r))
             continue
         var topology = Topology(graph)
-        var found = align_to_graph(graph, topology, records.seq(r), scoring, mode, band_b, band_f)
+        var found: GraphAlignment
+        if seeding and mode == GLOBAL:
+            row_of.resize(len(graph), -1)
+            found = _seeded(graph, topology, records.seq(r), scoring, band_b, band_f, window, row_of, scratch)
+        else:
+            found = align_to_graph(graph, topology, records.seq(r), scoring, mode, band_b, band_f)
         cells += found.cells
         peak = max(peak, found.peak_bytes)
         _ = graph.fuse_nodes(name, records.seq(r), found.nodes)

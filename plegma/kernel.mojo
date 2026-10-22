@@ -14,6 +14,7 @@ from std.sys import simd_width_of
 
 from .alphabet import encode_base
 from .graph import Graph
+from .poa import SINK, SOURCE
 
 
 comptime GLOBAL = 0
@@ -145,8 +146,31 @@ def align_to_graph(
 ) raises -> GraphAlignment:
     """The best alignment of `query` to `graph` under `scoring` in `mode`, inside abPOA's adaptive band
     (`band_b` < 0: no band; a band the global end falls outside of is doubled and tried again). Of equal
-    alignments, the one taking the diagonal first in the traceback, so gaps come first."""
-    var n = len(topology.order)
+    alignments, the one taking the diagonal first in the traceback, so gaps come first, and of equal
+    predecessors the one whose edge most sequences took."""
+    var row_of = List[Int](length=len(graph), fill=-1)
+    return align_between(graph, topology, topology.order, SOURCE, SINK, query, scoring, row_of, mode, band_b, band_f)
+
+
+def align_between(
+    graph: Graph,
+    topology: Topology,
+    nodes: List[Int],
+    left: Int,
+    right: Int,
+    query: Span[UInt8, _],
+    scoring: Scoring,
+    mut row_of: List[Int],
+    mode: Int = GLOBAL,
+    band_b: Int = 10,
+    band_f: Float64 = 0.01,
+) raises -> GraphAlignment:
+    """`align_to_graph` over `nodes` alone (in topological order): those strictly between node `left` and node
+    `right` (`SOURCE` and `SINK` for the graph's ends), the alignment leaving `left` and, globally, reaching
+    `right`. `row_of` is scratch, as long as the graph, every entry -1, and left so."""
+    var n = len(nodes)
+    for r in range(n):
+        row_of[nodes[r]] = r + 1
     var m = len(query)
     var width = m + 1
     var banded = band_b >= 0 and mode == GLOBAL
@@ -184,9 +208,24 @@ def align_to_graph(
     var peak = 0
 
     hi[0] = min(m, w) if banded else m
-    for node in range(n):
-        if len(graph.predecessors[node]) == 0:
-            waiting[0] += 1
+    var base_remaining = topology.remaining[right] + 1 if right >= 0 else 0
+    # Each row's predecessor rows, heaviest edge first; row 0, the left end, waits for those it feeds.
+    var pred_rows = List[Int]()
+    var pred_at = List[Int](length=n + 2, fill=0)
+    for r in range(1, n + 1):
+        pred_at[r] = len(pred_rows)
+        _heaviest_first(graph, nodes[r - 1], left, row_of, pred_rows)
+        for k in range(pred_at[r], len(pred_rows)):
+            if pred_rows[k] == 0:
+                waiting[0] += 1
+    pred_at[n + 1] = len(pred_rows)
+    # The left end may reach the right one directly, every letter inserted between them: keep its row.
+    var direct = n == 0
+    if left >= 0 and right >= 0:
+        for s in graph.successors[left]:
+            direct = direct or s == right
+    if direct:
+        waiting[0] += 1
     pool.append(List[Int32](length=3 * (hi[0] + 1), fill=_NEG))
     slot_of[0] = 0
     for j in range(hi[0] + 1):
@@ -200,10 +239,18 @@ def align_to_graph(
     var best_col = 0
     var cells = hi[0] + 1
     for r in range(1, n + 1):
-        var node = topology.order[r - 1]
+        var node = nodes[r - 1]
         preds.clear()
-        _heaviest_first(graph, topology, node, preds)
-        waiting[r] = len(graph.successors[node])
+        for k in range(pred_at[r], pred_at[r + 1]):
+            preds.append(pred_rows[k])
+        var ends_here = False
+        waiting[r] = 0
+        for s in graph.successors[node]:
+            if row_of[s] >= 0:
+                waiting[r] += 1
+            ends_here = ends_here or s == right
+        if right == SINK:
+            ends_here = len(graph.successors[node]) == 0
         var low = width
         var high = -1
         var left = width
@@ -215,7 +262,7 @@ def align_to_graph(
             right = max(right, right_best[p] + 1)
         high = min(high, m)
         if banded:
-            var diagonal = m - topology.remaining[node]
+            var diagonal = m - max(0, topology.remaining[node] - base_remaining)
             low = max(low, min(left, diagonal) - w)
             high = min(high, max(right, diagonal) + w)
         low = min(low, high)
@@ -404,7 +451,7 @@ def align_to_graph(
                 best = row_best
                 best_row = r
                 best_col = row_left
-        elif waiting[r] == 0 and high == m and h[unsafe_offset=m - low] > best:
+        elif ends_here and high == m and h[unsafe_offset=m - low] > best:
             best = h[unsafe_offset=m - low]
             best_row = r
             best_col = m
@@ -420,13 +467,17 @@ def align_to_graph(
             slot_of[r] = -1
 
     if mode == GLOBAL:
-        if n == 0:
-            best = pool[0][m]
+        if direct and slot_of[0] >= 0 and hi[0] == m and pool[slot_of[0]][m] > best:
+            best = pool[slot_of[0]][m]
             best_row = 0
             best_col = m
         if best == _NEG:
+            for r in range(n):
+                row_of[nodes[r]] = -1
             if banded and w < width:
-                return align_to_graph(graph, topology, query, scoring, mode, 2 * band_b + 10, 2 * band_f)
+                return align_between(
+                    graph, topology, nodes, left, right, query, scoring, row_of, mode, 2 * band_b + 10, 2 * band_f
+                )
             raise Error("no alignment reaches the graph's end")
 
     var aligned = List[Int](length=m, fill=-1)
@@ -436,21 +487,21 @@ def align_to_graph(
     while r > 0 and j > 0:
         var at = j - lo[r]
         var byte = trace[trace_at[r] + at]
-        var node = topology.order[r - 1]
+        var node = nodes[r - 1]
         if state == 0:
             var source = byte & 7
             if source == _START:
                 break
             if source == _DIAGONAL:
                 aligned[j - 1] = node
-                r = _predecessor(graph, topology, choices, choice_at[r], node, at, 0)
+                r = _predecessor(pred_rows, pred_at, choices, choice_at, r, at, 0)
                 j -= 1
             else:
                 state = source
         elif state == _DELETION1 or state == _DELETION2:
             var first = state == _DELETION1
             var extends = (byte & (_D1_EXTENDS if first else _D2_EXTENDS)) != 0
-            r = _predecessor(graph, topology, choices, choice_at[r], node, at, 1 if first else 2)
+            r = _predecessor(pred_rows, pred_at, choices, choice_at, r, at, 1 if first else 2)
             if not extends:
                 state = 0
         else:
@@ -458,41 +509,42 @@ def align_to_graph(
             j -= 1
             if not extends:
                 state = 0
+    for k in range(n):
+        row_of[nodes[k]] = -1
     return GraphAlignment(aligned^, Int(best), cells, peak)
 
 
 @inline(.always)
 def _predecessor(
-    graph: Graph, topology: Topology, choices: List[UInt8], at: Int, node: Int, cell: Int, kind: Int
+    pred_rows: List[Int], pred_at: List[Int], choices: List[UInt8], choice_at: List[Int], r: Int, cell: Int, kind: Int
 ) -> Int:
-    """The row a move at `cell` of `node`'s row came from (`kind`: 0 the diagonal, 1 and 2 the deletions)."""
-    if len(graph.predecessors[node]) <= 1:
-        return topology.rank[graph.predecessors[node][0]] + 1 if len(graph.predecessors[node]) == 1 else 0
-    var which = 0 if at < 0 else Int(choices[at + 3 * cell + kind])
-    var rows = List[Int]()
-    _heaviest_first(graph, topology, node, rows)
-    return rows[which]
+    """The row a move at `cell` of row `r` came from (`kind`: 0 the diagonal, 1 and 2 the deletions)."""
+    var which = 0 if choice_at[r] < 0 else Int(choices[choice_at[r] + 3 * cell + kind])
+    return pred_rows[pred_at[r] + which]
 
 
-def _heaviest_first(graph: Graph, topology: Topology, node: Int, mut rows: List[Int]):
-    """The rows of `node`'s predecessors, heaviest edge first (the earlier edge first among equals), or the left
-    end's row when it has none: of equally good moves, the alignment takes the one most sequences took."""
-    rows.clear()
+def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut rows: List[Int]):
+    """Appends the rows of `node`'s predecessors in the alignment, heaviest edge first (the earlier edge first
+    among equals): row 0 for `left` (or for none at all), so of equally good moves the alignment takes the one
+    most sequences took."""
     ref preds = graph.predecessors[node]
-    if len(preds) == 0:
-        rows.append(0)
-        return
     var keys = List[UInt64](capacity=len(preds))
     for k in range(len(preds)):
         var p = preds[k]
+        if p != left and row_of[p] < 0:
+            continue
         var weight = 0
         for i in range(len(graph.successors[p])):
             if graph.successors[p][i] == node:
                 weight = graph.weights[p][i]
         keys.append((UInt64((1 << 31) - weight) << 32) | UInt64(k))
+    if len(keys) == 0:
+        rows.append(0)
+        return
     sort(keys)
     for key in keys:
-        rows.append(topology.rank[preds[Int(key & 0xFFFFFFFF)]] + 1)
+        var p = preds[Int(key & 0xFFFFFFFF)]
+        rows.append(0 if p == left else row_of[p])
 
 
 @inline(.always)
