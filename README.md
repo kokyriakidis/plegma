@@ -8,8 +8,9 @@ each sequence is woven into. The goal is to be the fastest POA aligner by a wide
 *πλέγμα* (plegma) is Greek for a woven mesh or lattice, and is what a POA graph is: sequences threaded into one
 another where they agree.
 
-Status: early. The package holds the DNA alphabet; the graph, the alignment kernels and the command-line tool come
-next.
+Status: early. The package holds the pairwise layer: anchors from sporos, optimal chaining, and backbones that
+recurse into the gaps they leave, for karan to fill (`docs/design.md`; experiments in `experiments/`). The graph,
+the POA and the command-line tool come next.
 
 ## Building
 

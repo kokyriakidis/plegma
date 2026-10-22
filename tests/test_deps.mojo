@@ -13,9 +13,7 @@ def test_karan_align() raises:
 
 
 def test_sporos_mums() raises:
-    var ref_bytes = List[UInt8](
-        "GATTACAGGCCTTAAGCTTGCATGCCTGCAGGTCGACTCTAGAGGATCCCCGGGTACCGAGCTCGAATTC".as_bytes()
-    )
+    var ref_bytes = List[UInt8]("GATTACAGGCCTTAAGCTTGCATGCCTGCAGGTCGACTCTAGAGGATCCCCGGGTACCGAGCTCGAATTC".as_bytes())
     var query = List[UInt8]("TTTTGCATGCCTGCAGGTCGACTCTAGAGGAAAA".as_bytes())
     var seqs = List[Span[UInt8, origin_of(ref_bytes)]]()
     seqs.append(Span(ref_bytes))
