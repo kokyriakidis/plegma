@@ -11,6 +11,9 @@ per pair (`simulate_vntr.py`). A strategy is `levels[;option ...]`:
 - `stay`: seed every gap again at the same level until it yields nothing, then the next level.
 - `s=F`: what the chain charges an unanchored letter (0.1); `T=N`: letters each anchor gives back to the DP at
   both ends (10); `n=N`: gaps of at most N letters are not seeded again (0); `H=N`: chain look-back (200).
+- `R=k:d`: drop an anchor any of whose k-mers occurs again in a within d letters of it (inside a repeat).
+- `V`: keep an anchor only when forcing it costs nothing: the alignment from the last kept anchor to the
+  next candidate costs no more through it than around it (karan, both ways).
 The fill and the optimum use two-piece gap-affine costs (4, 6, 2, 24, 1), ties left.
 """
 
@@ -45,6 +48,9 @@ struct Strategy(Copyable, Movable):
     var trim: Int
     var budget: Int
     var lookback: Int
+    var verify: Bool
+    var repeat_k: Int
+    var repeat_distance: Int
 
     def __init__(out self, text: String) raises:
         self.text = text
@@ -54,6 +60,9 @@ struct Strategy(Copyable, Movable):
         self.trim = 10
         self.budget = 0
         self.lookback = 200
+        self.verify = False
+        self.repeat_k = 0
+        self.repeat_distance = 0
         var parts = text.split(";")
         for k in range(1, len(parts)):
             var part = String(parts[k])
@@ -65,6 +74,13 @@ struct Strategy(Copyable, Movable):
                 self.trim = Int(String(part[byte=2:]))
             elif part.startswith("n="):
                 self.budget = Int(String(part[byte=2:]))
+            elif part == "V":
+                self.verify = True
+            elif part.startswith("R="):
+                var both = String(part[byte=2:])
+                var halves = both.split(":")
+                self.repeat_k = Int(String(halves[0]))
+                self.repeat_distance = Int(String(halves[1]))
             elif part.startswith("H="):
                 self.lookback = Int(String(part[byte=2:]))
             else:
@@ -132,6 +148,68 @@ def _f1(ours: List[Int], truth: List[Int]) -> Float64:
     return 2.0 * Float64(both) / Float64(mine + theirs) if mine + theirs > 0 else 1.0
 
 
+def _outside_repeats(a: Span[UInt8, _], anchors: List[Anchor], k: Int, distance: Int) -> List[Anchor]:
+    """The anchors none of whose k-mers occurs again in `a` within `distance` letters of the anchor."""
+    var mask = (UInt64(1) << UInt64(2 * k)) - 1
+    var codes = List[UInt64](length=len(a), fill=UInt64.MAX)  # the k-mer starting at each position
+    var key = UInt64(0)
+    var valid = 0
+    for i in range(len(a)):
+        var c = a[i] | 0x20
+        var code = UInt64(0) if c == UInt8(ord("a")) else (
+            UInt64(1) if c == UInt8(ord("c")) else (UInt64(2) if c == UInt8(ord("g")) else UInt64(3))
+        )
+        valid = (
+            valid + 1 if c == UInt8(ord("a"))
+            or c == UInt8(ord("c"))
+            or c == UInt8(ord("g"))
+            or c == UInt8(ord("t")) else 0
+        )
+        key = ((key << 2) | code) & mask
+        if valid >= k:
+            codes[i - k + 1] = key
+    var out = List[Anchor]()
+    for x in anchors:
+        var repeated = False
+        var low = max(0, x.ref_pos - distance)
+        var high = min(len(a) - k, x.ref_end() + distance)
+        var t = x.ref_pos
+        while t + k <= x.ref_end() and not repeated:
+            var mine = codes[t]
+            if mine != UInt64.MAX:
+                for u in range(low, high + 1):
+                    if (u < x.ref_pos or u >= x.ref_end() - k + 1) and codes[u] == mine:
+                        repeated = True
+                        break
+            t += k
+        if not repeated:
+            out.append(x)
+    return out^
+
+
+def _verified(mut aligner: Aligner, a: String, b: String, anchors: List[Anchor], costs: Costs) raises -> List[Anchor]:
+    """The anchors that cost nothing to force, left to right: through an anchor, the alignment from the last kept
+    one to the next candidate costs no more than around it."""
+    var out = List[Anchor]()
+    var ref_at = 0
+    var query_at = 0
+    for i in range(len(anchors)):
+        var x = anchors[i]
+        var next_ref = anchors[i + 1].ref_pos if i + 1 < len(anchors) else a.byte_length()
+        var next_query = anchors[i + 1].query_pos if i + 1 < len(anchors) else b.byte_length()
+        var through = aligner.distance(
+            String(a[byte = ref_at : x.ref_pos]), String(b[byte = query_at : x.query_pos]), costs
+        ) + aligner.distance(
+            String(a[byte = x.ref_end() : next_ref]), String(b[byte = x.query_end() : next_query]), costs
+        )
+        var around = aligner.distance(String(a[byte=ref_at:next_ref]), String(b[byte=query_at:next_query]), costs)
+        if through <= around:
+            out.append(x)
+            ref_at = x.ref_end()
+            query_at = x.query_end()
+    return out^
+
+
 def main() raises:
     var args = argv()
     if len(args) < 5:
@@ -194,6 +272,10 @@ def main() raises:
                             x.query_copies,
                         )
                     )
+            if strategy.repeat_k > 0:
+                anchors = _outside_repeats(Span(a), anchors, strategy.repeat_k, strategy.repeat_distance)
+            if strategy.verify:
+                anchors = _verified(aligner, a_text, b_text, anchors, costs)
             var ours = List[Int](length=len(a), fill=-1)
             var cost = 0
             var largest = 0

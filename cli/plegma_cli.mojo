@@ -39,6 +39,9 @@ Options:
     -L          align the sequences longest first
     -p          progressive: abPOA's guide order, most similar minimizer multisets first
     -s          ambiguous strand: a sequence scoring poorly is tried reverse-complemented, the better kept
+  Refinement:
+    -R INT      rounds of realignment [0]: each round starts a graph from the consensus so far and aligns every
+                sequence to it again; the consensus is then the sequences' own (the backbone carries no weight)
   Input/Output:
     -l          the input is a list of sequence files, one per line, each aligned on its own
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
@@ -170,6 +173,7 @@ struct Options(Copyable, Movable):
     var result: Int
     var consensus_rule: Int
     var max_consensus: Int
+    var rounds: Int
     var min_freq: Float64
     var verbose: Bool
 
@@ -189,6 +193,7 @@ struct Options(Copyable, Movable):
         self.result = 0
         self.consensus_rule = 0
         self.max_consensus = 1
+        self.rounds = 0
         self.min_freq = 0.25
         self.verbose = False
 
@@ -398,6 +403,24 @@ def _poa(input: String, options: Options) raises -> String:
                     name += "_reverse_complement"
                     reversed_count += 1
         path_of[r] = graph.fuse_nodes(name, Span(seqs[r]), found.nodes)
+    # Refinement: a fresh graph from the consensus so far, every sequence aligned to it again in the same order.
+    for _ in range(options.rounds if options.start_msa.byte_length() == 0 else 0):
+        var members = List[Int]()
+        for r in range(len(seqs)):
+            members.append(path_of[r])
+        var topology = Topology(graph)
+        var backbone_letters = List[UInt8]()
+        for node in graph.heaviest_path_of(topology.order, members):
+            backbone_letters.append(graph.bases[node])
+        var next = Graph()
+        _ = next.add("plegma_backbone", Span(backbone_letters))
+        for k in range(len(order)):
+            var r = order[k]
+            var found = _align(next, Span(seqs[r]), options, row_of, scratch, workspace)
+            cells += found.cells
+            peak = max(peak, found.peak_bytes)
+            path_of[r] = next.fuse_nodes(graph.names[path_of[r]], Span(seqs[r]), found.nodes)
+        graph = next^
     var t2 = perf_counter_ns()
     for r in range(len(seqs)):
         shown.append(path_of[r])
@@ -421,7 +444,8 @@ def _poa(input: String, options: Options) raises -> String:
             if options.consensus_rule == 1:
                 consensus = _consensus_most_frequent(rows)
             else:
-                consensus_path = graph.heaviest_path(topology.order)
+                # The sequences' paths alone weigh the consensus (not a refinement round's backbone).
+                consensus_path = graph.heaviest_path_of(topology.order, shown)
                 var letters = List[UInt8]()
                 for node in consensus_path:
                     letters.append(graph.bases[node])
@@ -456,7 +480,7 @@ def _poa(input: String, options: Options) raises -> String:
     if result == 3 or result == 4:
         if result == 4 and len(consensus_path) == 0:
             # The graph's consensus path is the heaviest bundle, whichever consensus the FASTA output used.
-            consensus_path = graph.heaviest_path(Topology(graph).order)
+            consensus_path = graph.heaviest_path_of(Topology(graph).order, shown)
         _write_gfa(graph, shown, consensus_path.copy() if result == 4 else List[Int](), text)
     if options.verbose:
         var t3 = perf_counter_ns()
@@ -541,6 +565,9 @@ def main() raises:
             i += 1
         elif a == "-a":
             options.consensus_rule = Int(_value(args, i))
+            i += 1
+        elif a == "-R":
+            options.rounds = Int(_value(args, i))
             i += 1
         elif a == "-d":
             options.max_consensus = Int(_value(args, i))
