@@ -6,6 +6,7 @@ from std.time import perf_counter_ns
 
 from sporos import read_fasta
 
+from plegma.anchors import Anchor
 from plegma.backbone import Level, RARE_OR_MAXIMAL, backbone, windows
 from plegma.chain import ChainCosts
 from plegma.graph import Graph, GAP
@@ -32,6 +33,7 @@ Options:
     -S          anchor each sequence to the consensus path with sporos's exact matches (MUMs, rare MEMs and
                 SMEMs, seeded again inside every gap), and align only the windows between anchors
     -n INT      gaps of at most INT letters are not seeded again [500]
+    -T INT      letters each anchor gives back to the DP at both ends [10]
   Order and strand:
     -L          align the sequences longest first
     -p          progressive: abPOA's guide order, most similar minimizer multisets first
@@ -91,6 +93,7 @@ def _seeded(
     band_b: Int,
     band_f: Float64,
     window: Int,
+    trim: Int,
     mut row_of: List[Int],
     mut scratch: WindowScratch,
 ) raises -> GraphAlignment:
@@ -103,7 +106,14 @@ def _seeded(
     var levels = List[Level]()
     for n in [51, 31, 21, 15]:
         levels.append(Level(RARE_OR_MAXIMAL, n, 8))
-    var anchors = backbone(Span(letters), query, levels, ChainCosts(substitution=0.1), window, True)
+    var chained = backbone(Span(letters), query, levels, ChainCosts(substitution=0.1), window, True)
+    # Each anchor loses `trim` letters at both ends: the DP, not the anchor, decides where a gap next to it goes.
+    var anchors = List[Anchor]()
+    for a in chained:
+        if a.length > 2 * trim:
+            anchors.append(
+                Anchor(a.ref_pos + trim, a.query_pos + trim, a.length - 2 * trim, a.ref_copies, a.query_copies)
+            )
     var gaps = windows(anchors, len(letters), len(query))
     var aligned = List[Int](length=len(query), fill=-1)
     var score = 0
@@ -151,6 +161,7 @@ struct Options(Copyable, Movable):
     var strand: Bool
     var seeding: Bool
     var window: Int
+    var trim: Int
     var start_msa: String
     var result: Int
     var consensus_rule: Int
@@ -168,6 +179,7 @@ struct Options(Copyable, Movable):
         self.strand = False
         self.seeding = False
         self.window = 500
+        self.trim = 10
         self.start_msa = String()
         self.result = 0
         self.consensus_rule = 0
@@ -205,7 +217,16 @@ def _align(
     if options.seeding and options.mode == GLOBAL:
         row_of.resize(len(graph), -1)
         return _seeded(
-            graph, topology, seq, options.scoring, options.band_b, options.band_f, options.window, row_of, scratch
+            graph,
+            topology,
+            seq,
+            options.scoring,
+            options.band_b,
+            options.band_f,
+            options.window,
+            options.trim,
+            row_of,
+            scratch,
         )
     return align_to_graph(graph, topology, seq, options.scoring, options.mode, options.band_b, options.band_f)
 
@@ -397,6 +418,9 @@ def main() raises:
             options.seeding = True
         elif a == "-n":
             options.window = Int(_value(args, i))
+            i += 1
+        elif a == "-T":
+            options.trim = Int(_value(args, i))
             i += 1
         elif a == "-l":
             listed = True
