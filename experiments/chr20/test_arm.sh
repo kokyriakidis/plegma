@@ -26,7 +26,8 @@ step "$A: sample 32 HG002 haplotypes"
 peak $D/haplotypes.err
 $VG paths -M -x $D/sampled.gbz | awk 'NR>1{print $2, $3}' | sort | uniq -c
 $VG paths -F -x $D/sampled.gbz -Q CHM13#0#chr20 | sed '1s/.*/>chr20/' > $D/chm13.fa
-if cmp -s <(grep -v '>' $D/chm13.fa | tr -d '\n') <(grep -v '>' $W/chr20.fa | tr -d '\n'); then
+# chr20.fa is soft-masked: compare the letters, not their case.
+if cmp -s <(grep -v '>' $D/chm13.fa | tr -d '\n' | tr a-z A-Z) <(grep -v '>' $W/chr20.fa | tr -d '\n' | tr a-z A-Z); then
   echo "$A: CHM13#0#chr20 identical to chr20.fa"
 else
   echo "$A: CHM13 PATH DIFFERS"; exit 1

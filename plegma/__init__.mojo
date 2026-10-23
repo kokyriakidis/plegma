@@ -38,7 +38,8 @@ is implementation and may change.
 - MSA by anchored progressive placement: `progressive` (each distinct sequence,
   longest first, placed exactly into the MSA so far through anchors every
   placed sequence votes for, MUMs then SMEMs then optimal alignments; refined;
-  for a tandem array, also a start aligned copy by copy, the cheaper kept).
+  for a tandem array, also a start aligned copy by copy, the cheaper kept);
+  its votes' costs `UNIT_VOTES`, `PRICED_VOTES`, `AFFINE_VOTES`, `TWO_PIECE_VOTES`.
 - Tandem arrays: `tandem_repeat` -> `Repeat` (a sequence's array and period),
   `tandem_layout` -> `Layout` (a region's arrays cut into copies phased by one
   unit, the copies aligned as symbols on their sum of pairs, then as letters).
@@ -80,6 +81,6 @@ from .kernel import (
 from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window
 from .polish import polish
-from .progressive import progressive
+from .progressive import AFFINE_VOTES, PRICED_VOTES, TWO_PIECE_VOTES, UNIT_VOTES, progressive
 from .refine import gap_opens, objective, refine, sum_of_pairs
 from .units import Layout, Repeat, tandem_layout, tandem_repeat

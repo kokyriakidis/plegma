@@ -34,6 +34,14 @@ from .graph import DELETION, INSERTION, cigar_runs
 from .refine import objective, place, refine, row_cost
 from .units import Layout, tandem_layout, tandem_repeat
 
+comptime TWO_PIECE_VOTES = 0
+"""`progressive`'s votes at minimap2's two-piece costs (-O4,24 -E2,1, mismatch 4)."""
+comptime UNIT_VOTES = 1
+"""`progressive`'s votes at unit costs (vntr-eval's unit metric)."""
+comptime PRICED_VOTES = 2
+"""`progressive`'s votes gap-affine at its objective's prices."""
+comptime AFFINE_VOTES = 3
+"""`progressive`'s votes at vntr-eval's affine costs (mismatch 4, a gap of k letters 6 + 2k)."""
 comptime GAP = UInt8(ord("-"))
 comptime TRIM = 10
 """Letters an anchor gives back at each end before voting."""
@@ -835,7 +843,7 @@ def progressive(
     units: Bool = True,
     even_start: Bool = True,
     one_indel: Int = -2,
-    unit_votes: Bool = True,
+    votes: Int = UNIT_VOTES,
     mismatch: Int = 2,
     gap: Int = 2,
     hard: Int = 0,
@@ -853,8 +861,10 @@ def progressive(
     copy-level start too where the sequences hold a tandem array, and gives the refinement the repeat's period;
     `even_start`, where some sequence repeats, one more start placed and refined with every distinct sequence
     weighing one, then refined weighted (a different path to a local optimum, which is sometimes lower);
-    `one_indel`, the seeds' rule inside tandem repeats (`_cascade`); `unit_votes`, the optimal pairwise alignments that
-    vote for placement and centre the refinement's bands at unit costs (vntr-eval's), not two-piece ones; `mismatch`
+    `one_indel`, the seeds' rule inside tandem repeats (`_cascade`); `votes`, the costs of the optimal pairwise
+    alignments that vote for placement and centre the refinement's bands: `UNIT_VOTES` (vntr-eval's unit cost),
+    `PRICED_VOTES` (gap-affine at the objective's prices: `mismatch`, a gap of k letters `gap_open + gap * k`),
+    `AFFINE_VOTES` (vntr-eval's affine cost, 4 and 6 + 2k) or `TWO_PIECE_VOTES` (minimap2's two-piece costs); `mismatch`
     and `gap`, the prices of a column of two different letters and of a letter against a gap (`refine`); `hard`, how
     many of the best seed sources' anchors hold their letters in placement (`_placed`); `nearest`, sequences placed
     nearest first, not longest first (`_placed`); `consistency`, a letter anchored where most of its votes agree
@@ -879,7 +889,13 @@ def progressive(
             of[r] = len(distinct)
             distinct.append(seqs[r].copy())
             weight.append(1)
-    var two_piece = Costs.edit() if unit_votes else Costs.two_piece(4, 4, 2, 24, 1)
+    var two_piece = Costs.edit()
+    if votes == PRICED_VOTES:
+        two_piece = Costs.affine(mismatch, gap_open, gap)
+    elif votes == AFFINE_VOTES:
+        two_piece = Costs.affine(4, 6, 2)
+    elif votes == TWO_PIECE_VOTES:
+        two_piece = Costs.two_piece(4, 4, 2, 24, 1)
     # The tandem repeat's copies, where the sequences hold one: the copy-level start, and the period the
     # refinement's copy-aware moves use (from the layout, else the longest sequence's array).
     var layout = tandem_layout(distinct, weights=weight) if units and len(distinct) > 2 else Layout()
@@ -963,7 +979,7 @@ def progressive(
                 units,
                 False,
                 one_indel,
-                unit_votes,
+                votes,
                 mismatch,
                 gap,
                 hard,
@@ -981,7 +997,7 @@ def progressive(
                 units,
                 False,
                 one_indel,
-                unit_votes,
+                votes,
                 mismatch,
                 gap,
                 hard,

@@ -79,8 +79,9 @@ Options:
                 then the alignments; -5 the split seeds first (backbone.split_anchors); -3 SMEMs of 600 letters or more
                 first; e >= 0 sporos's MUMs and SMEMs, an
                 anchor inside a repeat kept only if its diagonal lies within e letters of one end of its gap (one
-                indel), -1 without that rule; the second 1 makes the optimal pairwise alignments, which also centre
-                the refinement's bands, unit-cost (vntr-eval's), not two-piece; the third holds the letters that many
+                indel), -1 without that rule; the second, the costs of the optimal pairwise alignments, which also
+                centre the refinement's bands: 1 unit (vntr-eval's unit metric), 2 gap-affine at -W's prices, 3
+                vntr-eval's affine (4, 6 + 2k), 0 minimap2's two-piece; the third holds the letters that many
                 of the best sources anchor to their columns in placement [0]; a fourth 1 places the sequences nearest
                 first, not longest first; a fifth 1 anchors a letter where most of its votes agree (not more than
                 half), each anchor weighing the votes its column won; a sixth n > 0 places them in a random order
@@ -399,7 +400,7 @@ struct Options(Copyable, Movable):
     var anchored: Bool
     var units: Bool
     var one_indel: Int
-    var unit_votes: Bool
+    var votes: Int
     var mismatch: Int
     var gap: Int
     var hard: Int
@@ -451,7 +452,7 @@ struct Options(Copyable, Movable):
         self.anchored = False
         self.units = True
         self.one_indel = -1
-        self.unit_votes = False
+        self.votes = 0
         self.mismatch = 1
         self.gap = 1
         self.hard = 0
@@ -655,7 +656,7 @@ def _poa(input: String, options: Options) raises -> String:
             options.units,
             True,
             options.one_indel if options.confidence_set else -2,
-            options.unit_votes if options.confidence_set else True,
+            options.votes if options.confidence_set else 1,
             options.mismatch if options.prices_set else 2,
             options.gap if options.prices_set else 2,
             options.hard,
@@ -975,7 +976,7 @@ def main() raises:
             var parts = _value(args, i).split(",")
             options.one_indel = Int(parts[0])
             if len(parts) > 1:
-                options.unit_votes = Int(parts[1]) == 1
+                options.votes = Int(parts[1])
             if len(parts) > 2:
                 options.hard = Int(parts[2])
             if len(parts) > 3:
