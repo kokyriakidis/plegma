@@ -64,6 +64,30 @@ def gap_opens(rows: List[List[UInt8]]) -> Int:
     return total
 
 
+def row_cost(rows: List[List[UInt8]], s: Int, gap_open: Int) -> Int:
+    """Row `s`'s exact share of the objective: over every other row, the columns where the two differ (both gaps
+    cost nothing), plus `gap_open` for every gap the pair opens."""
+    var total = 0
+    for r in range(len(rows)):
+        if r == s:
+            continue
+        var state = 0
+        for c in range(len(rows[s])):
+            var x = rows[s][c]
+            var y = rows[r][c]
+            var gx = x == GAP
+            var gy = y == GAP
+            if gx and gy:
+                continue
+            if x != y:
+                total += 1
+            var now = 1 if gx else (2 if gy else 0)
+            if now != 0 and now != state:
+                total += gap_open
+            state = now
+    return total
+
+
 def sum_of_pairs(rows: List[List[UInt8]]) -> Int:
     """The rows' sum of pairs at unit costs (see the module docstring). Letters other than ACGT count as one."""
     if len(rows) == 0:
@@ -291,7 +315,9 @@ def _realign(
     gap_open: Int32,
     mut cost: List[Int32],
     mut moves: List[UInt8],
-):
+    forced: List[Int] = List[Int](),
+    always: Bool = False,
+) -> Tuple[Int, Int]:
     """Row `s` realigned to the others' profile within `band` letters of its place (or of `centre`, when given),
     widened while the best path touches the band's edge, up to `max_band`; the rows rewritten (all-gap columns
     dropped), unless the new row would cost more than the present one.
@@ -299,7 +325,12 @@ def _realign(
     Three states per cell: the sequence's letter in a column (M), its gap there (G), its letter in a column of its
     own (O). Besides the unit costs, every gap a pair newly opens costs `gap_open`, counted from the columns' profile:
     the sequence's gap opening against the rows holding a letter there, a row's own gap starting against the
-    sequence's letter, the sequence's own column against every row holding a letter beside it."""
+    sequence's letter, the sequence's own column against every row holding a letter beside it. Those counts only
+    approximate the pairs' own gaps (a pair skips the columns where both are gaps), so the DP proposes, and the
+    new row is kept only if its exact cost (`row_cost`) is no more than the present one's (or always, with `always`).
+    `forced[j]`, where given and not -1, is the column letter j must take. Returns the exact costs before and after
+    (equal when the row stays)."""
+    var has_forced = len(forced) > 0
     var columns = len(rows[0])
     var others = Int32(len(rows) - 1)
     # The others' symbol counts per column, and per column how many of them hold a letter, start a gap (a letter
@@ -332,16 +363,6 @@ def _realign(
     var n = len(letters)
     var mid = centre.copy() if len(centre) == columns + 1 else before.copy()
     var g = gap_open
-    # The present row's cost under the same model, which the new one must not pass.
-    var present = Int32(0)
-    var in_gap = False
-    for c in range(columns):
-        if rows[s][c] != GAP:
-            present += others - counts[c * SYMBOLS + _symbol(rows[s][c])] + g * starts[c]
-            in_gap = False
-        else:
-            present += held[c] + (g * ends[c] if in_gap else g * held[c])
-            in_gap = True
     var b = band
     var steps = List[Int]()
     var mine = List[UInt8]()
@@ -372,7 +393,7 @@ def _realign(
                         m_best = 0
                     if c > 0:
                         # M: letter j - 1 in column x.
-                        if j > 0:
+                        if j > 0 and (not has_forced or forced[j - 1] < 0 or forced[j - 1] == x):
                             var km = j - 1 - lo_prev
                             if km >= 0 and km < width:
                                 var unit = others - counts[x * SYMBOLS + _symbol(letters[j - 1])]
@@ -408,7 +429,7 @@ def _realign(
                             if g_best < BIG:
                                 g_best += held[x]
                     # O: letter j - 1 in a column of its own after column x.
-                    if j > 0 and k > 0:
+                    if j > 0 and k > 0 and (not has_forced or forced[j - 1] < 0):
                         var from_m = cost[base + k - 1]
                         var from_g = cost[cells + base + k - 1]
                         var from_o = cost[2 * cells + base + k - 1]
@@ -439,7 +460,8 @@ def _realign(
                     final_state = t
         if final_cost >= BIG:
             if b >= max_band or b >= max(n, columns):
-                return
+                var stays = row_cost(rows, s, Int(gap_open))
+                return (stays, stays)
             b = min(2 * b, max_band)
             continue
         steps.clear()
@@ -470,8 +492,6 @@ def _realign(
         if tight and b < max_band and b < max(n, columns):
             b = min(2 * b, max_band)
             continue
-        if final_cost > present:
-            return
         break
     var fresh = List[List[UInt8]]()
     for r in range(len(rows)):
@@ -497,7 +517,283 @@ def _realign(
             for t in kept:
                 row.append(fresh[r][t])
             fresh[r] = row^
+    var before_cost = row_cost(rows, s, Int(gap_open))
+    var after_cost = row_cost(fresh, s, Int(gap_open))
+    if after_cost > before_cost and not always:
+        return (before_cost, before_cost)
     rows = fresh^
+    return (before_cost, after_cost)
+
+
+def _objective(rows: List[List[UInt8]], gap_open: Int) -> Int:
+    return sum_of_pairs(rows) + gap_open * gap_opens(rows) if gap_open > 0 else sum_of_pairs(rows)
+
+
+def _tree_groups(rows: List[List[UInt8]]) -> List[List[Bool]]:
+    """The clusters of a UPGMA tree over the rows (distance: the columns where two rows differ, both gaps left out),
+    each as membership: every merge but the last, so every split of the tree with two or more rows on one side."""
+    var n = len(rows)
+    var groups = List[List[Bool]]()
+    if n < 3:
+        return groups^
+    var distance = List[Float64](length=n * n, fill=0.0)
+    for a in range(n):
+        for b in range(a + 1, n):
+            var d = 0
+            for c in range(len(rows[a])):
+                if rows[a][c] != rows[b][c]:
+                    d += 1
+            distance[a * n + b] = Float64(d)
+            distance[b * n + a] = Float64(d)
+    var members = List[List[Bool]]()
+    var size = List[Int]()
+    var alive = List[Bool](length=n, fill=True)
+    for a in range(n):
+        var m = List[Bool](length=n, fill=False)
+        m[a] = True
+        members.append(m^)
+        size.append(1)
+    for _ in range(n - 2):
+        var best = Float64.MAX
+        var x = -1
+        var y = -1
+        for a in range(n):
+            if not alive[a]:
+                continue
+            for b in range(a + 1, n):
+                if alive[b] and distance[a * n + b] < best:
+                    best = distance[a * n + b]
+                    x = a
+                    y = b
+        for r in range(n):
+            if members[y][r]:
+                members[x][r] = True
+        alive[y] = False
+        for r in range(n):
+            if alive[r] and r != x:
+                var d = (distance[x * n + r] * Float64(size[x]) + distance[y * n + r] * Float64(size[y])) / Float64(
+                    size[x] + size[y]
+                )
+                distance[x * n + r] = d
+                distance[r * n + x] = d
+        size[x] += size[y]
+        groups.append(members[x].copy())
+    return groups^
+
+
+def _merge_groups(
+    mut rows: List[List[UInt8]],
+    in_a: List[Bool],
+    band: Int,
+    max_band: Int,
+    gap_open: Int32,
+    mut cost: List[Int32],
+    mut moves: List[UInt8],
+) -> Tuple[Int, Int]:
+    """The rows in `in_a` (A) and the others (B) realigned as two profiles, each keeping its own columns' order and
+    contents, within `band` columns of their present merge (widened up to `max_band` while the path touches the
+    band's edge). Pairing A's column with B's costs the pairs across that differ there; A's column alone costs its
+    letters times B's rows, and B's alike: at unit costs the DP is exact, since the pairs within A or within B do not
+    change. A gap run opening across costs `gap_open` for each pair of a letter there and a letter in the other
+    side's column before, an approximation; the new rows are kept only if the exact objective (`_objective`) falls.
+    Returns the objective before and after (equal when the rows stay)."""
+    var columns = len(rows[0])
+    var n_a = 0
+    for r in range(len(rows)):
+        if in_a[r]:
+            n_a += 1
+    var n_b = len(rows) - n_a
+    var before_cost = _objective(rows, Int(gap_open))
+    if n_a == 0 or n_b == 0:
+        return (before_cost, before_cost)
+    # Each side's columns (those where one of its rows holds a letter), their symbol counts and letters held, and
+    # where each A column sits in the present merge: the B columns before it.
+    var a_cols = List[Int]()
+    var b_cols = List[Int]()
+    var mid = List[Int]()
+    for c in range(columns):
+        var has_a = False
+        var has_b = False
+        for r in range(len(rows)):
+            if rows[r][c] != GAP:
+                if in_a[r]:
+                    has_a = True
+                else:
+                    has_b = True
+        if has_a:
+            mid.append(len(b_cols))
+            a_cols.append(c)
+        if has_b:
+            b_cols.append(c)
+    var la = len(a_cols)
+    var lb = len(b_cols)
+    mid.append(lb)
+    var counts_a = List[Int32](length=la * SYMBOLS, fill=0)
+    var counts_b = List[Int32](length=lb * SYMBOLS, fill=0)
+    var held_a = List[Int32](length=la, fill=0)
+    var held_b = List[Int32](length=lb, fill=0)
+    for r in range(len(rows)):
+        if in_a[r]:
+            for i in range(la):
+                var x = rows[r][a_cols[i]]
+                counts_a[i * SYMBOLS + _symbol(x)] += 1
+                if x != GAP:
+                    held_a[i] += 1
+        else:
+            for j in range(lb):
+                var x = rows[r][b_cols[j]]
+                counts_b[j * SYMBOLS + _symbol(x)] += 1
+                if x != GAP:
+                    held_b[j] += 1
+    var na = Int32(n_a)
+    var nb = Int32(n_b)
+    var g = gap_open
+    # The costs must fit: every pair across, every column, and its openings.
+    if n_a * n_b * (1 + 2 * Int(g)) * (la + lb + 1) >= Int(BIG):
+        return (before_cost, before_cost)
+    var b = band
+    var path_a = List[Int]()
+    var path_b = List[Int]()
+    while True:
+        var width = 2 * b + 1
+        var cells = (la + 1) * width
+        cost.resize(3 * cells, BIG)
+        moves.resize(3 * cells, MATCHED)
+        # State t's cell (i, j) sits at t * cells + i * width + j - (mid[i] - b): M pairs A's column i - 1 with B's
+        # j - 1, A (GAPPED) takes A's column i - 1 alone, B (OWN) takes B's column j - 1 alone.
+        for i in range(la + 1):
+            var lo = mid[i] - b
+            var base = i * width
+            var lo_prev = mid[i - 1] - b if i > 0 else 0
+            var prev = (i - 1) * width
+            var a_before = held_a[i - 1] if i > 0 else na
+            for k in range(width):
+                var j = lo + k
+                var m_best = BIG
+                var m_how = MATCHED
+                var g_best = BIG
+                var g_how = MATCHED
+                var o_best = BIG
+                var o_how = MATCHED
+                if j >= 0 and j <= lb:
+                    if i == 0 and j == 0:
+                        m_best = 0
+                    var b_before = held_b[j - 1] if j > 0 else nb
+                    if i > 0:
+                        if j > 0:
+                            var km = j - 1 - lo_prev
+                            if km >= 0 and km < width:
+                                var same = Int32(0)
+                                for x in range(SYMBOLS):
+                                    same += counts_a[(i - 1) * SYMBOLS + x] * counts_b[(j - 1) * SYMBOLS + x]
+                                var pair = na * nb - same
+                                var from_m = cost[prev + km]
+                                var from_g = cost[cells + prev + km]
+                                var from_o = cost[2 * cells + prev + km]
+                                if from_m < m_best:
+                                    m_best = from_m
+                                    m_how = MATCHED
+                                if from_g < m_best:
+                                    m_best = from_g
+                                    m_how = GAPPED
+                                if from_o < m_best:
+                                    m_best = from_o
+                                    m_how = OWN
+                                if m_best < BIG:
+                                    m_best += pair
+                        var kp = j - lo_prev
+                        if kp >= 0 and kp < width:
+                            var opening = g * held_a[i - 1] * b_before
+                            var from_m = cost[prev + kp]
+                            var from_g = cost[cells + prev + kp]
+                            var from_o = cost[2 * cells + prev + kp]
+                            if from_m < BIG and from_m + opening < g_best:
+                                g_best = from_m + opening
+                                g_how = MATCHED
+                            if from_g < g_best:
+                                g_best = from_g
+                                g_how = GAPPED
+                            if from_o < BIG and from_o + opening < g_best:
+                                g_best = from_o + opening
+                                g_how = OWN
+                            if g_best < BIG:
+                                g_best += held_a[i - 1] * nb
+                    if j > 0 and k > 0:
+                        var opening = g * held_b[j - 1] * a_before
+                        var from_m = cost[base + k - 1]
+                        var from_g = cost[cells + base + k - 1]
+                        var from_o = cost[2 * cells + base + k - 1]
+                        if from_m < BIG and from_m + opening < o_best:
+                            o_best = from_m + opening
+                            o_how = MATCHED
+                        if from_g < BIG and from_g + opening < o_best:
+                            o_best = from_g + opening
+                            o_how = GAPPED
+                        if from_o < o_best:
+                            o_best = from_o
+                            o_how = OWN
+                        if o_best < BIG:
+                            o_best += held_b[j - 1] * na
+                cost[base + k] = m_best
+                moves[base + k] = m_how
+                cost[cells + base + k] = g_best
+                moves[cells + base + k] = g_how
+                cost[2 * cells + base + k] = o_best
+                moves[2 * cells + base + k] = o_how
+        var end = lb - (mid[la] - b)
+        var final_state = 0
+        var final_cost = BIG
+        if end >= 0 and end < width:
+            for t in range(3):
+                if cost[t * cells + la * width + end] < final_cost:
+                    final_cost = cost[t * cells + la * width + end]
+                    final_state = t
+        if final_cost >= BIG:
+            if b >= max_band or b >= max(la, lb):
+                return (before_cost, before_cost)
+            b = min(2 * b, max_band)
+            continue
+        path_a.clear()
+        path_b.clear()
+        var tight = False
+        var i = la
+        var j = lb
+        var state = final_state
+        while i > 0 or j > 0:
+            var k = j - (mid[i] - b)
+            if (k < EDGE and mid[i] - b > 0) or (width - 1 - k < EDGE and mid[i] + b < lb):
+                tight = True
+            var came = Int(moves[state * cells + i * width + k])
+            if state == 0:
+                path_a.append(a_cols[i - 1])
+                path_b.append(b_cols[j - 1])
+                i -= 1
+                j -= 1
+            elif state == 1:
+                path_a.append(a_cols[i - 1])
+                path_b.append(-1)
+                i -= 1
+            else:
+                path_a.append(-1)
+                path_b.append(b_cols[j - 1])
+                j -= 1
+            state = came
+        if tight and b < max_band and b < max(la, lb):
+            b = min(2 * b, max_band)
+            continue
+        break
+    var fresh = List[List[UInt8]]()
+    for r in range(len(rows)):
+        var row = List[UInt8](capacity=len(path_a))
+        for t in reversed(range(len(path_a))):
+            var c = path_a[t] if in_a[r] else path_b[t]
+            row.append(rows[r][c] if c >= 0 else GAP)
+        fresh.append(row^)
+    var after_cost = _objective(fresh, Int(gap_open))
+    if after_cost >= before_cost:
+        return (before_cost, before_cost)
+    rows = fresh^
+    return (before_cost, after_cost)
 
 
 def refine(
@@ -509,10 +805,14 @@ def refine(
     anchor_costs: Costs = Costs.edit(),
     gap_open: Int = 0,
     seeded: Bool = False,
+    group_band: Int = 0,
 ) raises -> List[List[UInt8]]:
     """`rows` (one length, `-` gaps) refined on their sum of pairs for at most `passes` passes over the distinct
     sequences, each within `band` letters of its place, widened up to `max_band` while its best path touches the
-    band's edge; with `gap_open`, every gap a pair opens costs that much more (see `_realign`). Identical
+    band's edge; with `gap_open`, every gap a pair opens costs that much more (see `_realign`). With `group_band`,
+    each pass also realigns every split of a UPGMA tree over the rows, one side's profile against the other's
+    within that many columns of their present merge (`_merge_groups`): moves of many rows at once, such as a
+    stretch of copies shifted by a whole copy in several sequences, that no single row's move reaches. Identical
     sequences share their row. The rows keep their order and spell what they did."""
     var n = len(rows)
     if n < 2 or passes <= 0:
@@ -563,14 +863,19 @@ def refine(
     if not anchored:
         spelled_distinct.clear()
     var partners = Partners(spelled_distinct, anchor_costs, seeded)
-    var last = sum_of_pairs(work) + gap_open * gap_opens(work) if gap_open > 0 else sum_of_pairs(work)
+    var last = _objective(work, gap_open)
     for _ in range(passes):
         for s in range(len(work)):
             centre.clear()
             if anchored:
                 _anchored_centre(work, s, partners, centre)
-            _realign(work, s, band, max_band, centre, Int32(gap_open), cost, moves)
-        var now = sum_of_pairs(work) + gap_open * gap_opens(work) if gap_open > 0 else sum_of_pairs(work)
+            _ = _realign(work, s, band, max_band, centre, Int32(gap_open), cost, moves)
+        if group_band > 0:
+            for group in _tree_groups(work):
+                _ = _merge_groups(
+                    work, group, group_band, max(group_band, min(max_band, 1024)), Int32(gap_open), cost, moves
+                )
+        var now = _objective(work, gap_open)
         # A pass gaining under 0.1% ends the refinement: the later passes of a long run gain little.
         if now >= last or (last - now) * 1000 < last:
             break
@@ -579,3 +884,21 @@ def refine(
     for r in range(n):
         out.append(work[row_of[r]].copy())
     return out^
+
+
+def place(
+    mut rows: List[List[UInt8]],
+    s: Int,
+    centre: List[Int],
+    forced: List[Int],
+    band: Int = 64,
+    max_band: Int = 4096,
+    gap_open: Int = 1,
+) -> Tuple[Int, Int]:
+    """Row `s` of `rows` realigned once, exactly, to the others' columns: the band centred on `centre` (sequence
+    letters before each column, len(rows[0]) + 1 of them; empty for its present place), letter j held to column
+    `forced[j]` where that is not -1 (`forced` empty for none). The new row is kept whatever it costs; returns
+    `row_cost` before and after."""
+    var cost = List[Int32]()
+    var moves = List[UInt8]()
+    return _realign(rows, s, band, max_band, centre, Int32(gap_open), cost, moves, forced, True)

@@ -12,8 +12,9 @@ usage: python3 -I experiments/vntreval/iterate.py <vntr-eval> <plegma> <label> [
   under vntr-eval's work/cache).
 - Regions: `--quick` (24: where plegma loses most to the unit-aware realigner, the hotspots traced so far, six
   controls), the development set (every hotspot and 16 controls) by default, `--all` for the 149, or `--regions`.
-- Prints compare.py's tables, unit and affine, against abPOA (`abpoa_longest`), the unit-aware realigner and the
-  methods named in `--against`, and the wall time of each step.
+- Prints compare.py's tables, unit and affine, against abPOA (`abpoa_longest`), pgrealign's medoid star
+  (`pgrealign_star`, star_candidates.py), the unit-aware realigner and the methods named in `--against`, and the
+  wall time of each step.
 """
 import csv
 import hashlib
@@ -111,7 +112,8 @@ def main():
     compare = os.path.join(HERE, "compare.py")
     for metric in ("alignment.all_cost_over_opt", "alignment.affine_all_cost_over_opt"):
         print("\n## %s" % metric)
-        out = subprocess.run(["python3", "-I", compare, vntr_eval, "abpoa_longest", method, "unit_aware"] + against +
+        out = subprocess.run(["python3", "-I", compare, vntr_eval, "abpoa_longest", method, "pgrealign_star",
+                              "unit_aware"] + against +
                              ["--metric", metric, "--worst", "0"], capture_output=True, text=True).stdout
         print("\n".join(l for l in out.splitlines() if not l.startswith("Where")))
     print("method: %s" % method)

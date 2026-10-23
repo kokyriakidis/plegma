@@ -39,6 +39,7 @@ fuzz = { cmd = "python3 -I experiments/validate/fuzz.py build/plegma build/fuzz"
 build-progressive = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/progressive/progressive.mojo -o build/progressive", depends-on = ["prepare"] }
 # Seeding strategies against true and optimal pairwise alignments (experiments/seeding).
 build-seeding = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/seeding/seeding.mojo -o build/seeding", depends-on = ["prepare"] }
+build-placement = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/placement/placement.mojo -o build/placement", depends-on = ["prepare"] }
 build-pairwise = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/pairwise/pairwise.mojo -o build/pairwise", depends-on = ["prepare"] }
 format = "mojo format -l 120 plegma tests experiments cli"
 # Pulls the latest Mojo skills from github.com/modular/skills into .claude/skills for coding agents.

@@ -1,7 +1,7 @@
 from std.random import random_ui64, seed
 from std.testing import assert_equal, assert_true, TestSuite
 
-from plegma.refine import refine, sum_of_pairs
+from plegma.refine import gap_opens, refine, sum_of_pairs
 
 
 def _random(length: Int) -> List[UInt8]:
@@ -97,6 +97,49 @@ def test_refinement_past_the_partner_cap() raises:
     assert_true(sum_of_pairs(refined) < sum_of_pairs(rows))
     for k in range(len(seqs)):
         assert_true(_ungapped(refined[k]) == seqs[k])
+
+
+def test_group_moves_shift_rows_together() raises:
+    # Four sequences stacked one way and two another, the four ten columns right of the two: the refinement with
+    # group moves stacks all six.
+    seed(23)
+    var core = _random(60)
+    var seqs = List[List[UInt8]]()
+    for k in range(6):
+        var s = core.copy()
+        var at = k * 7 if k < 4 else 40 + k * 3
+        s[at] = UInt8(ord("A")) if s[at] != UInt8(ord("A")) else UInt8(ord("C"))
+        seqs.append(s^)
+    var rows = List[List[UInt8]]()
+    for k in range(6):
+        var pad = List[UInt8](length=10, fill=UInt8(ord("-")))
+        var row = List[UInt8]()
+        if k < 4:
+            row.extend(pad.copy())
+            row.extend(seqs[k].copy())
+        else:
+            row.extend(seqs[k].copy())
+            row.extend(pad.copy())
+        rows.append(row^)
+    var together = refine(rows, 5, 32, gap_open=1, group_band=32)
+    assert_equal(sum_of_pairs(together), sum_of_pairs(seqs))
+    for k in range(6):
+        assert_true(_ungapped(together[k]) == seqs[k])
+
+
+def test_group_moves_never_raise_the_objective() raises:
+    seed(29)
+    for trial in range(20):
+        var truth = _random(Int(random_ui64(20, 200)))
+        var seqs = List[List[UInt8]]()
+        for _ in range(Int(random_ui64(3, 10))):
+            seqs.append(_mutated(truth, 0.1))
+        var rows = _flush_left(seqs)
+        var refined = refine(rows, 5, 16, gap_open=1, group_band=16)
+        assert_true(sum_of_pairs(refined) + gap_opens(refined) <= sum_of_pairs(rows) + gap_opens(rows), String(trial))
+        for k in range(len(seqs)):
+            assert_true(_ungapped(refined[k]) == seqs[k], String(trial))
+            assert_equal(len(refined[k]), len(refined[0]))
 
 
 def main() raises:
