@@ -64,7 +64,7 @@ Options:
                 profiles within INT columns of their present merge, each pass [0; 256 with -A]; 0 off
     -A          the MSA by anchored progressive placement instead of the graph: the distinct sequences, longest
                 first, each placed exactly into the MSA so far in a band centred on the columns every placed sequence
-                votes for its letters through their optimal unit-cost alignment (with -V, through seeds first:
+                votes for its letters through their optimal alignment, at vntr-eval's affine costs (with -V, through seeds first:
                 sporos's MUMs outside tandem repeats, then inside each array, then SMEMs); where every sequence holds
                 one clear tandem array, a second start with the arrays aligned copy by copy; each refined (-I, 20
                 passes by default, with -G's group moves, at -W's prices) and the lower sum of pairs kept; the graph
@@ -73,15 +73,15 @@ Options:
     -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
                 2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
                 opening, its affine cost 4,2 with 6
-    -V INT[,INT...] with -A, the seeds' confidence [-2,1,0,0,0]: -2 no seeds (the optimal unit-cost alignments
+    -V INT[,INT...] with -A, the seeds' confidence [-2,3,0,0,0]: -2 no seeds (the optimal alignments
                 to the placed sequences vote, the staged seeds where a pair is too long to align); -4 the staged
                 seeds first (MUMs outside tandem repeats pin the flanks, then MUMs of 1,000, 600 and 400 letters),
                 then the alignments; -5 the split seeds first (backbone.split_anchors); -3 SMEMs of 600 letters or more
                 first; e >= 0 sporos's MUMs and SMEMs, an
                 anchor inside a repeat kept only if its diagonal lies within e letters of one end of its gap (one
                 indel), -1 without that rule; the second, the costs of the optimal pairwise alignments, which also
-                centre the refinement's bands: 1 unit (vntr-eval's unit metric), 2 gap-affine at -W's prices, 3
-                vntr-eval's affine (4, 6 + 2k), 0 minimap2's two-piece; the third holds the letters that many
+                centre the refinement's bands: 3 vntr-eval's affine (4, 6 + 2k), 1 unit (its unit metric), 2
+                gap-affine at -W's prices, 0 minimap2's two-piece; the third holds the letters that many
                 of the best sources anchor to their columns in placement [0]; a fourth 1 places the sequences nearest
                 first, not longest first; a fifth 1 anchors a letter where most of its votes agree (not more than
                 half), each anchor weighing the votes its column won; a sixth n > 0 places them in a random order
@@ -452,7 +452,7 @@ struct Options(Copyable, Movable):
         self.anchored = False
         self.units = True
         self.one_indel = -1
-        self.votes = 0
+        self.votes = 3
         self.mismatch = 1
         self.gap = 1
         self.hard = 0
@@ -656,7 +656,7 @@ def _poa(input: String, options: Options) raises -> String:
             options.units,
             True,
             options.one_indel if options.confidence_set else -2,
-            options.votes if options.confidence_set else 1,
+            options.votes,
             options.mismatch if options.prices_set else 2,
             options.gap if options.prices_set else 2,
             options.hard,

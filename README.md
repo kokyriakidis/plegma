@@ -17,14 +17,14 @@ repeats and short runs. `-I` refines the MSA (and the graph built from it) on it
 realigned in turn, exactly, to the others' columns, anchored by the sequences' optimal pairwise alignments; on
 vntr-eval's 149 regions it beats abPOA in every stratum on both its unit and affine scores. `-A` builds the MSA
 without the graph: each distinct sequence, longest first, placed exactly into the MSA so far in a band centred on
-the columns the placed sequences' optimal unit-cost alignments to it vote for (an anchor audit,
+the columns the placed sequences' optimal alignments to it (at vntr-eval's affine costs) vote for (an anchor audit,
 `experiments/anchors`, showed seeds inside repeats pair letters no optimal alignment pairs), and, where every
 sequence holds one clear tandem array, a second start whose arrays are cut into copies phased by one unit and
 aligned copy by copy; each is refined (`-I`, with `-G`'s group moves, which realign every split of a tree over the
 rows as two profiles), knowing the repeat's period (bands reaching a copy, group moves splitting the sequences by
 copy number), on the sum of pairs over every pair of input sequences with a gap opening priced at half a mismatch
 (`-W`), and the lowest kept; on vntr-eval's 149 regions its medians beat the unit-aware realigner's on both its unit
-and affine costs in every stratum (hotspot VNTRs 1.033 / 1.087 times the pairwise optima, against 1.048 / 1.093;
+and affine costs in every stratum (hotspot VNTRs 1.032 / 1.080 times the pairwise optima, against 1.048 / 1.093;
 pgrealign's star 1.225 / 1.204). The package also holds the pairwise layer (sporos anchors, optimal chaining,
 recursive backbones; `docs/design.md`, `experiments/`).
 

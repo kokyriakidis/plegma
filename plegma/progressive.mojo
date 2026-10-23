@@ -843,7 +843,7 @@ def progressive(
     units: Bool = True,
     even_start: Bool = True,
     one_indel: Int = -2,
-    votes: Int = UNIT_VOTES,
+    votes: Int = AFFINE_VOTES,
     mismatch: Int = 2,
     gap: Int = 2,
     hard: Int = 0,
@@ -864,7 +864,9 @@ def progressive(
     `one_indel`, the seeds' rule inside tandem repeats (`_cascade`); `votes`, the costs of the optimal pairwise
     alignments that vote for placement and centre the refinement's bands: `UNIT_VOTES` (vntr-eval's unit cost),
     `PRICED_VOTES` (gap-affine at the objective's prices: `mismatch`, a gap of k letters `gap_open + gap * k`),
-    `AFFINE_VOTES` (vntr-eval's affine cost, 4 and 6 + 2k) or `TWO_PIECE_VOTES` (minimap2's two-piece costs); `mismatch`
+    `AFFINE_VOTES` (vntr-eval's affine cost, 4 and 6 + 2k; the default: on vntr-eval's 149 regions it lowers the
+    affine cost over the optima against unit-cost votes, hotspot VNTRs better in 28 and worse in 12, the unit cost
+    level) or `TWO_PIECE_VOTES` (minimap2's two-piece costs); `mismatch`
     and `gap`, the prices of a column of two different letters and of a letter against a gap (`refine`); `hard`, how
     many of the best seed sources' anchors hold their letters in placement (`_placed`); `nearest`, sequences placed
     nearest first, not longest first (`_placed`); `consistency`, a letter anchored where most of its votes agree
