@@ -44,13 +44,21 @@ def _symbol(letter: UInt8) -> Int:
     return 4
 
 
-def gap_opens(rows: List[List[UInt8]]) -> Int:
+@always_inline
+def _w(weights: List[Int], r: Int) -> Int:
+    """Row r's weight: how many sequences it stands for (1 where `weights` is empty)."""
+    return weights[r] if len(weights) > 0 else 1
+
+
+def gap_opens(rows: List[List[UInt8]], weights: List[Int] = List[Int]()) -> Int:
     """The gaps the rows' pairs open, summed over every pair: in each pair's alignment (columns where both are gaps
-    left out), the runs of columns where just one of the two has a gap."""
+    left out), the runs of columns where just one of the two has a gap; a pair counts the product of the two rows'
+    `weights` (1 each where empty)."""
     var total = 0
     var n = len(rows)
     for a in range(n):
         for b in range(a + 1, n):
+            var w = _w(weights, a) * _w(weights, b)
             var state = 0
             for c in range(len(rows[a])):
                 var x = rows[a][c] == GAP
@@ -59,18 +67,20 @@ def gap_opens(rows: List[List[UInt8]]) -> Int:
                     continue
                 var now = 1 if x else (2 if y else 0)
                 if now != 0 and now != state:
-                    total += 1
+                    total += w
                 state = now
     return total
 
 
-def row_cost(rows: List[List[UInt8]], s: Int, gap_open: Int) -> Int:
+def row_cost(rows: List[List[UInt8]], s: Int, gap_open: Int, weights: List[Int] = List[Int]()) -> Int:
     """Row `s`'s exact share of the objective: over every other row, the columns where the two differ (both gaps
-    cost nothing), plus `gap_open` for every gap the pair opens."""
+    cost nothing), plus `gap_open` for every gap the pair opens, times the other row's weight (`weights`, 1 each
+    where empty)."""
     var total = 0
     for r in range(len(rows)):
         if r == s:
             continue
+        var pair = 0
         var state = 0
         for c in range(len(rows[s])):
             var x = rows[s][c]
@@ -80,30 +90,42 @@ def row_cost(rows: List[List[UInt8]], s: Int, gap_open: Int) -> Int:
             if gx and gy:
                 continue
             if x != y:
-                total += 1
+                pair += 1
             var now = 1 if gx else (2 if gy else 0)
             if now != 0 and now != state:
-                total += gap_open
+                pair += gap_open
             state = now
+        total += pair * _w(weights, r)
     return total
 
 
-def sum_of_pairs(rows: List[List[UInt8]]) -> Int:
-    """The rows' sum of pairs at unit costs (see the module docstring). Letters other than ACGT count as one."""
+def sum_of_pairs(rows: List[List[UInt8]], weights: List[Int] = List[Int]()) -> Int:
+    """The rows' sum of pairs at unit costs (see the module docstring), a pair counting the product of the two rows'
+    `weights` (1 each where empty). Letters other than ACGT count as one."""
     if len(rows) == 0:
         return 0
     var n = len(rows)
+    var weight = 0
+    var squares = 0
+    for r in range(n):
+        weight += _w(weights, r)
+        squares += _w(weights, r) * _w(weights, r)
+    var pairs = (weight * weight - squares) // 2
     var total = 0
     var counts = List[Int](length=SYMBOLS, fill=0)
+    var counts_sq = List[Int](length=SYMBOLS, fill=0)
     for c in range(len(rows[0])):
         for x in range(SYMBOLS):
             counts[x] = 0
+            counts_sq[x] = 0
         for r in range(n):
-            counts[_symbol(rows[r][c])] += 1
+            var w = _w(weights, r)
+            counts[_symbol(rows[r][c])] += w
+            counts_sq[_symbol(rows[r][c])] += w * w
         var same = 0
         for x in range(SYMBOLS):
-            same += counts[x] * (counts[x] - 1) // 2
-        total += n * (n - 1) // 2 - same
+            same += (counts[x] * counts[x] - counts_sq[x]) // 2
+        total += pairs - same
     return total
 
 
@@ -317,6 +339,7 @@ def _realign(
     mut moves: List[UInt8],
     forced: List[Int] = List[Int](),
     always: Bool = False,
+    weights: List[Int] = List[Int](),
 ) -> Tuple[Int, Int]:
     """Row `s` realigned to the others' profile within `band` letters of its place (or of `centre`, when given),
     widened while the best path touches the band's edge, up to `max_band`; the rows rewritten (all-gap columns
@@ -328,11 +351,14 @@ def _realign(
     sequence's letter, the sequence's own column against every row holding a letter beside it. Those counts only
     approximate the pairs' own gaps (a pair skips the columns where both are gaps), so the DP proposes, and the
     new row is kept only if its exact cost (`row_cost`) is no more than the present one's (or always, with `always`).
-    `forced[j]`, where given and not -1, is the column letter j must take. Returns the exact costs before and after
-    (equal when the row stays)."""
+    `forced[j]`, where given and not -1, is the column letter j must take. Every other row counts its weight
+    (`weights`, 1 each where empty). Returns the exact costs before and after (equal when the row stays)."""
     var has_forced = len(forced) > 0
     var columns = len(rows[0])
-    var others = Int32(len(rows) - 1)
+    var others = Int32(0)
+    for r in range(len(rows)):
+        if r != s:
+            others += Int32(_w(weights, r))
     # The others' symbol counts per column, and per column how many of them hold a letter, start a gap (a letter
     # in the column before), or end one (a gap before).
     var counts = List[Int32](length=columns * SYMBOLS, fill=0)
@@ -343,15 +369,16 @@ def _realign(
         if r == s:
             continue
         var was_letter = True
+        var w = Int32(_w(weights, r))
         for c in range(columns):
             var x = rows[r][c]
-            counts[c * SYMBOLS + _symbol(x)] += 1
+            counts[c * SYMBOLS + _symbol(x)] += w
             if x != GAP:
-                held[c] += 1
+                held[c] += w
                 if not was_letter:
-                    ends[c] += 1
+                    ends[c] += w
             elif was_letter:
-                starts[c] += 1
+                starts[c] += w
             was_letter = x != GAP
     var letters = List[UInt8]()
     var before = List[Int](length=columns + 1, fill=0)
@@ -460,7 +487,7 @@ def _realign(
                     final_state = t
         if final_cost >= BIG:
             if b >= max_band or b >= max(n, columns):
-                var stays = row_cost(rows, s, Int(gap_open))
+                var stays = row_cost(rows, s, Int(gap_open), weights)
                 return (stays, stays)
             b = min(2 * b, max_band)
             continue
@@ -517,16 +544,18 @@ def _realign(
             for t in kept:
                 row.append(fresh[r][t])
             fresh[r] = row^
-    var before_cost = row_cost(rows, s, Int(gap_open))
-    var after_cost = row_cost(fresh, s, Int(gap_open))
+    var before_cost = row_cost(rows, s, Int(gap_open), weights)
+    var after_cost = row_cost(fresh, s, Int(gap_open), weights)
     if after_cost > before_cost and not always:
         return (before_cost, before_cost)
     rows = fresh^
     return (before_cost, after_cost)
 
 
-def _objective(rows: List[List[UInt8]], gap_open: Int) -> Int:
-    return sum_of_pairs(rows) + gap_open * gap_opens(rows) if gap_open > 0 else sum_of_pairs(rows)
+def _objective(rows: List[List[UInt8]], gap_open: Int, weights: List[Int] = List[Int]()) -> Int:
+    if gap_open > 0:
+        return sum_of_pairs(rows, weights) + gap_open * gap_opens(rows, weights)
+    return sum_of_pairs(rows, weights)
 
 
 def _tree_groups(rows: List[List[UInt8]]) -> List[List[Bool]]:
@@ -612,6 +641,7 @@ def _merge_groups(
     gap_open: Int32,
     mut cost: List[Int32],
     mut moves: List[UInt8],
+    weights: List[Int] = List[Int](),
 ) -> Tuple[Int, Int]:
     """The rows in `in_a` (A) and the others (B) realigned as two profiles, each keeping its own columns' order and
     contents, within `band` columns of their present merge (widened up to `max_band` while the path touches the
@@ -619,14 +649,17 @@ def _merge_groups(
     letters times B's rows, and B's alike: at unit costs the DP is exact, since the pairs within A or within B do not
     change. A gap run opening across costs `gap_open` for each pair of a letter there and a letter in the other
     side's column before, an approximation; the new rows are kept only if the exact objective (`_objective`) falls.
-    Returns the objective before and after (equal when the rows stay)."""
+    Every row counts its weight (`weights`, 1 each where empty). Returns the objective before and after (equal when
+    the rows stay)."""
     var columns = len(rows[0])
     var n_a = 0
+    var n_b = 0
     for r in range(len(rows)):
         if in_a[r]:
-            n_a += 1
-    var n_b = len(rows) - n_a
-    var before_cost = _objective(rows, Int(gap_open))
+            n_a += _w(weights, r)
+        else:
+            n_b += _w(weights, r)
+    var before_cost = _objective(rows, Int(gap_open), weights)
     if n_a == 0 or n_b == 0:
         return (before_cost, before_cost)
     # Each side's columns (those where one of its rows holds a letter), their symbol counts and letters held, and
@@ -656,18 +689,19 @@ def _merge_groups(
     var held_a = List[Int32](length=la, fill=0)
     var held_b = List[Int32](length=lb, fill=0)
     for r in range(len(rows)):
+        var w = Int32(_w(weights, r))
         if in_a[r]:
             for i in range(la):
                 var x = rows[r][a_cols[i]]
-                counts_a[i * SYMBOLS + _symbol(x)] += 1
+                counts_a[i * SYMBOLS + _symbol(x)] += w
                 if x != GAP:
-                    held_a[i] += 1
+                    held_a[i] += w
         else:
             for j in range(lb):
                 var x = rows[r][b_cols[j]]
-                counts_b[j * SYMBOLS + _symbol(x)] += 1
+                counts_b[j * SYMBOLS + _symbol(x)] += w
                 if x != GAP:
-                    held_b[j] += 1
+                    held_b[j] += w
     var na = Int32(n_a)
     var nb = Int32(n_b)
     var g = gap_open
@@ -812,7 +846,7 @@ def _merge_groups(
             var c = path_a[t] if in_a[r] else path_b[t]
             row.append(rows[r][c] if c >= 0 else GAP)
         fresh.append(row^)
-    var after_cost = _objective(fresh, Int(gap_open))
+    var after_cost = _objective(fresh, Int(gap_open), weights)
     if after_cost >= before_cost:
         return (before_cost, before_cost)
     rows = fresh^
@@ -830,6 +864,7 @@ def refine(
     seeded: Bool = False,
     group_band: Int = 0,
     period: Int = 0,
+    weights: List[Int] = List[Int](),
 ) raises -> List[List[UInt8]]:
     """`rows` (one length, `-` gaps) refined on their sum of pairs for at most `passes` passes over the distinct
     sequences, each within `band` letters of its place, widened up to `max_band` while its best path touches the
@@ -839,7 +874,8 @@ def refine(
     stretch of copies shifted by a whole copy in several sequences, that no single row's move reaches. With a tandem
     repeat's `period`, the moves know its copies: a row's band reaches a copy and more either side, the group moves'
     two copies, and the group moves also split the rows by copy number (`_length_groups`). Identical
-    sequences share their row. The rows keep their order and spell what they did."""
+    sequences share their row, which weighs as many as spell it (each row counting its `weights`, 1 where empty): the
+    objective is over every pair of the input rows. The rows keep their order and spell what they did."""
     var n = len(rows)
     if n < 2 or passes <= 0:
         return rows.copy()
@@ -868,6 +904,9 @@ def refine(
         work.append(rows[d].copy())
     if len(work) < 2:
         return rows.copy()
+    var weight = List[Int](length=len(distinct), fill=0)
+    for r in range(n):
+        weight[row_of[r]] += _w(weights, r)
     # Columns gapped in every distinct row go first.
     var keep = List[Int]()
     for c in range(len(work[0])):
@@ -892,22 +931,29 @@ def refine(
     # A tandem repeat's copies: bands reaching a copy (a row) or two (a group) either side.
     var row_band = max(band, period + 2 * EDGE + 8) if period > 0 else band
     var groups_band = max(group_band, 2 * period + 16) if period > 0 else group_band
-    var last = _objective(work, gap_open)
+    var last = _objective(work, gap_open, weight)
     for _ in range(passes):
         for s in range(len(work)):
             centre.clear()
             if anchored:
                 _anchored_centre(work, s, partners, centre)
-            _ = _realign(work, s, row_band, max_band, centre, Int32(gap_open), cost, moves)
+            _ = _realign(work, s, row_band, max_band, centre, Int32(gap_open), cost, moves, List[Int](), False, weight)
         if group_band > 0 or period > 0:
             var groups = _tree_groups(work)
             if period > 0:
                 groups.extend(_length_groups(work, period))
             for group in groups:
                 _ = _merge_groups(
-                    work, group, groups_band, max(groups_band, min(max_band, 1024)), Int32(gap_open), cost, moves
+                    work,
+                    group,
+                    groups_band,
+                    max(groups_band, min(max_band, 1024)),
+                    Int32(gap_open),
+                    cost,
+                    moves,
+                    weight,
                 )
-        var now = _objective(work, gap_open)
+        var now = _objective(work, gap_open, weight)
         # A pass gaining under 0.1% ends the refinement: the later passes of a long run gain little.
         if now >= last or (last - now) * 1000 < last:
             break
@@ -926,11 +972,12 @@ def place(
     band: Int = 64,
     max_band: Int = 4096,
     gap_open: Int = 1,
+    weights: List[Int] = List[Int](),
 ) -> Tuple[Int, Int]:
     """Row `s` of `rows` realigned once, exactly, to the others' columns: the band centred on `centre` (sequence
     letters before each column, len(rows[0]) + 1 of them; empty for its present place), letter j held to column
-    `forced[j]` where that is not -1 (`forced` empty for none). The new row is kept whatever it costs; returns
-    `row_cost` before and after."""
+    `forced[j]` where that is not -1 (`forced` empty for none), the other rows counting their `weights`. The new row
+    is kept whatever it costs; returns `row_cost` before and after."""
     var cost = List[Int32]()
     var moves = List[UInt8]()
-    return _realign(rows, s, band, max_band, centre, Int32(gap_open), cost, moves, forced, True)
+    return _realign(rows, s, band, max_band, centre, Int32(gap_open), cost, moves, forced, True, weights)

@@ -10,7 +10,9 @@ rising in letter and column. The MSA is then refined (`refine`, with group moves
 
 Where every sequence holds one clear tandem array (`units.tandem_layout`), a second start is built: the arrays
 aligned copy by copy, the flanks on either side placed as above, refined alike; the start whose refined objective is
-lower is kept (the objective: the pairs' differing columns plus `gap_open` per gap a pair opens). Where the sequences
+lower is kept (the objective: the pairs' differing columns plus `gap_open` per gap a pair opens, over every pair of
+the input sequences, so a distinct sequence weighs as many as spell it, as vntr-eval's pairs and pgrealign's alleles
+do). Where the sequences
 hold a tandem repeat, both refinements know its period (`refine`'s copy-aware moves).
 """
 
@@ -209,8 +211,11 @@ def _centre_of(points_c: List[Int], points_j: List[Int], columns: Int, n: Int) -
     return centre^
 
 
-def _placed(seqs: List[List[UInt8]], band: Int, max_band: Int, gap_open: Int) raises -> List[List[UInt8]]:
-    """The sequences (distinct or not, any may be empty) placed one at a time, longest first: rows in `seqs`' order."""
+def _placed(
+    seqs: List[List[UInt8]], band: Int, max_band: Int, gap_open: Int, weights: List[Int]
+) raises -> List[List[UInt8]]:
+    """The sequences (distinct or not, any may be empty) placed one at a time, longest first, each placement counting
+    the placed rows' `weights`: rows in `seqs`' order."""
     var n = len(seqs)
     var keys = List[UInt64]()
     for k in range(n):
@@ -224,8 +229,10 @@ def _placed(seqs: List[List[UInt8]], band: Int, max_band: Int, gap_open: Int) ra
     var two_piece = Costs.two_piece(4, 4, 2, 24, 1)
     var rows = List[List[UInt8]]()
     var placed = List[List[UInt8]]()
+    var placed_weights = List[Int]()
     for step in range(n):
         var q = seqs[order[step]].copy()
+        placed_weights.append(weights[order[step]])
         if step == 0:
             rows.append(q.copy())
             placed.append(q^)
@@ -281,7 +288,7 @@ def _placed(seqs: List[List[UInt8]], band: Int, max_band: Int, gap_open: Int) ra
             # No anchor: the diagonal through the others' columns.
             for c in range(total_columns + 1):
                 centre[c] = min(m, c * m // max(1, columns))
-        _ = place(rows, len(rows) - 1, centre, List[Int](), band, max_band, gap_open)
+        _ = place(rows, len(rows) - 1, centre, List[Int](), band, max_band, gap_open, placed_weights)
     var out = List[List[UInt8]]()
     for _ in range(n):
         out.append(List[UInt8]())
@@ -297,8 +304,8 @@ def _letters(seq: List[UInt8], a: Int, b: Int) -> List[UInt8]:
     return out^
 
 
-def _objective(rows: List[List[UInt8]], gap_open: Int) -> Int:
-    return sum_of_pairs(rows) + gap_open * gap_opens(rows)
+def _objective(rows: List[List[UInt8]], gap_open: Int, weights: List[Int]) -> Int:
+    return sum_of_pairs(rows, weights) + gap_open * gap_opens(rows, weights)
 
 
 def progressive(
@@ -315,19 +322,22 @@ def progressive(
     copy-level start too where the sequences hold a tandem array, and gives the refinement the repeat's period."""
     var n = len(seqs)
     var distinct = List[List[UInt8]]()
+    var weight = List[Int]()
     var of = List[Int](length=n, fill=-1)
     for r in range(n):
         for d in range(len(distinct)):
             if distinct[d] == seqs[r]:
                 of[r] = d
+                weight[d] += 1
                 break
         if of[r] < 0:
             of[r] = len(distinct)
             distinct.append(seqs[r].copy())
+            weight.append(1)
     var two_piece = Costs.two_piece(4, 4, 2, 24, 1)
     # The tandem repeat's copies, where the sequences hold one: the copy-level start, and the period the
     # refinement's copy-aware moves use (from the layout, else the longest sequence's array).
-    var layout = tandem_layout(distinct) if units and len(distinct) > 2 else Layout()
+    var layout = tandem_layout(distinct, weights=weight) if units and len(distinct) > 2 else Layout()
     var period = layout.period
     if units and period == 0 and len(distinct) > 1:
         var longest = 0
@@ -337,9 +347,9 @@ def progressive(
         var top = tandem_repeat(distinct[longest])
         if top.identity >= 0.7 and (top.end - top.start) * 10 >= len(distinct[longest]) * 4:
             period = top.period
-    var rows = _placed(distinct, band, max_band, gap_open)
+    var rows = _placed(distinct, band, max_band, gap_open, weight)
     if passes > 0 and len(distinct) > 1:
-        rows = refine(rows, passes, band, max_band, True, two_piece, gap_open, False, group_band, period)
+        rows = refine(rows, passes, band, max_band, True, two_piece, gap_open, False, group_band, period, weight)
     if units and len(distinct) > 2:
         if len(layout.rows) == len(distinct):
             var left = List[List[UInt8]]()
@@ -347,8 +357,8 @@ def progressive(
             for k in range(len(distinct)):
                 left.append(_letters(distinct[k], 0, layout.starts[k]))
                 right.append(_letters(distinct[k], layout.ends[k], len(distinct[k])))
-            var left_rows = _placed(left, band, max_band, gap_open)
-            var right_rows = _placed(right, band, max_band, gap_open)
+            var left_rows = _placed(left, band, max_band, gap_open, weight)
+            var right_rows = _placed(right, band, max_band, gap_open, weight)
             var other = List[List[UInt8]]()
             for k in range(len(distinct)):
                 var row = left_rows[k].copy()
@@ -356,8 +366,10 @@ def progressive(
                 row.extend(right_rows[k].copy())
                 other.append(row^)
             if passes > 0:
-                other = refine(other, passes, band, max_band, True, two_piece, gap_open, False, group_band, period)
-            if _objective(other, gap_open) < _objective(rows, gap_open):
+                other = refine(
+                    other, passes, band, max_band, True, two_piece, gap_open, False, group_band, period, weight
+                )
+            if _objective(other, gap_open, weight) < _objective(rows, gap_open, weight):
                 rows = other^
     var out = List[List[UInt8]]()
     for r in range(n):

@@ -243,17 +243,18 @@ def _column_costs(
     length: List[Int32],
     n_symbols: Int,
     mine: List[Int],
+    weights: List[Int],
 ) -> Tuple[List[Int32], List[Int32], Int32]:
     """For a row `mine` (symbols) against the others' columns (row `skip` left out, columns no other row holds kept,
     harmlessly): each column's cost of each distinct symbol of `mine` facing it (the others' symbols' distances to
     it, their gaps its length), laid out column by column over `mine`'s distinct symbols in first-seen order; each
     column's cost of a gap facing it (the others' symbols' lengths); and what a symbol alone in a column costs per
-    letter (the other rows)."""
+    letter (the other rows). Every other row counts its weight."""
     var columns = len(rows[0]) if len(rows) > 0 else 0
     var others = 0
     for r in range(len(rows)):
         if r != skip:
-            others += 1
+            others += weights[r]
     var local = List[Int](length=n_symbols, fill=-1)
     var distinct = List[Int]()
     for x in mine:
@@ -274,17 +275,17 @@ def _column_costs(
                 continue
             var y = rows[r][c]
             if y < 0:
-                gaps += 1
+                gaps += weights[r]
                 continue
             var found = False
             for t in range(len(held)):
                 if held[t] == y:
-                    counts[t] += 1
+                    counts[t] += weights[r]
                     found = True
                     break
             if not found:
                 held.append(y)
-                counts.append(1)
+                counts.append(weights[r])
         var g = Int32(0)
         for t in range(len(held)):
             g += Int32(counts[t]) * length[held[t]]
@@ -299,11 +300,17 @@ def _column_costs(
 
 
 def _realign_symbols(
-    mut rows: List[List[Int]], s: Int, mine: List[Int], dist: List[Int32], length: List[Int32], n_symbols: Int
+    mut rows: List[List[Int]],
+    s: Int,
+    mine: List[Int],
+    dist: List[Int32],
+    length: List[Int32],
+    n_symbols: Int,
+    weights: List[Int],
 ) -> Int32:
     """Row `s` (its symbols `mine`) realigned exactly to the others' columns: the rows rewritten (columns no row holds
     dropped). Returns the new row's cost against the others."""
-    var costs = _column_costs(rows, s, dist, length, n_symbols, mine)
+    var costs = _column_costs(rows, s, dist, length, n_symbols, mine, weights)
     var local = List[Int](length=n_symbols, fill=-1)
     var nx = 0
     for x in mine:
@@ -392,31 +399,36 @@ def _realign_symbols(
     return cost[columns * width + n]
 
 
-def _row_cost(rows: List[List[Int]], s: Int, dist: List[Int32], length: List[Int32], n_symbols: Int) -> Int:
+def _row_cost(
+    rows: List[List[Int]], s: Int, dist: List[Int32], length: List[Int32], n_symbols: Int, weights: List[Int]
+) -> Int:
     """Row `s`'s cost against the others, as `_realign_symbols` counts it."""
     var total = 0
     for r in range(len(rows)):
         if r == s:
             continue
+        var pair = 0
         for c in range(len(rows[s])):
             var x = rows[s][c]
             var y = rows[r][c]
             if x < 0 and y < 0:
                 continue
             if x < 0:
-                total += Int(length[y])
+                pair += Int(length[y])
             elif y < 0:
-                total += Int(length[x])
+                pair += Int(length[x])
             else:
-                total += Int(dist[x * n_symbols + y])
+                pair += Int(dist[x * n_symbols + y])
+        total += pair * weights[r]
     return total
 
 
 def _symbol_msa(
-    seqs: List[List[Int]], dist: List[Int32], length: List[Int32], n_symbols: Int, passes: Int
+    seqs: List[List[Int]], dist: List[Int32], length: List[Int32], n_symbols: Int, passes: Int, weights: List[Int]
 ) -> List[List[Int]]:
-    """The symbol strings aligned on their sum of pairs: progressively, the longest first, then each row realigned to
-    the others for at most `passes` passes, until none gains. Rows in `seqs`' order, -1 for gaps."""
+    """The symbol strings aligned on their sum of pairs, each pair counting the product of its `weights`:
+    progressively, the longest first, then each row realigned to the others for at most `passes` passes, until none
+    gains. Rows in `seqs`' order, -1 for gaps."""
     var n = len(seqs)
     var keys = List[UInt64]()
     for k in range(n):
@@ -425,7 +437,10 @@ def _symbol_msa(
     var order = List[Int]()
     for key in keys:
         order.append(Int(key & 0xFFFFFFFF))
-    # rows[t] is sequence order[t]'s row.
+    # rows[t] is sequence order[t]'s row, weighing w[t].
+    var w = List[Int]()
+    for t in range(n):
+        w.append(weights[order[t]])
     var rows = List[List[Int]]()
     for t in range(n):
         var k = order[t]
@@ -440,12 +455,12 @@ def _symbol_msa(
         var mine = List[Int](length=columns, fill=-1)
         mine.extend(seqs[k].copy())
         rows.append(mine^)
-        _ = _realign_symbols(rows, len(rows) - 1, seqs[k], dist, length, n_symbols)
+        _ = _realign_symbols(rows, len(rows) - 1, seqs[k], dist, length, n_symbols, w)
     for _ in range(passes):
         var gained = 0
         for t in range(n):
-            var before = _row_cost(rows, t, dist, length, n_symbols)
-            var after = _realign_symbols(rows, t, seqs[order[t]], dist, length, n_symbols)
+            var before = _row_cost(rows, t, dist, length, n_symbols, w)
+            var after = _realign_symbols(rows, t, seqs[order[t]], dist, length, n_symbols, w)
             gained += before - Int(after)
         if gained <= 0:
             break
@@ -457,15 +472,19 @@ def _symbol_msa(
     return out^
 
 
-def tandem_layout(seqs: List[List[UInt8]], passes: Int = 3) raises -> Layout:
+def tandem_layout(seqs: List[List[UInt8]], passes: Int = 3, weights: List[Int] = List[Int]()) raises -> Layout:
     """The sequences' arrays aligned copy by copy (module docstring), or an empty layout where the sequences do not
     each hold one clear array of one period: the longest sequence's array (`tandem_repeat`) must match itself one
     period on at 75% or more, hold four copies and cover 40% of the sequence, and every sequence's array at that
-    period must hold two copies at 70%. `passes` bounds the copies' MSA's refinement."""
+    period must hold two copies at 70%. `passes` bounds the copies' MSA's refinement; a pair of sequences counts the
+    product of their `weights` (1 each where empty)."""
     var out = Layout()
     var n = len(seqs)
     if n < 2:
         return out^
+    var weight = weights.copy()
+    if len(weight) != n:
+        weight = List[Int](length=n, fill=1)
     var longest = 0
     for k in range(1, n):
         if len(seqs[k]) > len(seqs[longest]):
@@ -524,7 +543,7 @@ def tandem_layout(seqs: List[List[UInt8]], passes: Int = 3) raises -> Layout:
             var d = Int32(aligner.distance(Span(texts[x]), Span(texts[y])))
             dist[x * n_symbols + y] = d
             dist[y * n_symbols + x] = d
-    var msa = _symbol_msa(strings, dist, length, n_symbols, passes)
+    var msa = _symbol_msa(strings, dist, length, n_symbols, passes, weight)
     # Letters: each column of copies through the unit, insertions before each position left-aligned.
     var rows = List[List[UInt8]]()
     for _ in range(n):
