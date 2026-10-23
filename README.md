@@ -13,7 +13,10 @@ outputs (consensus, MSA, GFA), in abPOA's global, local and extension modes, und
 follows the band rather than the graph times the sequence. In global mode the consensus is then polished
 (`-P`): one-letter and whole-repeat-unit edits are kept while they lower the sequences' summed edit distance to
 it, then while they raise the sequences' likelihood under a pair HMM, which mends most of the errors a POA
-consensus makes in tandem repeats and short runs. The package also holds the pairwise layer (sporos
+consensus makes in tandem repeats and short runs. `-I` refines the MSA (and the graph built from it) on its
+sum of pairs: each sequence realigned in turn, exactly, to the others' columns, anchored by the sequences'
+optimal pairwise alignments; on vntr-eval's 149 regions it beats abPOA in every stratum on both its unit and
+affine scores. The package also holds the pairwise layer (sporos
 anchors, optimal chaining, recursive backbones; `docs/design.md`, `experiments/`).
 
 ## Building

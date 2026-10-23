@@ -27,6 +27,9 @@ is implementation and may change.
 - Consensus polishing: `polish` (one-letter and whole-repeat-unit edits kept
   while they lower the sequences' summed edit distance to the consensus, then
   while they raise its likelihood under a pair HMM).
+- MSA refinement: `refine` (each distinct sequence realigned exactly to the
+  others' columns on their sum of pairs with gap opening, in a band centred on
+  the sequences' optimal pairwise alignments), `sum_of_pairs`, `gap_opens`.
 - Order and clusters: `guide_order` (abPOA's progressive order by minimizer
   multiset Jaccard), `cluster_rows` (several consensus sequences, by MSA
   columns where the sequences disagree).
@@ -53,3 +56,4 @@ from .kernel import (
 from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window
 from .polish import polish
+from .refine import gap_opens, refine, sum_of_pairs

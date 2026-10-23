@@ -4,6 +4,7 @@ one (its flags, defaults and output modes), written as a consensus, an MSA or a 
 from std.sys import argv, exit, stderr
 from std.time import perf_counter_ns
 
+from karan import Costs
 from sporos import read_fasta
 
 from plegma.anchors import Anchor
@@ -15,6 +16,7 @@ from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
 from plegma.polish import polish
+from plegma.refine import refine
 
 
 comptime USAGE = """Usage: plegma [options] <in.fa/fq> > cons.fa/msa.fa/plegma.gfa
@@ -46,6 +48,11 @@ Options:
   Refinement:
     -R INT      rounds of realignment [0]: each round starts a graph from the consensus so far and aligns every
                 sequence to it again; the consensus is then the sequences' own (the backbone carries no weight)
+    -I INT[,INT[,INT]] passes of sum-of-pairs refinement of the MSA [0]: each distinct sequence realigned in turn to
+                the others' columns, exactly, in a band of the second number of letters [64] centred where the
+                sequences' optimal pairwise alignments place it, every gap a pair opens costing the third [1]
+                (MSA and GFA outputs)
+    -B          refinement starts each round's graph from the consensus polished (-P), not the heaviest path
     -P INT[,INT] rounds of consensus polishing, at most [50,20] (global mode): each sequence aligned to the
                 consensus, and every one-letter or whole-repeat-unit edit kept that lowers their summed edit distance
                 to it (the first), then that raises their likelihood under a pair HMM (the second); 0,0 off
@@ -200,6 +207,10 @@ struct Options(Copyable, Movable):
     var rounds: Int
     var polish_rounds: Int
     var likely_rounds: Int
+    var polish_backbone: Bool
+    var sp_passes: Int
+    var sp_band: Int
+    var sp_gap_open: Int
     var min_freq: Float64
     var verbose: Bool
 
@@ -224,6 +235,10 @@ struct Options(Copyable, Movable):
         self.rounds = 0
         self.polish_rounds = 50
         self.likely_rounds = 20
+        self.polish_backbone = False
+        self.sp_passes = 0
+        self.sp_band = 64
+        self.sp_gap_open = 1
         self.min_freq = 0.25
         self.verbose = False
 
@@ -453,6 +468,13 @@ def _poa(input: String, options: Options) raises -> String:
         var backbone_letters = List[UInt8]()
         for node in graph.heaviest_path_of(topology.order, members):
             backbone_letters.append(graph.bases[node])
+        if options.polish_backbone and options.mode == GLOBAL:
+            var everyone = List[Int]()
+            for r in range(len(seqs)):
+                everyone.append(r)
+            backbone_letters = polish(
+                backbone_letters, seqs, everyone, options.polish_rounds, likely_rounds=options.likely_rounds
+            )
         var next = Graph()
         _ = next.add("plegma_backbone", Span(backbone_letters))
         for k in range(len(order)):
@@ -468,12 +490,34 @@ def _poa(input: String, options: Options) raises -> String:
 
     var result = options.result
     var text = String()
-    var need_rows = result == 1 or result == 2 or options.consensus_rule == 1 or options.max_consensus > 1
+    var refining = options.sp_passes > 0 and result != 0
+    var need_rows = result == 1 or result == 2 or options.consensus_rule == 1 or options.max_consensus > 1 or refining
     var by_path = graph.msa() if need_rows else List[String]()
     var rows = List[String]()
     if need_rows:
         for p in shown:
             rows.append(by_path[p])
+    if refining:
+        # The MSA refined on its sum of pairs; a graph output is the refined MSA's graph.
+        var bytes = List[List[UInt8]]()
+        for row in rows:
+            bytes.append(List[UInt8](row.as_bytes()))
+        var refined = refine(
+            bytes,
+            options.sp_passes,
+            options.sp_band,
+            anchor_costs=Costs.two_piece(4, 4, 2, 24, 1),
+            gap_open=options.sp_gap_open,
+        )
+        var names = List[String]()
+        for k in range(len(rows)):
+            rows[k] = String(unsafe_from_utf8=refined[k].copy())
+            names.append(graph.names[shown[k]])
+        if result == 3 or result == 4:
+            graph = Graph.from_msa(names, rows)
+            shown.clear()
+            for k in range(len(rows)):
+                shown.append(k)
     var consensus: String
     var consensus_path = List[Int]()
     var clusters = List[List[Int]]()
@@ -628,6 +672,16 @@ def main() raises:
         elif a == "-R":
             options.rounds = Int(_value(args, i))
             i += 1
+        elif a == "-I":
+            var parts = _value(args, i).split(",")
+            options.sp_passes = Int(parts[0])
+            if len(parts) > 1:
+                options.sp_band = Int(parts[1])
+            if len(parts) > 2:
+                options.sp_gap_open = Int(parts[2])
+            i += 1
+        elif a == "-B":
+            options.polish_backbone = True
         elif a == "-P":
             var both = _pair(_value(args, i))
             options.polish_rounds = both[0]
