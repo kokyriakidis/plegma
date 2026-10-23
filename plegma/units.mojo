@@ -102,7 +102,7 @@ def _segment(seq: List[UInt8], p: Int, tolerant: Bool = False) -> Tuple[Int, Int
     return (best, best_start, best_end + p, best_matches)
 
 
-def _repeat_at(seq: List[UInt8], p: Int) -> Repeat:
+def repeat_at(seq: List[UInt8], p: Int) -> Repeat:
     """The array of period `p`: letters matching one either side of a period on too (`_segment`'s `tolerant`)."""
     var seg = _segment(seq, p, True)
     if seg[0] == 0:
@@ -142,10 +142,10 @@ def tandem_repeat(seq: List[UInt8], max_period: Int = MAX_PERIOD) -> Repeat:
             if score > exact_score:
                 exact = p
                 exact_score = score
-    return _repeat_at(seq, exact)
+    return repeat_at(seq, exact)
 
 
-def _decompose(seq: List[UInt8], a: Int, b: Int, unit: List[UInt8]) -> Tuple[List[Int], List[Int32]]:
+def decompose(seq: List[UInt8], a: Int, b: Int, unit: List[UInt8]) -> Tuple[List[Int], List[Int32]]:
     """Letters [a, b) of `seq` aligned to `unit` repeated, at unit costs, the first copy starting and the last ending
     anywhere in the unit: each copy's first letter (offsets from a, rising) and each letter's place, its unit
     position or -(k + 1) for a letter inserted before position k (k = len(unit): after the last position, letters
@@ -215,13 +215,13 @@ def _decompose(seq: List[UInt8], a: Int, b: Int, unit: List[UInt8]) -> Tuple[Lis
     return (starts^, places^)
 
 
-def _consensus_unit(seq: List[UInt8], a: Int, b: Int, p: Int) -> List[UInt8]:
+def consensus_unit(seq: List[UInt8], a: Int, b: Int, p: Int) -> List[UInt8]:
     """The array's unit: its first `p` letters, then twice the commonest letter facing each unit position."""
     var unit = List[UInt8](capacity=p)
     for k in range(p):
         unit.append(seq[a + k])
     for _ in range(2):
-        var got = _decompose(seq, a, b, unit)
+        var got = decompose(seq, a, b, unit)
         var counts = List[Int](length=p * 256, fill=0)
         for k in range(b - a):
             var place = Int(got[1][k])
@@ -500,11 +500,11 @@ def tandem_layout(seqs: List[List[UInt8]], passes: Int = 3, weights: List[Int] =
         return out^
     var arrays = List[Repeat]()
     for k in range(n):
-        var r = _repeat_at(seqs[k], p)
+        var r = repeat_at(seqs[k], p)
         if r.period == 0 or r.end - r.start < 2 * p or r.identity < 0.7:
             return out^
         arrays.append(r^)
-    var unit = _consensus_unit(seqs[longest], top.start, top.end, p)
+    var unit = consensus_unit(seqs[longest], top.start, top.end, p)
     # Every sequence's copies, each distinct one a symbol; a symbol's letters' places from its first sighting.
     var symbol_of = Dict[String, Int]()
     var texts = List[List[UInt8]]()
@@ -513,7 +513,7 @@ def tandem_layout(seqs: List[List[UInt8]], passes: Int = 3, weights: List[Int] =
     for k in range(n):
         var a = arrays[k].start
         var b = arrays[k].end
-        var got = _decompose(seqs[k], a, b, unit)
+        var got = decompose(seqs[k], a, b, unit)
         var mine = List[Int]()
         for c in range(len(got[0])):
             var lo = got[0][c]
@@ -598,3 +598,78 @@ def tandem_layout(seqs: List[List[UInt8]], passes: Int = 3, weights: List[Int] =
         out.ends.append(arrays[k].end)
     out.rows = rows^
     return out^
+
+
+struct Copies(Copyable, Movable):
+    """A sequence's array cut into copies of a unit: copy c is letters [`starts[c]`, `ends[c]`)."""
+
+    var starts: List[Int]
+    var ends: List[Int]
+
+    def __init__(out self):
+        self.starts = List[Int]()
+        self.ends = List[Int]()
+
+
+def copies(seq: List[UInt8], array: Repeat, unit: List[UInt8]) -> Copies:
+    """The copies of `seq`'s `array` (letters [start, end)) against `unit` (`decompose`): every sequence cut against
+    one unit starts its copies at the same unit position."""
+    var out = Copies()
+    if array.period == 0 or len(unit) == 0 or array.end <= array.start:
+        return out^
+    var got = decompose(seq, array.start, array.end, unit)
+    for c in range(len(got[0])):
+        out.starts.append(array.start + got[0][c])
+        out.ends.append(array.start + got[0][c + 1] if c + 1 < len(got[0]) else array.end)
+    return out^
+
+
+def pair_copies(
+    a: List[UInt8], ca: Copies, b: List[UInt8], cb: Copies, mut aligner: Aligner
+) raises -> List[Tuple[Int, Int]]:
+    """Two arrays aligned copy by copy, exactly: substituting copy i of `a` for copy j of `b` costs their edit
+    distance, gapping a copy its length (the letters' unit cost, copies kept whole). The copies paired, in order."""
+    var n = len(ca.starts)
+    var m = len(cb.starts)
+    var pairs = List[Tuple[Int, Int]]()
+    if n == 0 or m == 0:
+        return pairs^
+    var w = m + 1
+    var cost = List[Int](length=(n + 1) * w, fill=0)
+    var move = List[UInt8](length=(n + 1) * w, fill=0)
+    for j in range(1, w):
+        cost[j] = cost[j - 1] + (cb.ends[j - 1] - cb.starts[j - 1])
+        move[j] = 2
+    for i in range(1, n + 1):
+        var la = ca.ends[i - 1] - ca.starts[i - 1]
+        cost[i * w] = cost[(i - 1) * w] + la
+        move[i * w] = 1
+        for j in range(1, w):
+            var lb = cb.ends[j - 1] - cb.starts[j - 1]
+            var d = aligner.distance(
+                Span(a)[ca.starts[i - 1] : ca.ends[i - 1]], Span(b)[cb.starts[j - 1] : cb.ends[j - 1]]
+            )
+            var best = cost[(i - 1) * w + j - 1] + d
+            var how = UInt8(0)
+            if cost[(i - 1) * w + j] + la < best:
+                best = cost[(i - 1) * w + j] + la
+                how = 1
+            if cost[i * w + j - 1] + lb < best:
+                best = cost[i * w + j - 1] + lb
+                how = 2
+            cost[i * w + j] = best
+            move[i * w + j] = how
+    var i = n
+    var j = m
+    while i > 0 or j > 0:
+        var how = move[i * w + j]
+        if how == 0:
+            pairs.append((i - 1, j - 1))
+            i -= 1
+            j -= 1
+        elif how == 1:
+            i -= 1
+        else:
+            j -= 1
+    pairs.reverse()
+    return pairs^

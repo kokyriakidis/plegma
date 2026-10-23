@@ -30,7 +30,8 @@ is implementation and may change.
 - MSA refinement: `refine` (each distinct sequence realigned exactly to the
   others' columns on their sum of pairs with gap opening, in a band centred on
   the sequences' optimal pairwise alignments; with `group_band`, every split of
-  a UPGMA tree over the rows realigned as two profiles), `sum_of_pairs`,
+  a UPGMA tree over the rows realigned as two profiles; mismatches, gap letters
+  and gap openings priced apart), `objective` (what it lowers), `sum_of_pairs`,
   `gap_opens`.
 - MSA by anchored progressive placement: `progressive` (each distinct sequence,
   longest first, placed exactly into the MSA so far through anchors every
@@ -66,5 +67,5 @@ from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window
 from .polish import polish
 from .progressive import progressive
-from .refine import gap_opens, refine, sum_of_pairs
+from .refine import gap_opens, objective, refine, sum_of_pairs
 from .units import Layout, Repeat, tandem_layout, tandem_repeat

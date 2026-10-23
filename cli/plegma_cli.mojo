@@ -63,6 +63,17 @@ Options:
                 a second start with the arrays aligned copy by copy; each refined (-I, 20 passes by default, with
                 -G's group moves) and the lower sum of pairs kept; the graph is the MSA's
     -U          with -A, no copy-level start
+    -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1]
+                (-I's third number prices a gap opening): vntr-eval's unit cost is 1,1 with no opening, its affine
+                cost 4,2 with 6
+    -V INT[,INT[,INT[,INT]]] with -A, the seeds' confidence [-1,0,0,0]: inside tandem repeats an anchor is kept
+                only if its diagonal lies within the first number of letters of one end of its gap (its length
+                difference left to one side: one indel), -1 off, -2 no seeds (the optimal pairwise alignments alone
+                vote); the second 1 makes those optimal pairwise alignments, which also centre the refinement's
+                bands, unit-cost (vntr-eval's), not two-piece; the third holds the letters that many of the best
+                sources anchor to their columns in placement (1: the MUMs), the rest placed between them [0]; a
+                fourth 1 places the sequences nearest first (each next the one nearest by edit distance to one
+                placed), not longest first
     -B          refinement starts each round's graph from the consensus polished (-P), not the heaviest path
     -P INT[,INT] rounds of consensus polishing, at most [50,20] (global mode): each sequence aligned to the
                 consensus, and every one-letter or whole-repeat-unit edit kept that lowers their summed edit distance
@@ -229,6 +240,12 @@ struct Options(Copyable, Movable):
     var group_set: Bool
     var anchored: Bool
     var units: Bool
+    var one_indel: Int
+    var unit_votes: Bool
+    var mismatch: Int
+    var gap: Int
+    var hard: Int
+    var nearest: Bool
     var min_freq: Float64
     var verbose: Bool
 
@@ -264,6 +281,12 @@ struct Options(Copyable, Movable):
         self.group_set = False
         self.anchored = False
         self.units = True
+        self.one_indel = -1
+        self.unit_votes = False
+        self.mismatch = 1
+        self.gap = 1
+        self.hard = 0
+        self.nearest = False
         self.min_freq = 0.25
         self.verbose = False
 
@@ -450,6 +473,13 @@ def _poa(input: String, options: Options) raises -> String:
             options.sp_gap_open,
             options.group_band if options.group_set else 256,
             options.units,
+            True,
+            options.one_indel,
+            options.unit_votes,
+            options.mismatch,
+            options.gap,
+            options.hard,
+            options.nearest,
         )
         var names = List[String]()
         for r in range(len(seqs)):
@@ -557,6 +587,8 @@ def _poa(input: String, options: Options) raises -> String:
             seeded=options.sp_seeded,
             max_band=options.sp_max_band,
             group_band=options.group_band,
+            mismatch=options.mismatch,
+            gap=options.gap,
         )
         var names = List[String]()
         for k in range(len(rows)):
@@ -742,6 +774,21 @@ def main() raises:
             options.anchored = True
         elif a == "-U":
             options.units = False
+        elif a == "-W":
+            var both = _pair(_value(args, i))
+            options.mismatch = both[0]
+            options.gap = both[1] if both[1] >= 0 else both[0]
+            i += 1
+        elif a == "-V":
+            var parts = _value(args, i).split(",")
+            options.one_indel = Int(parts[0])
+            if len(parts) > 1:
+                options.unit_votes = Int(parts[1]) == 1
+            if len(parts) > 2:
+                options.hard = Int(parts[2])
+            if len(parts) > 3:
+                options.nearest = Int(parts[3]) == 1
+            i += 1
         elif a == "-B":
             options.polish_backbone = True
         elif a == "-P":

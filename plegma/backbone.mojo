@@ -138,6 +138,7 @@ def backbone(
     repeat_k: Int = 0,
     repeat_distance: Int = 0,
     mask_depth: Int = Int.MAX,
+    one_indel: Int = -1,
 ) raises -> List[Anchor]:
     """Non-overlapping anchors, in order on both sequences: level 0 over the whole pair, then inside every gap
     still longer than `budget` letters the next level, or with `stay` the same one until a gap yields nothing.
@@ -146,10 +147,32 @@ def backbone(
     (`RepeatMask` of `repeat_k`-mers within `repeat_distance`) are dropped before chaining, at the first
     `mask_depth` depths of the recursion (every depth by default): with 1, the whole pair's anchors keep out of
     the repeats and so pin the flanks around them, and inside a gap between anchors, a repeat array, a match is
-    unique within the gap's two pieces, as a copy that carries something of its own is."""
+    unique within the gap's two pieces, as a copy that carries something of its own is. With `one_indel` >= 0,
+    past the mask's depths an anchor inside the repeats is kept only if its diagonal lies within that many letters
+    of one of its gap's ends: the gap's length difference (the copies one piece has and the other lacks) all before
+    it or all after it. An optimal alignment of two arrays takes that difference as one indel, and an anchor
+    splitting it pairs copies no optimal alignment pairs (on vntr-eval's regions, three anchored letters in four
+    of those, against one in fifteen of the others)."""
     var out = List[Anchor]()
     var repeats = RepeatMask(partner, repeat_k, repeat_distance)
-    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, lookback, repeats, mask_depth, 0, out)
+    _refine(
+        partner,
+        query,
+        0,
+        0,
+        levels,
+        0,
+        costs,
+        budget,
+        stay,
+        max_anchors,
+        lookback,
+        repeats,
+        mask_depth,
+        one_indel,
+        0,
+        out,
+    )
     return out^
 
 
@@ -167,6 +190,7 @@ def _refine(
     lookback: Int,
     repeats: RepeatMask,
     mask_depth: Int,
+    one_indel: Int,
     depth: Int,
     mut out: List[Anchor],
 ) raises:
@@ -180,6 +204,18 @@ def _refine(
             if not repeats.covers(ref_offset + a.ref_pos, ref_offset + a.ref_end()):
                 outside.append(a)
         found = outside^
+    elif repeats.k > 0 and one_indel >= 0:
+        var kept = List[Anchor]()
+        for a in found:
+            var start = a.query_pos - a.ref_pos
+            var end = (len(query) - a.query_end()) - (len(partner) - a.ref_end())
+            if (
+                not repeats.covers(ref_offset + a.ref_pos, ref_offset + a.ref_end())
+                or abs(start) <= one_indel
+                or abs(end) <= one_indel
+            ):
+                kept.append(a)
+        found = kept^
     var picked = List[Anchor]()
     if len(found) <= max_anchors:
         picked = without_overlaps(chain(found, len(partner), len(query), costs, lookback).anchors)
@@ -199,6 +235,7 @@ def _refine(
             lookback,
             repeats,
             mask_depth,
+            one_indel,
             depth,
             out,
         )
@@ -220,6 +257,7 @@ def _refine(
             lookback,
             repeats,
             mask_depth,
+            one_indel,
             depth + 1,
             out,
         )
@@ -240,6 +278,7 @@ def _refine(
         lookback,
         repeats,
         mask_depth,
+        one_indel,
         depth + 1,
         out,
     )

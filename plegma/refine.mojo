@@ -72,10 +72,17 @@ def gap_opens(rows: List[List[UInt8]], weights: List[Int] = List[Int]()) -> Int:
     return total
 
 
-def row_cost(rows: List[List[UInt8]], s: Int, gap_open: Int, weights: List[Int] = List[Int]()) -> Int:
+def row_cost(
+    rows: List[List[UInt8]],
+    s: Int,
+    gap_open: Int,
+    weights: List[Int] = List[Int](),
+    mismatch: Int = 1,
+    gap: Int = 1,
+) -> Int:
     """Row `s`'s exact share of the objective: over every other row, the columns where the two differ (both gaps
-    cost nothing), plus `gap_open` for every gap the pair opens, times the other row's weight (`weights`, 1 each
-    where empty)."""
+    cost nothing), `mismatch` where both hold letters and `gap` where one has a gap, plus `gap_open` for every gap
+    the pair opens, times the other row's weight (`weights`, 1 each where empty)."""
     var total = 0
     for r in range(len(rows)):
         if r == s:
@@ -90,7 +97,7 @@ def row_cost(rows: List[List[UInt8]], s: Int, gap_open: Int, weights: List[Int] 
             if gx and gy:
                 continue
             if x != y:
-                pair += 1
+                pair += gap if gx or gy else mismatch
             var now = 1 if gx else (2 if gy else 0)
             if now != 0 and now != state:
                 pair += gap_open
@@ -340,6 +347,8 @@ def _realign(
     forced: List[Int] = List[Int](),
     always: Bool = False,
     weights: List[Int] = List[Int](),
+    mismatch: Int32 = 1,
+    gap: Int32 = 1,
 ) -> Tuple[Int, Int]:
     """Row `s` realigned to the others' profile within `band` letters of its place (or of `centre`, when given),
     widened while the best path touches the band's edge, up to `max_band`; the rows rewritten (all-gap columns
@@ -423,7 +432,9 @@ def _realign(
                         if j > 0 and (not has_forced or forced[j - 1] < 0 or forced[j - 1] == x):
                             var km = j - 1 - lo_prev
                             if km >= 0 and km < width:
-                                var unit = others - counts[x * SYMBOLS + _symbol(letters[j - 1])]
+                                var unit = mismatch * (
+                                    held[x] - counts[x * SYMBOLS + _symbol(letters[j - 1])]
+                                ) + gap * (others - held[x])
                                 var from_m = cost[prev + km]
                                 var from_g = cost[cells + prev + km]
                                 var from_o = cost[2 * cells + prev + km]
@@ -454,7 +465,7 @@ def _realign(
                                 g_best = from_o + g * held[x]
                                 g_how = OWN
                             if g_best < BIG:
-                                g_best += held[x]
+                                g_best += gap * held[x]
                     # O: letter j - 1 in a column of its own after column x.
                     if j > 0 and k > 0 and (not has_forced or forced[j - 1] < 0):
                         var from_m = cost[base + k - 1]
@@ -470,7 +481,7 @@ def _realign(
                             o_best = from_o
                             o_how = OWN
                         if o_best < BIG:
-                            o_best += others
+                            o_best += gap * others
                 cost[base + k] = m_best
                 moves[base + k] = m_how
                 cost[cells + base + k] = g_best
@@ -487,7 +498,7 @@ def _realign(
                     final_state = t
         if final_cost >= BIG:
             if b >= max_band or b >= max(n, columns):
-                var stays = row_cost(rows, s, Int(gap_open), weights)
+                var stays = row_cost(rows, s, Int(gap_open), weights, Int(mismatch), Int(gap))
                 return (stays, stays)
             b = min(2 * b, max_band)
             continue
@@ -544,18 +555,50 @@ def _realign(
             for t in kept:
                 row.append(fresh[r][t])
             fresh[r] = row^
-    var before_cost = row_cost(rows, s, Int(gap_open), weights)
-    var after_cost = row_cost(fresh, s, Int(gap_open), weights)
+    var before_cost = row_cost(rows, s, Int(gap_open), weights, Int(mismatch), Int(gap))
+    var after_cost = row_cost(fresh, s, Int(gap_open), weights, Int(mismatch), Int(gap))
     if after_cost > before_cost and not always:
         return (before_cost, before_cost)
     rows = fresh^
     return (before_cost, after_cost)
 
 
-def _objective(rows: List[List[UInt8]], gap_open: Int, weights: List[Int] = List[Int]()) -> Int:
+def _priced(rows: List[List[UInt8]], weights: List[Int], mismatch: Int, gap: Int) -> Int:
+    """Over every pair of rows (each counting the product of their weights), `mismatch` per column where both hold
+    different letters and `gap` per column where just one has a gap."""
+    if len(rows) == 0:
+        return 0
+    var total = 0
+    var counts = List[Int](length=SYMBOLS, fill=0)
+    for c in range(len(rows[0])):
+        for x in range(SYMBOLS):
+            counts[x] = 0
+        for r in range(len(rows)):
+            counts[_symbol(rows[r][c])] += _w(weights, r)
+        var letters = 0
+        var squares = 0
+        for x in range(SYMBOLS - 1):
+            letters += counts[x]
+            squares += counts[x] * counts[x]
+        total += mismatch * ((letters * letters - squares) // 2) + gap * letters * counts[SYMBOLS - 1]
+    return total
+
+
+def objective(
+    rows: List[List[UInt8]], gap_open: Int, weights: List[Int] = List[Int](), mismatch: Int = 1, gap: Int = 1
+) -> Int:
+    """What `refine` lowers: over every pair of rows (weighing the product of their `weights`), `mismatch` per column
+    of two different letters, `gap` per column of a letter and a gap, and `gap_open` per gap the pair opens."""
+    return _objective(rows, gap_open, weights, mismatch, gap)
+
+
+def _objective(
+    rows: List[List[UInt8]], gap_open: Int, weights: List[Int] = List[Int](), mismatch: Int = 1, gap: Int = 1
+) -> Int:
+    var base = sum_of_pairs(rows, weights) if mismatch == 1 and gap == 1 else _priced(rows, weights, mismatch, gap)
     if gap_open > 0:
-        return sum_of_pairs(rows, weights) + gap_open * gap_opens(rows, weights)
-    return sum_of_pairs(rows, weights)
+        return base + gap_open * gap_opens(rows, weights)
+    return base
 
 
 def _tree_groups(rows: List[List[UInt8]]) -> List[List[Bool]]:
@@ -642,6 +685,8 @@ def _merge_groups(
     mut cost: List[Int32],
     mut moves: List[UInt8],
     weights: List[Int] = List[Int](),
+    mismatch: Int32 = 1,
+    gap: Int32 = 1,
 ) -> Tuple[Int, Int]:
     """The rows in `in_a` (A) and the others (B) realigned as two profiles, each keeping its own columns' order and
     contents, within `band` columns of their present merge (widened up to `max_band` while the path touches the
@@ -659,7 +704,7 @@ def _merge_groups(
             n_a += _w(weights, r)
         else:
             n_b += _w(weights, r)
-    var before_cost = _objective(rows, Int(gap_open), weights)
+    var before_cost = _objective(rows, Int(gap_open), weights, Int(mismatch), Int(gap))
     if n_a == 0 or n_b == 0:
         return (before_cost, before_cost)
     # Each side's columns (those where one of its rows holds a letter), their symbol counts and letters held, and
@@ -706,7 +751,7 @@ def _merge_groups(
     var nb = Int32(n_b)
     var g = gap_open
     # The costs must fit: every pair across, every column, and its openings.
-    if n_a * n_b * (1 + 2 * Int(g)) * (la + lb + 1) >= Int(BIG):
+    if n_a * n_b * (Int(max(mismatch, gap)) + 2 * Int(g)) * (la + lb + 1) >= Int(BIG):
         return (before_cost, before_cost)
     var b = band
     var path_a = List[Int]()
@@ -740,10 +785,13 @@ def _merge_groups(
                         if j > 0:
                             var km = j - 1 - lo_prev
                             if km >= 0 and km < width:
+                                # Pairs across: letters differing (mismatch) and a letter against a gap.
                                 var same = Int32(0)
-                                for x in range(SYMBOLS):
+                                for x in range(SYMBOLS - 1):
                                     same += counts_a[(i - 1) * SYMBOLS + x] * counts_b[(j - 1) * SYMBOLS + x]
-                                var pair = na * nb - same
+                                var ha = held_a[i - 1]
+                                var hb = held_b[j - 1]
+                                var pair = mismatch * (ha * hb - same) + gap * (ha * (nb - hb) + (na - ha) * hb)
                                 var from_m = cost[prev + km]
                                 var from_g = cost[cells + prev + km]
                                 var from_o = cost[2 * cells + prev + km]
@@ -774,7 +822,7 @@ def _merge_groups(
                                 g_best = from_o + opening
                                 g_how = OWN
                             if g_best < BIG:
-                                g_best += held_a[i - 1] * nb
+                                g_best += gap * held_a[i - 1] * nb
                     if j > 0 and k > 0:
                         var opening = g * held_b[j - 1] * a_before
                         var from_m = cost[base + k - 1]
@@ -790,7 +838,7 @@ def _merge_groups(
                             o_best = from_o
                             o_how = OWN
                         if o_best < BIG:
-                            o_best += held_b[j - 1] * na
+                            o_best += gap * held_b[j - 1] * na
                 cost[base + k] = m_best
                 moves[base + k] = m_how
                 cost[cells + base + k] = g_best
@@ -846,7 +894,7 @@ def _merge_groups(
             var c = path_a[t] if in_a[r] else path_b[t]
             row.append(rows[r][c] if c >= 0 else GAP)
         fresh.append(row^)
-    var after_cost = _objective(fresh, Int(gap_open), weights)
+    var after_cost = _objective(fresh, Int(gap_open), weights, Int(mismatch), Int(gap))
     if after_cost >= before_cost:
         return (before_cost, before_cost)
     rows = fresh^
@@ -865,6 +913,9 @@ def refine(
     group_band: Int = 0,
     period: Int = 0,
     weights: List[Int] = List[Int](),
+    min_gain: Int = 1000,
+    mismatch: Int = 1,
+    gap: Int = 1,
 ) raises -> List[List[UInt8]]:
     """`rows` (one length, `-` gaps) refined on their sum of pairs for at most `passes` passes over the distinct
     sequences, each within `band` letters of its place, widened up to `max_band` while its best path touches the
@@ -875,7 +926,8 @@ def refine(
     repeat's `period`, the moves know its copies: a row's band reaches a copy and more either side, the group moves'
     two copies, and the group moves also split the rows by copy number (`_length_groups`). Identical
     sequences share their row, which weighs as many as spell it (each row counting its `weights`, 1 where empty): the
-    objective is over every pair of the input rows. The rows keep their order and spell what they did."""
+    objective is over every pair of the input rows. A pair's differing columns cost `mismatch` where both hold letters
+    and `gap` where one has a gap (1 and 1: the unit costs). The rows keep their order and spell what they did."""
     var n = len(rows)
     if n < 2 or passes <= 0:
         return rows.copy()
@@ -931,13 +983,27 @@ def refine(
     # A tandem repeat's copies: bands reaching a copy (a row) or two (a group) either side.
     var row_band = max(band, period + 2 * EDGE + 8) if period > 0 else band
     var groups_band = max(group_band, 2 * period + 16) if period > 0 else group_band
-    var last = _objective(work, gap_open, weight)
+    var last = _objective(work, gap_open, weight, mismatch, gap)
     for _ in range(passes):
         for s in range(len(work)):
             centre.clear()
             if anchored:
                 _anchored_centre(work, s, partners, centre)
-            _ = _realign(work, s, row_band, max_band, centre, Int32(gap_open), cost, moves, List[Int](), False, weight)
+            _ = _realign(
+                work,
+                s,
+                row_band,
+                max_band,
+                centre,
+                Int32(gap_open),
+                cost,
+                moves,
+                List[Int](),
+                False,
+                weight,
+                Int32(mismatch),
+                Int32(gap),
+            )
         if group_band > 0 or period > 0:
             var groups = _tree_groups(work)
             if period > 0:
@@ -952,10 +1018,13 @@ def refine(
                     cost,
                     moves,
                     weight,
+                    Int32(mismatch),
+                    Int32(gap),
                 )
-        var now = _objective(work, gap_open, weight)
-        # A pass gaining under 0.1% ends the refinement: the later passes of a long run gain little.
-        if now >= last or (last - now) * 1000 < last:
+        var now = _objective(work, gap_open, weight, mismatch, gap)
+        # A pass gaining under 1/min_gain of the objective (0.1%) ends the refinement: the later passes of a long run
+        # gain little. min_gain 0: only a pass gaining nothing does.
+        if now >= last or (last - now) * min_gain < last:
             break
         last = now
     var out = List[List[UInt8]]()
@@ -973,6 +1042,8 @@ def place(
     max_band: Int = 4096,
     gap_open: Int = 1,
     weights: List[Int] = List[Int](),
+    mismatch: Int = 1,
+    gap: Int = 1,
 ) -> Tuple[Int, Int]:
     """Row `s` of `rows` realigned once, exactly, to the others' columns: the band centred on `centre` (sequence
     letters before each column, len(rows[0]) + 1 of them; empty for its present place), letter j held to column
@@ -980,4 +1051,18 @@ def place(
     is kept whatever it costs; returns `row_cost` before and after."""
     var cost = List[Int32]()
     var moves = List[UInt8]()
-    return _realign(rows, s, band, max_band, centre, Int32(gap_open), cost, moves, forced, True, weights)
+    return _realign(
+        rows,
+        s,
+        band,
+        max_band,
+        centre,
+        Int32(gap_open),
+        cost,
+        moves,
+        forced,
+        True,
+        weights,
+        Int32(mismatch),
+        Int32(gap),
+    )

@@ -2,7 +2,7 @@
 
 usage: placement <msa.fa> <label> <out.tsv> <strategy> [<strategy> ...]
        placement --progressive <sequences.fa> <out.msa.fa> <strategy> [refine passes [group band[,max band]]]
-       placement --refine <msa.fa> <out.msa.fa> <passes> [gap [anchored [band [group band]]]]
+       placement --refine <msa.fa> <out.msa.fa> <passes> [gap [anchored [band [group band [period [min gain]]]]]]
        placement --tandem <sequences.fa>
 
 Progressive: the MSA grown a sequence at a time, longest first, each new sequence anchored by the strategy's seeds
@@ -474,6 +474,8 @@ def _refine_msa(args: List[String]) raises:
     var anchored = Int(args[6]) != 0 if len(args) > 6 else True
     var band = Int(args[7]) if len(args) > 7 else 64
     var group_band = Int(args[8]) if len(args) > 8 else 0
+    var period = Int(args[9]) if len(args) > 9 else 0
+    var min_gain = Int(args[10]) if len(args) > 10 else 1000
     var rows = List[List[UInt8]]()
     var seen = List[List[UInt8]]()
     var of = List[Int]()
@@ -513,7 +515,20 @@ def _refine_msa(args: List[String]) raises:
     for s in range(len(rows)):
         before += row_cost(rows, s, gap)
     if passes > 0:
-        rows = refine(rows, passes, band, 4096, anchored, Costs.two_piece(4, 4, 2, 24, 1), gap, False, group_band)
+        rows = refine(
+            rows,
+            passes,
+            band,
+            4096,
+            anchored,
+            Costs.two_piece(4, 4, 2, 24, 1),
+            gap,
+            False,
+            group_band,
+            period,
+            List[Int](),
+            min_gain,
+        )
     var after = 0
     for s in range(len(rows)):
         after += row_cost(rows, s, gap)

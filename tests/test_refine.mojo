@@ -1,7 +1,7 @@
 from std.random import random_ui64, seed
 from std.testing import assert_equal, assert_true, TestSuite
 
-from plegma.refine import gap_opens, refine, sum_of_pairs
+from plegma.refine import gap_opens, objective, refine, sum_of_pairs
 
 
 def _random(length: Int) -> List[UInt8]:
@@ -163,6 +163,28 @@ def test_copy_aware_moves_keep_the_sequences_and_never_raise_the_objective() rai
         for k in range(len(seqs)):
             assert_true(_ungapped(refined[k]) == seqs[k], String(trial))
             assert_equal(len(refined[k]), len(refined[0]))
+
+
+def test_priced_refinement_never_raises_its_objective() raises:
+    # Mismatches, gap letters and gap openings priced apart: the refinement lowers that objective, and at 1, 1 the
+    # objective is the unit sum of pairs and the gaps opened.
+    seed(61)
+    for trial in range(12):
+        var truth = _random(Int(random_ui64(30, 200)))
+        var seqs = List[List[UInt8]]()
+        for _ in range(Int(random_ui64(3, 8))):
+            seqs.append(_mutated(truth, 0.1))
+        var rows = _flush_left(seqs)
+        assert_equal(objective(rows, 1), sum_of_pairs(rows) + gap_opens(rows))
+        for prices in [(2, 2, 1), (4, 2, 6), (10, 7, 9)]:
+            var refined = refine(rows, 3, 16, gap_open=prices[2], mismatch=prices[0], gap=prices[1], group_band=16)
+            assert_true(
+                objective(refined, prices[2], List[Int](), prices[0], prices[1])
+                <= objective(rows, prices[2], List[Int](), prices[0], prices[1]),
+                String(trial),
+            )
+            for k in range(len(seqs)):
+                assert_true(_ungapped(refined[k]) == seqs[k], String(trial))
 
 
 def main() raises:
