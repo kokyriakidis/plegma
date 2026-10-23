@@ -12,6 +12,9 @@ three passes took it to 1.13.
 
 from karan import Aligner, Costs, Mode, Ties
 
+from .align import anchored_alignment
+from .backbone import Level, MUMS
+from .chain import ChainCosts
 from .graph import DELETION, INSERTION, cigar_runs
 
 
@@ -80,14 +83,51 @@ def sum_of_pairs(rows: List[List[UInt8]]) -> Int:
     return total
 
 
+comptime PARTNERS = 24
+"""Past this many other distinct sequences, each sequence is aligned to its nearest this many alone (by unit edit
+distance), as are those it is nearest to: the anchors' votes need a few dozen, and all pairs cost the square."""
+
+
+def _pair_runs(
+    mut aligner: Aligner, partner: ImmSpan[UInt8, _], query: ImmSpan[UInt8, _], costs: Costs, seeded: Bool
+) raises -> Tuple[List[UInt8], List[Int]]:
+    """The runs of `query`'s alignment to `partner`: optimal under `costs`, or with `seeded` through anchors."""
+    if seeded:
+        var levels = List[Level]()
+        for k in [51, 31, 21]:
+            levels.append(Level(MUMS, k))
+        var through = anchored_alignment(
+            aligner,
+            partner,
+            query,
+            levels,
+            ChainCosts(substitution=0.1),
+            costs,
+            0,
+            True,
+            repeat_k=12,
+            repeat_distance=500,
+            mask_depth=1,
+        )
+        return (through.ops.copy(), through.counts.copy())
+    var found = aligner.align(partner, query, costs, Mode.GLOBAL, ties=Ties.LEFT)
+    var runs = cigar_runs(found.cigar)
+    return (runs.ops.copy(), runs.counts.copy())
+
+
 struct Partners(Movable):
-    """Every distinct sequence's optimal alignment to every other (karan, unit costs, indels placed left), as the
-    letter of the other each of its letters faces: `facing[s][r][j]` (-1 where letter j is inserted). They do not
-    depend on the MSA, so they are made once."""
+    """Each distinct sequence's alignment to its partners (every other, or past PARTNERS others its nearest), as
+    the letter of the partner each of its letters faces: `facing[s][r][j]` (-1 where letter j is inserted; the list
+    empty where r is no partner of s). They do not depend on the MSA, so they are made once."""
 
     var facing: List[List[List[Int32]]]
 
-    def __init__(out self, spelled: List[List[UInt8]], costs: Costs = Costs.edit()) raises:
+    def __init__(out self, spelled: List[List[UInt8]], costs: Costs = Costs.edit(), seeded: Bool = False) raises:
+        """Optimal alignments under `costs` (karan, indels placed left); with `seeded`, through anchors instead
+        (`anchored_alignment`): MUMs of 51, 31 and 21 letters outside tandem repeats pin the flanks, then inside each
+        gap between them, a repeat array, MUMs unique within the gap's two pieces, which sit on copies that carry
+        something of their own and so pair homologous copies; only the stretches between anchors are aligned for
+        least cost."""
         var n = len(spelled)
         self.facing = List[List[List[Int32]]]()
         for _ in range(n):
@@ -96,27 +136,47 @@ struct Partners(Movable):
                 row.append(List[Int32]())
             self.facing.append(row^)
         var aligner = Aligner()
+        # Which pairs to align: all, or past PARTNERS each sequence's nearest.
+        var wanted = List[Bool](length=n * n, fill=n - 1 <= PARTNERS)
+        if n - 1 > PARTNERS:
+            var distance = List[Int](length=n * n, fill=0)
+            for a in range(n):
+                for b in range(a + 1, n):
+                    var d = aligner.distance(Span(spelled[a]), Span(spelled[b]))
+                    distance[a * n + b] = d
+                    distance[b * n + a] = d
+            var keys = List[UInt64]()
+            for a in range(n):
+                keys.clear()
+                for b in range(n):
+                    if b != a:
+                        keys.append((UInt64(distance[a * n + b]) << 32) | UInt64(b))
+                sort(keys)
+                for t in range(PARTNERS):
+                    var b = Int(keys[t] & 0xFFFFFFFF)
+                    wanted[a * n + b] = True
+                    wanted[b * n + a] = True
         for a in range(n):
             for b in range(a + 1, n):
+                if not wanted[a * n + b] or len(spelled[a]) == 0 or len(spelled[b]) == 0:
+                    continue
                 var ab = List[Int32](length=len(spelled[a]), fill=-1)
                 var ba = List[Int32](length=len(spelled[b]), fill=-1)
-                if len(spelled[a]) > 0 and len(spelled[b]) > 0:
-                    var found = aligner.align(Span(spelled[b]), Span(spelled[a]), costs, Mode.GLOBAL, ties=Ties.LEFT)
-                    var runs = cigar_runs(found.cigar)
-                    var i = 0
-                    var j = 0
-                    for r in range(len(runs.ops)):
-                        var op = runs.ops[r]
-                        for _ in range(runs.counts[r]):
-                            if op == DELETION:
-                                i += 1
-                            elif op == INSERTION:
-                                j += 1
-                            else:
-                                ab[j] = Int32(i)
-                                ba[i] = Int32(j)
-                                i += 1
-                                j += 1
+                var runs = _pair_runs(aligner, Span(spelled[b]), Span(spelled[a]), costs, seeded)
+                var i = 0
+                var j = 0
+                for r in range(len(runs[0])):
+                    var op = runs[0][r]
+                    for _ in range(runs[1][r]):
+                        if op == DELETION:
+                            i += 1
+                        elif op == INSERTION:
+                            j += 1
+                        else:
+                            ab[j] = Int32(i)
+                            ba[i] = Int32(j)
+                            i += 1
+                            j += 1
                 self.facing[a][b] = ab^
                 self.facing[b][a] = ba^
 
@@ -143,15 +203,19 @@ def _anchored_centre(rows: List[List[UInt8]], s: Int, partners: Partners, mut ce
     var anchor_j = List[Int]()
     var anchor_c = List[Int]()
     var votes = List[Int32]()
+    var voters = 0
+    for r in range(n_rows):
+        if r != s and len(partners.facing[s][r]) > 0:
+            voters += 1
     for j in range(n):
         votes.clear()
         for r in range(n_rows):
-            if r == s:
+            if r == s or len(partners.facing[s][r]) == 0:
                 continue
             var k = Int(partners.facing[s][r][j])
             if k >= 0:
                 votes.append(column_of[r][k])
-        if len(votes) * 2 <= n_rows - 1:
+        if len(votes) * 2 <= voters:
             continue
         sort(votes)
         var best = -1
@@ -162,7 +226,7 @@ def _anchored_centre(rows: List[List[UInt8]], s: Int, partners: Partners, mut ce
             if run > best_count:
                 best_count = run
                 best = Int(votes[t])
-        if best_count * 2 > n_rows - 1:
+        if best_count * 2 > voters:
             anchor_j.append(j)
             anchor_c.append(best)
     # The longest chain rising in column (letters already rise): patience sorting.
@@ -444,6 +508,7 @@ def refine(
     anchored: Bool = True,
     anchor_costs: Costs = Costs.edit(),
     gap_open: Int = 0,
+    seeded: Bool = False,
 ) raises -> List[List[UInt8]]:
     """`rows` (one length, `-` gaps) refined on their sum of pairs for at most `passes` passes over the distinct
     sequences, each within `band` letters of its place, widened up to `max_band` while its best path touches the
@@ -497,7 +562,7 @@ def refine(
         spelled_distinct.append(spelled[d].copy())
     if not anchored:
         spelled_distinct.clear()
-    var partners = Partners(spelled_distinct, anchor_costs)
+    var partners = Partners(spelled_distinct, anchor_costs, seeded)
     var last = sum_of_pairs(work) + gap_open * gap_opens(work) if gap_open > 0 else sum_of_pairs(work)
     for _ in range(passes):
         for s in range(len(work)):
@@ -506,7 +571,8 @@ def refine(
                 _anchored_centre(work, s, partners, centre)
             _realign(work, s, band, max_band, centre, Int32(gap_open), cost, moves)
         var now = sum_of_pairs(work) + gap_open * gap_opens(work) if gap_open > 0 else sum_of_pairs(work)
-        if now >= last:
+        # A pass gaining under 0.1% ends the refinement: the later passes of a long run gain little.
+        if now >= last or (last - now) * 1000 < last:
             break
         last = now
     var out = List[List[UInt8]]()

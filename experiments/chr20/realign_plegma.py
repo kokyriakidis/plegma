@@ -6,8 +6,8 @@ usage: python3 -I experiments/chr20/realign_plegma.py <plegma> <karan> <packages
 
 Every package whose status is `ok` and whose alleles are not all one (pgrealign's `--select any`) is aligned:
 - its distinct alleles by `plegma <flags> -r 1` (`-L -I 20,64,1` by default: longest first, then the sum-of-pairs
-  refinement with gap opening); past `--max-refined` distinct alleles (64), whose all-pairs anchors would take too
-  long, by `-L` alone;
+  refinement with gap opening, whose anchors come from each allele's nearest 24 partners past that many); past
+  `--max-refined` distinct alleles (100,000 by default, so none), by `-L` alone;
 - each fragment, a partial walk at the region's edge or inside it, into the row of an allele holding it exactly where
   its side says (a prefix for `left`, a suffix for `right`, anywhere for `internal`), the allele's letters outside it
   gapped; else aligned (karan, unit costs) to the heaviest allele as a prefix, a suffix or an infix of it and threaded
@@ -29,7 +29,7 @@ from multiprocessing import Pool
 PLEGMA = KARAN = None
 FLAGS = ["-L", "-I", "20,64,1"]
 TIMEOUT = 900
-MAX_REFINED = 64
+MAX_REFINED = 100000
 
 
 def plegma_rows(seqs, timeout):
@@ -209,7 +209,7 @@ def main():
     jobs = int(option("--jobs", "4"))
     timeout = int(option("--timeout", "900"))
     flags = option("--flags", "-L -I 20,64,1").split()
-    max_refined = int(option("--max-refined", "64"))
+    max_refined = int(option("--max-refined", "100000"))
     plegma, karan, packages, out = args
     counts = {}
     with Pool(jobs, initializer=init, initargs=(plegma, karan, flags, timeout, max_refined)) as pool, \

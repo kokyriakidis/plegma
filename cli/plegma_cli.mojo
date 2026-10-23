@@ -50,8 +50,9 @@ Options:
                 sequence to it again; the consensus is then the sequences' own (the backbone carries no weight)
     -I INT[,INT[,INT]] passes of sum-of-pairs refinement of the MSA [0]: each distinct sequence realigned in turn to
                 the others' columns, exactly, in a band of the second number of letters [64] centred where the
-                sequences' optimal pairwise alignments place it, every gap a pair opens costing the third [1]
-                (MSA and GFA outputs)
+                sequences' optimal pairwise alignments place it, every gap a pair opens costing the third [1];
+                the fourth 1 seeds those pairwise alignments (flanks pinned by MUMs, then MUMs inside each array)
+                [0]; the fifth caps the band's widening [4096] (MSA and GFA outputs)
     -B          refinement starts each round's graph from the consensus polished (-P), not the heaviest path
     -P INT[,INT] rounds of consensus polishing, at most [50,20] (global mode): each sequence aligned to the
                 consensus, and every one-letter or whole-repeat-unit edit kept that lowers their summed edit distance
@@ -211,6 +212,8 @@ struct Options(Copyable, Movable):
     var sp_passes: Int
     var sp_band: Int
     var sp_gap_open: Int
+    var sp_seeded: Bool
+    var sp_max_band: Int
     var min_freq: Float64
     var verbose: Bool
 
@@ -239,6 +242,8 @@ struct Options(Copyable, Movable):
         self.sp_passes = 0
         self.sp_band = 64
         self.sp_gap_open = 1
+        self.sp_seeded = False
+        self.sp_max_band = 4096
         self.min_freq = 0.25
         self.verbose = False
 
@@ -508,6 +513,8 @@ def _poa(input: String, options: Options) raises -> String:
             options.sp_band,
             anchor_costs=Costs.two_piece(4, 4, 2, 24, 1),
             gap_open=options.sp_gap_open,
+            seeded=options.sp_seeded,
+            max_band=options.sp_max_band,
         )
         var names = List[String]()
         for k in range(len(rows)):
@@ -679,6 +686,10 @@ def main() raises:
                 options.sp_band = Int(parts[1])
             if len(parts) > 2:
                 options.sp_gap_open = Int(parts[2])
+            if len(parts) > 3:
+                options.sp_seeded = Int(parts[3]) != 0
+            if len(parts) > 4:
+                options.sp_max_band = Int(parts[4])
             i += 1
         elif a == "-B":
             options.polish_backbone = True

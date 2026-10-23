@@ -85,5 +85,19 @@ def test_refinement_mends_a_shifted_row() raises:
     assert_equal(sum_of_pairs(refined), 2)
 
 
+def test_refinement_past_the_partner_cap() raises:
+    # Thirty distinct sequences: each one's anchors come from its nearest 24 alone.
+    seed(19)
+    var truth = _random(200)
+    var seqs = List[List[UInt8]]()
+    for _ in range(30):
+        seqs.append(_mutated(truth, 0.08))
+    var rows = _flush_left(seqs)
+    var refined = refine(rows, 5, 32, gap_open=1)
+    assert_true(sum_of_pairs(refined) < sum_of_pairs(rows))
+    for k in range(len(seqs)):
+        assert_true(_ungapped(refined[k]) == seqs[k])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

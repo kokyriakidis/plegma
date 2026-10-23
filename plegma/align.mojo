@@ -44,11 +44,24 @@ def anchored_alignment(
     costs: Costs = Costs.edit(),
     budget: Int = 0,
     stay: Bool = False,
+    repeat_k: Int = 0,
+    repeat_distance: Int = 0,
+    mask_depth: Int = Int.MAX,
 ) raises -> Anchored:
-    """`query` aligned to `partner` end to end through the backbone `levels` find, every window filled with an
-    optimal alignment under `costs`, indels placed left."""
+    """`query` aligned to `partner` end to end through the backbone `levels` find (its repeat mask as `backbone`
+    takes it), every window filled with an optimal alignment under `costs`, indels placed left."""
     var out = Anchored()
-    out.anchors = backbone(partner, query, levels, chain_costs, budget, stay)
+    out.anchors = backbone(
+        partner,
+        query,
+        levels,
+        chain_costs,
+        budget,
+        stay,
+        repeat_k=repeat_k,
+        repeat_distance=repeat_distance,
+        mask_depth=mask_depth,
+    )
     var gaps = windows(out.anchors, len(partner), len(query))
     for w in range(len(gaps)):
         var window = gaps[w]

@@ -11,6 +11,8 @@ per pair (`simulate_vntr.py`). A strategy is `levels[;option ...]`:
 - `stay`: seed every gap again at the same level until it yields nothing, then the next level.
 - `s=F`: what the chain charges an unanchored letter (0.1); `T=N`: letters each anchor gives back to the DP at
   both ends (10); `n=N`: gaps of at most N letters are not seeded again (0); `H=N`: chain look-back (200).
+- `D=n`: the `M=` mask only at the first n depths of the recursion (with 1: the flanks pinned by masked anchors,
+  then inside each gap matches unique within the gap's pieces).
 - `R=k:d`: after chaining, drop an anchor any of whose k-mers occurs again in a within d letters of it.
 - `M=k:d`: the same test on every level's seeds before they are chained (the backbone's repeat mask).
 - `V`: keep an anchor only when forcing it costs nothing: the alignment from the last kept anchor to the
@@ -54,6 +56,7 @@ struct Strategy(Copyable, Movable):
     var repeat_distance: Int
     var mask_k: Int
     var mask_distance: Int
+    var mask_depth: Int
 
     def __init__(out self, text: String) raises:
         self.text = text
@@ -68,6 +71,7 @@ struct Strategy(Copyable, Movable):
         self.repeat_distance = 0
         self.mask_k = 0
         self.mask_distance = 0
+        self.mask_depth = Int.MAX
         var parts = text.split(";")
         for k in range(1, len(parts)):
             var part = String(parts[k])
@@ -91,6 +95,8 @@ struct Strategy(Copyable, Movable):
                 var halves = both.split(":")
                 self.repeat_k = Int(String(halves[0]))
                 self.repeat_distance = Int(String(halves[1]))
+            elif part.startswith("D="):
+                self.mask_depth = Int(String(part[byte=2:]))
             elif part.startswith("H="):
                 self.lookback = Int(String(part[byte=2:]))
             else:
@@ -270,6 +276,7 @@ def main() raises:
                     lookback=strategy.lookback,
                     repeat_k=strategy.mask_k,
                     repeat_distance=strategy.mask_distance,
+                    mask_depth=strategy.mask_depth,
                 ) if len(strategy.levels)
                 > 0 else List[Anchor]()
             )

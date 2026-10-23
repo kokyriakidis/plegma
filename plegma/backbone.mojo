@@ -137,15 +137,19 @@ def backbone(
     lookback: Int = 0,
     repeat_k: Int = 0,
     repeat_distance: Int = 0,
+    mask_depth: Int = Int.MAX,
 ) raises -> List[Anchor]:
     """Non-overlapping anchors, in order on both sequences: level 0 over the whole pair, then inside every gap
     still longer than `budget` letters the next level, or with `stay` the same one until a gap yields nothing.
     A gap with more than `max_anchors` anchors is left to the next level; `lookback` caps how far back each
-    anchor's chain search goes (0: no cap). With `repeat_k`, every level drops, before chaining, the anchors
-    inside tandem repeats of the partner (`RepeatMask` of `repeat_k`-mers within `repeat_distance`)."""
+    anchor's chain search goes (0: no cap). With `repeat_k`, the anchors inside tandem repeats of the partner
+    (`RepeatMask` of `repeat_k`-mers within `repeat_distance`) are dropped before chaining, at the first
+    `mask_depth` depths of the recursion (every depth by default): with 1, the whole pair's anchors keep out of
+    the repeats and so pin the flanks around them, and inside a gap between anchors, a repeat array, a match is
+    unique within the gap's two pieces, as a copy that carries something of its own is."""
     var out = List[Anchor]()
     var repeats = RepeatMask(partner, repeat_k, repeat_distance)
-    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, lookback, repeats, out)
+    _refine(partner, query, 0, 0, levels, 0, costs, budget, stay, max_anchors, lookback, repeats, mask_depth, 0, out)
     return out^
 
 
@@ -162,13 +166,15 @@ def _refine(
     max_anchors: Int,
     lookback: Int,
     repeats: RepeatMask,
+    mask_depth: Int,
+    depth: Int,
     mut out: List[Anchor],
 ) raises:
     if level >= len(levels) or max(len(partner), len(query)) <= budget:
         return
     var current = levels[level]
     var found = current.select(find_anchors(partner, query, current.min_len, current.counted_to()))
-    if repeats.k > 0:
+    if repeats.k > 0 and depth < mask_depth:
         var outside = List[Anchor]()
         for a in found:
             if not repeats.covers(ref_offset + a.ref_pos, ref_offset + a.ref_end()):
@@ -192,6 +198,8 @@ def _refine(
             max_anchors,
             lookback,
             repeats,
+            mask_depth,
+            depth,
             out,
         )
         return
@@ -211,6 +219,8 @@ def _refine(
             max_anchors,
             lookback,
             repeats,
+            mask_depth,
+            depth + 1,
             out,
         )
         out.append(a.shifted(ref_offset, query_offset))
@@ -229,6 +239,8 @@ def _refine(
         max_anchors,
         lookback,
         repeats,
+        mask_depth,
+        depth + 1,
         out,
     )
 
