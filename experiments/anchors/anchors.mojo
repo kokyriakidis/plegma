@@ -5,6 +5,7 @@ usage: anchors <sequences.fa> <period> <max pairs> <out.tsv> <plan> [<plan> ...]
        anchors --compose2 <sequences.fa> <a> <b> <period>
        anchors --brute <sequences.fa> <a> <b> <period> [bin] [--prices x,o,e]
        anchors --seed-audit <dump> [--prices x,o,e]
+       anchors --coopt <pairs.tsv> [--two-piece x,o1,e1,o2,e2]
 
 For an even sample of at most `max pairs` pairs of distinct sequences (the longer as the partner, as placement
 seeds a new sequence against a longer placed one), each plan seeds the pair as plegma's backbone does, traced: every
@@ -1553,6 +1554,147 @@ def _seed_audit(args: List[String]) raises:
     print("total joint excess", total, "made excess", made_total, "of optima", optima)
 
 
+def _coopt(args: List[String]) raises:
+    """`--coopt <pairs.tsv> [--two-piece x,o1,e1,o2,e2]`: per line `a b row_a row_b` (two sequences and an alignment
+    of them as two gapped rows), under two-piece gap costs (a mismatch x, a gap of k letters min(o1 + e1 k, o2 + e2
+    k); by default pgrealign's abPOA scores as a cost, 48 and min(32 + 24k, 192 + 10k)): the optimum, the alignment's
+    cost, its aligned letter pairs and how many of them some optimal alignment aligns (forward and backward DP).
+    Prints `best cost pairs on_optimum flags` per line, `flags` one character per letter of a: `1` aligned as some
+    optimal alignment aligns it, `0` aligned as none does, `.` not aligned."""
+    var x = Int32(48)
+    var o1 = Int32(32)
+    var e1 = Int32(24)
+    var o2 = Int32(192)
+    var e2 = Int32(10)
+    for k in range(len(args)):
+        if args[k] == "--two-piece" and k + 1 < len(args):
+            var parts = args[k + 1].split(",")
+            x = Int32(Int(String(parts[0])))
+            o1 = Int32(Int(String(parts[1])))
+            e1 = Int32(Int(String(parts[2])))
+            o2 = Int32(Int(String(parts[3])))
+            e2 = Int32(Int(String(parts[4])))
+    var text = String()
+    with open(args[2], "r") as f:
+        text = f.read()
+    for line in text.split("\n"):
+        var fields = String(line).split("\t")
+        if len(fields) < 4:
+            continue
+        var a = List[UInt8](String(fields[0]).as_bytes())
+        var b = List[UInt8](String(fields[1]).as_bytes())
+        var ra = List[UInt8](String(fields[2]).as_bytes())
+        var rb = List[UInt8](String(fields[3]).as_bytes())
+        var n = len(a)
+        var m = len(b)
+        # The alignment's pairs (each letter of a: its partner in b or -1) and its cost.
+        var partner = List[Int](length=n, fill=-1)
+        var cost = 0
+        var i = 0
+        var j = 0
+        var run = 0
+        var side = 0
+        for c in range(len(ra)):
+            var gap_a = ra[c] == UInt8(ord("-"))
+            var gap_b = rb[c] == UInt8(ord("-"))
+            if gap_a and gap_b:
+                continue
+            var now = 1 if gap_a else (2 if gap_b else 0)
+            if now != side and run > 0:
+                cost += Int(min(o1 + e1 * Int32(run), o2 + e2 * Int32(run)))
+                run = 0
+            side = now
+            if now != 0:
+                run += 1
+            else:
+                partner[i] = j
+                if a[i] != b[j]:
+                    cost += Int(x)
+            if not gap_a:
+                i += 1
+            if not gap_b:
+                j += 1
+        if run > 0:
+            cost += Int(min(o1 + e1 * Int32(run), o2 + e2 * Int32(run)))
+        # Forward: H at each pair's start cell (i, partner[i]); rows rolling, D E1 E2 F1 F2.
+        var w = m + 1
+        var h_prev = List[Int32](length=w, fill=FAR)
+        var h_row = List[Int32](length=w, fill=FAR)
+        var f1 = List[Int32](length=w, fill=FAR)
+        var f2 = List[Int32](length=w, fill=FAR)
+        var at_start = List[Int32](length=n, fill=FAR)
+        h_prev[0] = 0
+        for jj in range(1, w):
+            h_prev[jj] = min(o1 + e1 * Int32(jj), o2 + e2 * Int32(jj))
+        if n > 0 and partner[0] >= 0:
+            at_start[0] = h_prev[partner[0]]
+        for ii in range(1, n + 1):
+            var ca = a[ii - 1]
+            var g1 = FAR
+            var g2 = FAR
+            for jj in range(w):
+                f1[jj] = min(h_prev[jj] + o1 + e1, f1[jj] + e1)
+                f2[jj] = min(h_prev[jj] + o2 + e2, f2[jj] + e2)
+                var h = min(f1[jj], f2[jj])
+                if jj > 0:
+                    g1 = min(h_row[jj - 1] + o1 + e1, g1 + e1)
+                    g2 = min(h_row[jj - 1] + o2 + e2, g2 + e2)
+                    var d = h_prev[jj - 1] + (Int32(0) if ca == b[jj - 1] else x)
+                    h = min(h, min(d, min(g1, g2)))
+                h_row[jj] = h
+            if ii < n and partner[ii] >= 0:
+                at_start[ii] = h_row[partner[ii]]
+            swap(h_prev, h_row)
+        var best = h_prev[m]
+        # Backward: H' at each pair's end cell (i + 1, partner[i] + 1).
+        var hb_next = List[Int32](length=w, fill=FAR)
+        var hb_row = List[Int32](length=w, fill=FAR)
+        var fb1 = List[Int32](length=w, fill=FAR)
+        var fb2 = List[Int32](length=w, fill=FAR)
+        var at_end = List[Int32](length=n, fill=FAR)
+        for ii in reversed(range(n + 1)):
+            var eb1 = FAR
+            var eb2 = FAR
+            for jj in reversed(range(w)):
+                var h: Int32
+                if ii == n and jj == m:
+                    h = 0
+                else:
+                    h = FAR
+                    if ii < n and jj < m:
+                        h = hb_next[jj + 1] + (Int32(0) if a[ii] == b[jj] else x)
+                    if jj < m:
+                        h = min(h, min(eb1 + o1 + e1, eb2 + o2 + e2))
+                    if ii < n:
+                        h = min(h, min(fb1[jj] + o1 + e1, fb2[jj] + o2 + e2))
+                hb_row[jj] = h
+                eb1 = min(h, eb1 + e1) if jj < m else h
+                eb2 = min(h, eb2 + e2) if jj < m else h
+                fb1[jj] = min(h, fb1[jj] + e1) if ii < n else h
+                fb2[jj] = min(h, fb2[jj] + e2) if ii < n else h
+            swap(hb_next, hb_row)
+            # hb_next now holds row ii: the end cells of letters ii - 1.
+            if ii >= 1 and partner[ii - 1] >= 0:
+                at_end[ii - 1] = hb_next[partner[ii - 1] + 1]
+        var pairs = 0
+        var on = 0
+        var flags = List[UInt8](length=n, fill=UInt8(ord(".")))
+        for ii in range(n):
+            if partner[ii] < 0:
+                continue
+            pairs += 1
+            var sub = Int32(0) if a[ii] == b[partner[ii]] else x
+            if at_start[ii] + sub + at_end[ii] == best:
+                on += 1
+                flags[ii] = UInt8(ord("1"))
+            else:
+                flags[ii] = UInt8(ord("0"))
+        if n > 0:
+            print(best, cost, pairs, on, StringSlice(unsafe_from_utf8=Span(flags)))
+        else:
+            print(best, cost, pairs, on, "-")
+
+
 def _brute(args: List[String]) raises:
     """`--brute <sequences.fa> <a> <b> <period> [bin] [--prices x,o,e]`: every exact match of 21 letters or more
     between sequences a and b (every MEM, each occurrence) checked against every optimal alignment of the pair under
@@ -1908,6 +2050,12 @@ def _brute(args: List[String]) raises:
 
 def main() raises:
     var args = argv()
+    if len(args) > 1 and String(args[1]) == "--coopt":
+        var list = List[String]()
+        for k in range(len(args)):
+            list.append(String(args[k]))
+        _coopt(list)
+        return
     if len(args) > 1 and String(args[1]) == "--seed-audit":
         var list = List[String]()
         for k in range(len(args)):
