@@ -581,6 +581,29 @@ def _tree_groups(rows: List[List[UInt8]]) -> List[List[Bool]]:
     return groups^
 
 
+def _length_groups(rows: List[List[UInt8]], period: Int) -> List[List[Bool]]:
+    """Copy-number splits: the rows whose sequences are longer than each step of half a `period` or more between
+    their sorted lengths, against the rest. Sequences of a region that differ by whole copies differ in length by
+    multiples of the period, and a gap of whole copies is shared by every shorter sequence alike."""
+    var n = len(rows)
+    var length = List[Int](length=n, fill=0)
+    for r in range(n):
+        for x in rows[r]:
+            if x != GAP:
+                length[r] += 1
+    var sorted_lengths = length.copy()
+    sort(sorted_lengths)
+    var groups = List[List[Bool]]()
+    for t in range(1, n):
+        if (sorted_lengths[t] - sorted_lengths[t - 1]) * 2 < period:
+            continue
+        var group = List[Bool](length=n, fill=False)
+        for r in range(n):
+            group[r] = length[r] >= sorted_lengths[t]
+        groups.append(group^)
+    return groups^
+
+
 def _merge_groups(
     mut rows: List[List[UInt8]],
     in_a: List[Bool],
@@ -806,13 +829,16 @@ def refine(
     gap_open: Int = 0,
     seeded: Bool = False,
     group_band: Int = 0,
+    period: Int = 0,
 ) raises -> List[List[UInt8]]:
     """`rows` (one length, `-` gaps) refined on their sum of pairs for at most `passes` passes over the distinct
     sequences, each within `band` letters of its place, widened up to `max_band` while its best path touches the
     band's edge; with `gap_open`, every gap a pair opens costs that much more (see `_realign`). With `group_band`,
     each pass also realigns every split of a UPGMA tree over the rows, one side's profile against the other's
     within that many columns of their present merge (`_merge_groups`): moves of many rows at once, such as a
-    stretch of copies shifted by a whole copy in several sequences, that no single row's move reaches. Identical
+    stretch of copies shifted by a whole copy in several sequences, that no single row's move reaches. With a tandem
+    repeat's `period`, the moves know its copies: a row's band reaches a copy and more either side, the group moves'
+    two copies, and the group moves also split the rows by copy number (`_length_groups`). Identical
     sequences share their row. The rows keep their order and spell what they did."""
     var n = len(rows)
     if n < 2 or passes <= 0:
@@ -863,17 +889,23 @@ def refine(
     if not anchored:
         spelled_distinct.clear()
     var partners = Partners(spelled_distinct, anchor_costs, seeded)
+    # A tandem repeat's copies: bands reaching a copy (a row) or two (a group) either side.
+    var row_band = max(band, period + 2 * EDGE + 8) if period > 0 else band
+    var groups_band = max(group_band, 2 * period + 16) if period > 0 else group_band
     var last = _objective(work, gap_open)
     for _ in range(passes):
         for s in range(len(work)):
             centre.clear()
             if anchored:
                 _anchored_centre(work, s, partners, centre)
-            _ = _realign(work, s, band, max_band, centre, Int32(gap_open), cost, moves)
-        if group_band > 0:
-            for group in _tree_groups(work):
+            _ = _realign(work, s, row_band, max_band, centre, Int32(gap_open), cost, moves)
+        if group_band > 0 or period > 0:
+            var groups = _tree_groups(work)
+            if period > 0:
+                groups.extend(_length_groups(work, period))
+            for group in groups:
                 _ = _merge_groups(
-                    work, group, group_band, max(group_band, min(max_band, 1024)), Int32(gap_open), cost, moves
+                    work, group, groups_band, max(groups_band, min(max_band, 1024)), Int32(gap_open), cost, moves
                 )
         var now = _objective(work, gap_open)
         # A pass gaining under 0.1% ends the refinement: the later passes of a long run gain little.

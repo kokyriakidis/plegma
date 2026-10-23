@@ -29,7 +29,16 @@ is implementation and may change.
   while they raise its likelihood under a pair HMM).
 - MSA refinement: `refine` (each distinct sequence realigned exactly to the
   others' columns on their sum of pairs with gap opening, in a band centred on
-  the sequences' optimal pairwise alignments), `sum_of_pairs`, `gap_opens`.
+  the sequences' optimal pairwise alignments; with `group_band`, every split of
+  a UPGMA tree over the rows realigned as two profiles), `sum_of_pairs`,
+  `gap_opens`.
+- MSA by anchored progressive placement: `progressive` (each distinct sequence,
+  longest first, placed exactly into the MSA so far through anchors every
+  placed sequence votes for, MUMs then SMEMs then optimal alignments; refined;
+  for a tandem array, also a start aligned copy by copy, the cheaper kept).
+- Tandem arrays: `tandem_repeat` -> `Repeat` (a sequence's array and period),
+  `tandem_layout` -> `Layout` (a region's arrays cut into copies phased by one
+  unit, the copies aligned as symbols on their sum of pairs, then as letters).
 - Order and clusters: `guide_order` (abPOA's progressive order by minimizer
   multiset Jaccard), `cluster_rows` (several consensus sequences, by MSA
   columns where the sequences disagree).
@@ -56,4 +65,6 @@ from .kernel import (
 from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window
 from .polish import polish
+from .progressive import progressive
 from .refine import gap_opens, refine, sum_of_pairs
+from .units import Layout, Repeat, tandem_layout, tandem_repeat

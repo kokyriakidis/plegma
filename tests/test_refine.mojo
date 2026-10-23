@@ -142,5 +142,28 @@ def test_group_moves_never_raise_the_objective() raises:
             assert_equal(len(refined[k]), len(refined[0]))
 
 
+def test_copy_aware_moves_keep_the_sequences_and_never_raise_the_objective() raises:
+    # Arrays of one unit differing by whole copies, flush left: with the period, the refinement's bands reach a copy
+    # and its group moves split the rows by copy number.
+    seed(59)
+    var unit = _random(11)
+    var left = _random(30)
+    var right = _random(30)
+    for trial in range(6):
+        var seqs = List[List[UInt8]]()
+        for _ in range(Int(random_ui64(3, 7))):
+            var s = left.copy()
+            for _ in range(Int(random_ui64(5, 12))):
+                s.extend(_mutated(unit, 0.05))
+            s.extend(right.copy())
+            seqs.append(s^)
+        var rows = _flush_left(seqs)
+        var refined = refine(rows, 4, 8, gap_open=1, period=11)
+        assert_true(sum_of_pairs(refined) + gap_opens(refined) <= sum_of_pairs(rows) + gap_opens(rows), String(trial))
+        for k in range(len(seqs)):
+            assert_true(_ungapped(refined[k]) == seqs[k], String(trial))
+            assert_equal(len(refined[k]), len(refined[0]))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

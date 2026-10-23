@@ -16,7 +16,14 @@ it, then while they raise the sequences' likelihood under a pair HMM, which mend
 consensus makes in tandem repeats and short runs. `-I` refines the MSA (and the graph built from it) on its
 sum of pairs: each sequence realigned in turn, exactly, to the others' columns, anchored by the sequences'
 optimal pairwise alignments; on vntr-eval's 149 regions it beats abPOA in every stratum on both its unit and
-affine scores. The package also holds the pairwise layer (sporos
+affine scores. `-A` builds the MSA without the graph: each distinct sequence, longest first, placed exactly into
+the MSA so far through anchors that every placed sequence votes for (sporos's MUMs, then SMEMs, then optimal
+alignments), and, where every sequence holds one clear tandem array, a second start whose arrays are cut into
+copies phased by one unit and aligned copy by copy; both are refined (`-I`, with `-G`'s group moves, which realign
+every split of a tree over the rows as two profiles), knowing the repeat's period (bands reaching a copy, group
+moves splitting the sequences by copy number), and the lower sum of pairs kept; on vntr-eval's hotspot VNTRs it
+reaches 1.042 times the pairwise optima (vntr-eval's unit-aware realigner 1.048, pgrealign's star 1.225). The package
+also holds the pairwise layer (sporos
 anchors, optimal chaining, recursive backbones; `docs/design.md`, `experiments/`).
 
 ## Building

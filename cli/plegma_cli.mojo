@@ -16,6 +16,7 @@ from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
 from plegma.polish import polish
+from plegma.progressive import progressive
 from plegma.refine import refine
 
 
@@ -53,6 +54,15 @@ Options:
                 sequences' optimal pairwise alignments place it, every gap a pair opens costing the third [1];
                 the fourth 1 seeds those pairwise alignments (flanks pinned by MUMs, then MUMs inside each array)
                 [0]; the fifth caps the band's widening [4096] (MSA and GFA outputs)
+    -G INT      the -I refinement's group moves: every split of a UPGMA tree over the rows realigned as two
+                profiles within INT columns of their present merge, each pass [0; 256 with -A]; 0 off
+    -A          the MSA by anchored progressive placement instead of the graph: the distinct sequences, longest
+                first, each placed exactly into the MSA so far in a band centred on anchors every placed sequence
+                votes for (sporos's MUMs of 51, 31 and 21 letters outside tandem repeats, then inside each array,
+                then SMEMs of 31, then the optimal alignment); where every sequence holds one clear tandem array,
+                a second start with the arrays aligned copy by copy; each refined (-I, 20 passes by default, with
+                -G's group moves) and the lower sum of pairs kept; the graph is the MSA's
+    -U          with -A, no copy-level start
     -B          refinement starts each round's graph from the consensus polished (-P), not the heaviest path
     -P INT[,INT] rounds of consensus polishing, at most [50,20] (global mode): each sequence aligned to the
                 consensus, and every one-letter or whole-repeat-unit edit kept that lowers their summed edit distance
@@ -214,6 +224,11 @@ struct Options(Copyable, Movable):
     var sp_gap_open: Int
     var sp_seeded: Bool
     var sp_max_band: Int
+    var sp_set: Bool
+    var group_band: Int
+    var group_set: Bool
+    var anchored: Bool
+    var units: Bool
     var min_freq: Float64
     var verbose: Bool
 
@@ -244,6 +259,11 @@ struct Options(Copyable, Movable):
         self.sp_gap_open = 1
         self.sp_seeded = False
         self.sp_max_band = 4096
+        self.sp_set = False
+        self.group_band = 0
+        self.group_set = False
+        self.anchored = False
+        self.units = True
         self.min_freq = 0.25
         self.verbose = False
 
@@ -417,8 +437,27 @@ def _poa(input: String, options: Options) raises -> String:
         sort(keys)
         for k in range(len(keys)):
             order[k] = Int(keys[k] & 0xFFFFFFFF)
+    var t1 = perf_counter_ns()
     var graph = Graph()
-    if options.start_msa.byte_length() > 0:
+    # -A: the MSA by anchored progressive placement; its graph is built from it, and its rows are the output's.
+    var anchored_rows = List[String]()
+    if options.anchored:
+        var bytes = progressive(
+            seqs,
+            options.sp_passes if options.sp_set else 20,
+            options.sp_band,
+            options.sp_max_band,
+            options.sp_gap_open,
+            options.group_band if options.group_set else 256,
+            options.units,
+        )
+        var names = List[String]()
+        for r in range(len(seqs)):
+            names.append(records.names[r])
+            anchored_rows.append(String(unsafe_from_utf8=bytes[r].copy()))
+        graph = Graph.from_msa(names, anchored_rows)
+        order.clear()
+    elif options.start_msa.byte_length() > 0:
         var start = read_fasta(options.start_msa)
         var names = List[String]()
         var rows = List[String]()
@@ -435,7 +474,6 @@ def _poa(input: String, options: Options) raises -> String:
     var shown = List[Int]()
     for p in range(len(graph.paths)):
         shown.append(p)
-    var t1 = perf_counter_ns()
     var cells = 0
     var peak = 0
     var reversed_count = 0
@@ -465,7 +503,7 @@ def _poa(input: String, options: Options) raises -> String:
                     reversed_count += 1
         path_of[r] = graph.fuse_nodes(name, Span(seqs[r]), found.nodes)
     # Refinement: a fresh graph from the consensus so far, every sequence aligned to it again in the same order.
-    for _ in range(options.rounds if options.start_msa.byte_length() == 0 else 0):
+    for _ in range(options.rounds if options.start_msa.byte_length() == 0 and not options.anchored else 0):
         var members = List[Int]()
         for r in range(len(seqs)):
             members.append(path_of[r])
@@ -490,16 +528,19 @@ def _poa(input: String, options: Options) raises -> String:
             path_of[r] = next.fuse_nodes(graph.names[path_of[r]], Span(seqs[r]), found.nodes)
         graph = next^
     var t2 = perf_counter_ns()
-    for r in range(len(seqs)):
-        shown.append(path_of[r])
+    if not options.anchored:
+        for r in range(len(seqs)):
+            shown.append(path_of[r])
 
     var result = options.result
     var text = String()
-    var refining = options.sp_passes > 0 and result != 0
+    var refining = options.sp_passes > 0 and result != 0 and not options.anchored
     var need_rows = result == 1 or result == 2 or options.consensus_rule == 1 or options.max_consensus > 1 or refining
-    var by_path = graph.msa() if need_rows else List[String]()
+    var by_path = graph.msa() if need_rows and not options.anchored else List[String]()
     var rows = List[String]()
-    if need_rows:
+    if need_rows and options.anchored:
+        rows = anchored_rows.copy()
+    elif need_rows:
         for p in shown:
             rows.append(by_path[p])
     if refining:
@@ -515,6 +556,7 @@ def _poa(input: String, options: Options) raises -> String:
             gap_open=options.sp_gap_open,
             seeded=options.sp_seeded,
             max_band=options.sp_max_band,
+            group_band=options.group_band,
         )
         var names = List[String]()
         for k in range(len(rows)):
@@ -690,7 +732,16 @@ def main() raises:
                 options.sp_seeded = Int(parts[3]) != 0
             if len(parts) > 4:
                 options.sp_max_band = Int(parts[4])
+            options.sp_set = True
             i += 1
+        elif a == "-G":
+            options.group_band = Int(_value(args, i))
+            options.group_set = True
+            i += 1
+        elif a == "-A":
+            options.anchored = True
+        elif a == "-U":
+            options.units = False
         elif a == "-B":
             options.polish_backbone = True
         elif a == "-P":
@@ -715,6 +766,8 @@ def main() raises:
     if input.byte_length() == 0:
         print(USAGE)
         exit(1)
+    if options.anchored and options.start_msa.byte_length() > 0:
+        raise Error("-A builds its own MSA: it takes no -i")
     if options.mode != GLOBAL and options.mode != LOCAL and options.mode != EXTENSION:
         raise Error(t"-m {options.mode}: the modes are 0, 1 and 2")
     var inputs = List[String]()

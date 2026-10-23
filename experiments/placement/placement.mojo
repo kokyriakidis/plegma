@@ -3,6 +3,7 @@
 usage: placement <msa.fa> <label> <out.tsv> <strategy> [<strategy> ...]
        placement --progressive <sequences.fa> <out.msa.fa> <strategy> [refine passes [group band[,max band]]]
        placement --refine <msa.fa> <out.msa.fa> <passes> [gap [anchored [band [group band]]]]
+       placement --tandem <sequences.fa>
 
 Progressive: the MSA grown a sequence at a time, longest first, each new sequence anchored by the strategy's seeds
 against every sequence already in it and placed by the exact profile DP centred on its anchors (an MSA's first
@@ -50,6 +51,7 @@ from plegma.backbone import (
 from plegma.chain import ChainCosts
 from plegma.graph import DELETION, INSERTION, cigar_runs
 from plegma.refine import place, refine, row_cost
+from plegma.units import tandem_layout, tandem_repeat
 
 comptime GAP = UInt8(ord("-"))
 
@@ -521,8 +523,43 @@ def _refine_msa(args: List[String]) raises:
             f.write(">", names[r], "\n", String(unsafe_from_utf8=rows[of[r]].copy()), "\n")
 
 
+def _tandem(path: String) raises:
+    """Each distinct sequence's tandem array (`tandem_repeat`, and at the longest's period), then the layout's."""
+    var records = read_fasta(path)
+    var seqs = List[List[UInt8]]()
+    for r in range(len(records)):
+        var letters = List[UInt8](records.seq(r))
+        for k in range(len(letters)):
+            if letters[k] >= UInt8(ord("a")) and letters[k] <= UInt8(ord("z")):
+                letters[k] -= 32
+        var dup = False
+        for x in seqs:
+            if x == letters:
+                dup = True
+                break
+        if not dup:
+            seqs.append(letters^)
+    for k in range(len(seqs)):
+        var r = tandem_repeat(seqs[k])
+        print(
+            "sequence", k, "length", len(seqs[k]), "period", r.period, "array", r.start, r.end, "identity", r.identity
+        )
+    var layout = tandem_layout(seqs)
+    print(
+        "layout period",
+        layout.period,
+        "rows",
+        len(layout.rows),
+        "columns",
+        len(layout.rows[0]) if len(layout.rows) > 0 else 0,
+    )
+
+
 def main() raises:
     var raw = argv()
+    if len(raw) > 2 and String(raw[1]) == "--tandem":
+        _tandem(String(raw[2]))
+        return
     if len(raw) > 1 and (String(raw[1]) == "--progressive" or String(raw[1]) == "--refine"):
         var list = List[String]()
         for k in range(len(raw)):

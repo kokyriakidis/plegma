@@ -128,7 +128,8 @@ def main():
     options = [[], ["-S"], ["-p"], ["-S", "-p"], ["-L"], ["-s"], ["-m", "1"], ["-m", "2"], ["-b", "-1"],
                ["-a", "1"], ["-d", "3"], ["-O", "0", "-E", "2"], ["-O", "4,0", "-E", "2,0"], ["-S", "-n", "20"],
                ["-S", "-T", "0"], ["-b", "0", "-f", "0"], ["-R", "1"], ["-S", "-p", "-R", "2"],
-               ["-P", "0"], ["-P", "1"], ["-S", "-K", "0:0"], ["-S", "-K", "8:100"], ["-d", "3", "-P", "3"], ["-L", "-I", "3"], ["-I", "2,16,0"], ["-L", "-I", "2,32,2"]]
+               ["-P", "0"], ["-P", "1"], ["-S", "-K", "0:0"], ["-S", "-K", "8:100"], ["-d", "3", "-P", "3"], ["-L", "-I", "3"], ["-I", "2,16,0"], ["-L", "-I", "2,32,2"],
+               ["-I", "2", "-G", "16"], ["-A"], ["-A", "-U"], ["-A", "-I", "2,16,1", "-G", "8"], ["-A", "-I", "0"]]
     failures = 0
     runs = 0
     for c in range(cases):
@@ -141,7 +142,7 @@ def main():
         opts = list(rng.choice(options))
         if rng.random() < 0.3:
             opts += list(rng.choice(options))
-        if rng.random() < 0.15 and len(seqs) > 2:
+        if rng.random() < 0.15 and len(seqs) > 2 and "-A" not in opts:
             # Start from the MSA of the first records, then add the rest.
             half = len(seqs) // 2
             start_in = os.path.join(work, "start%d.fa" % c)

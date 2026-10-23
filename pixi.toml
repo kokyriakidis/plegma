@@ -30,7 +30,8 @@ build-test-graph = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I test
 build-test-kernel = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_kernel.mojo -o build/test_kernel", depends-on = ["prepare"] }
 build-test-polish = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_polish.mojo -o build/test_polish", depends-on = ["prepare"] }
 build-test-refine = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_refine.mojo -o build/test_refine", depends-on = ["prepare"] }
-test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_chain && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_refine", depends-on = ["build-test-alphabet", "build-test-deps", "build-test-chain", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-refine"] }
+build-test-units = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_units.mojo -o build/test_units", depends-on = ["prepare"] }
+test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_chain && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_refine && ./build/test_units", depends-on = ["build-test-alphabet", "build-test-deps", "build-test-chain", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-refine", "build-test-units"] }
 # The pairwise experiments E1-E5 (experiments/pairwise): `pixi run pairwise-run <vntr-eval>/regions <out dir> [jobs]`.
 # The command line, abPOA's flags: `pixi run build-cli`, then `build/plegma -h`.
 build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan cli/plegma_cli.mojo -o build/plegma", depends-on = ["prepare"] }
