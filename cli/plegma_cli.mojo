@@ -5,13 +5,13 @@ from std.os import getenv
 from std.sys import argv, exit, stderr
 from std.time import perf_counter_ns
 
-from karan import Costs
+from karan import Aligner, Costs, Mode, Ties
 from sporos import read_fasta
 
 from plegma.anchors import Anchor
 from plegma.backbone import Level, MUMS, backbone, split_anchors, windows
 from plegma.chain import ChainCosts
-from plegma.graph import Graph, GAP
+from plegma.graph import DELETION, INSERTION, Graph, GAP, cigar_runs
 from plegma.clusters import cluster_rows
 from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace
@@ -40,6 +40,9 @@ Options:
                 between anchors
     -J          with -S, anchors by split_anchors: the flanks' MUMs, then inside tandem repeats the longest match
                 unique in each window that leaves its length difference to one side and holds enough letters for it
+    -Y          with -S, anchors where the sequences already in the graph agree: the sequence aligned optimally
+                (unit costs) to the 24 nearest, each matched letter voting for the node that one spells it with, and
+                every run of 21 or more letters a majority of them place on consecutive nodes held
     -n INT      gaps of at most INT letters are not seeded again [500]
     -T INT      letters each anchor gives back to the DP at both ends [10]
     -H INT      anchors each anchor's chain search looks back over, at most [200]; 0: all
@@ -138,6 +141,109 @@ def _consensus_most_frequent(rows: List[String]) -> String:
     return String(unsafe_from_utf8=out)
 
 
+comptime AGREE_SHARE = 0.5
+"""-Y: the share of the voters a letter's node needs."""
+comptime AGREE_RUN = 21
+"""-Y: the letters an agreed run needs to anchor."""
+comptime AGREE_VOTERS = 24
+"""-Y: the sequences in the graph that vote, the nearest by edit distance."""
+
+
+def _agreed(
+    graph: Graph,
+    topology: Topology,
+    query: Span[UInt8, _],
+    share: Float64,
+    least: Int,
+    voters: Int,
+    mut path: List[Int],
+) raises -> List[Anchor]:
+    """Anchors where the sequences already in the graph agree: `query` aligned optimally (unit costs) to each of
+    the `voters` nearest of them (all when fewer), each matched letter voting for the node that sequence spells it
+    with; a letter whose most voted node holds `share` of the votes or more takes it, and a run of `least` or more
+    such letters, each node an edge after the last and the run after the one before in the graph's order, is an
+    anchor. `path` gets the anchors' nodes one after another, the anchors' positions along it."""
+    var aligner = Aligner()
+    var members = List[Int]()
+    if len(graph.paths) <= voters:
+        for p in range(len(graph.paths)):
+            members.append(p)
+    else:
+        var keys = List[UInt64]()
+        for p in range(len(graph.paths)):
+            var letters = List[UInt8](capacity=len(graph.paths[p]))
+            for node in graph.paths[p]:
+                letters.append(graph.bases[Int(node)])
+            keys.append((UInt64(aligner.distance(Span(letters), query)) << 32) | UInt64(p))
+        sort(keys)
+        for t in range(voters):
+            members.append(Int(keys[t] & 0xFFFFFFFF))
+    var n = len(query)
+    var k = len(members)
+    var node_of = List[Int](length=k * n, fill=-1)
+    for v in range(k):
+        ref member = graph.paths[members[v]]
+        var letters = List[UInt8](capacity=len(member))
+        for node in member:
+            letters.append(graph.bases[Int(node)])
+        var found = aligner.align(Span(letters), query, Costs.edit(), Mode.GLOBAL, ties=Ties.LEFT)
+        var runs = cigar_runs(found.cigar)
+        var i = 0
+        var j = 0
+        for x in range(len(runs.ops)):
+            for _ in range(runs.counts[x]):
+                var op = runs.ops[x]
+                if op == DELETION:
+                    i += 1
+                elif op == INSERTION:
+                    j += 1
+                else:
+                    if letters[i] == query[j]:
+                        node_of[v * n + j] = Int(member[i])
+                    i += 1
+                    j += 1
+    var need = max(1, Int(share * Float64(k) + 0.999999))
+    var lead = List[Int](length=n, fill=-1)
+    for j in range(n):
+        var top = -1
+        var top_count = 0
+        for v in range(k):
+            var node = node_of[v * n + j]
+            if node < 0 or node == top:
+                continue
+            var c = 0
+            for u in range(k):
+                if node_of[u * n + j] == node:
+                    c += 1
+            if c > top_count:
+                top_count = c
+                top = node
+        if top_count >= need:
+            lead[j] = top
+    var out = List[Anchor]()
+    var last_rank = -1
+    var start = 0
+    for j in range(n + 1):
+        var extends = False
+        if j < n and lead[j] >= 0 and j > start:
+            var e = Int(graph.first_out[lead[j - 1]])
+            while e >= 0:
+                if Int(graph.edge_to[e]) == lead[j]:
+                    extends = True
+                    break
+                e = Int(graph.next_out[e])
+        if j < n and lead[j] >= 0 and (j == start or extends):
+            continue
+        # The run start ..< j ends here.
+        if j - start >= least and lead[start] >= 0 and topology.rank[lead[start]] > last_rank:
+            out.append(Anchor(len(path), start, j - start))
+            for u in range(start, j):
+                path.append(lead[u])
+            last_rank = topology.rank[lead[j - 1]]
+        start = j if j < n and lead[j] >= 0 else j + 1
+    return out^
+
+
 def _seeded(
     graph: Graph,
     topology: Topology,
@@ -151,6 +257,7 @@ def _seeded(
     repeat_k: Int,
     repeat_distance: Int,
     split: Bool,
+    agree: Bool,
     mut row_of: List[Int],
     mut scratch: WindowScratch,
     mut workspace: Workspace,
@@ -158,6 +265,11 @@ def _seeded(
     """`query` aligned to the graph through anchors on the consensus path: each window between two anchors
     aligned to the subgraph between their nodes, the anchors' letters matched."""
     var path = graph.heaviest_path(topology.order)
+    var agreed = List[Anchor]()
+    var by_agreement = agree and len(graph.paths) > 0
+    if by_agreement:
+        path = List[Int]()
+        agreed = _agreed(graph, topology, query, AGREE_SHARE, AGREE_RUN, AGREE_VOTERS, path)
     var letters = List[UInt8](capacity=len(path))
     for node in path:
         letters.append(graph.bases[node])
@@ -168,16 +280,18 @@ def _seeded(
     for n in [51, 31, 21]:
         levels.append(Level(MUMS, n))
     # With `split`, `split_anchors` instead: the flanks, then inside the repeats the anchors it is sure of.
-    var chained = split_anchors(Span(letters), query) if split else backbone(
-        Span(letters),
-        query,
-        levels,
-        ChainCosts(substitution=0.1),
-        window,
-        True,
-        lookback=lookback,
-        repeat_k=repeat_k,
-        repeat_distance=repeat_distance,
+    var chained = agreed.copy() if by_agreement else (
+        split_anchors(Span(letters), query) if split else backbone(
+            Span(letters),
+            query,
+            levels,
+            ChainCosts(substitution=0.1),
+            window,
+            True,
+            lookback=lookback,
+            repeat_k=repeat_k,
+            repeat_distance=repeat_distance,
+        )
     )
     # Each anchor loses `trim` letters at both ends: the DP, not the anchor, decides where a gap next to it goes.
     var anchors = List[Anchor]()
@@ -260,6 +374,7 @@ struct Options(Copyable, Movable):
     var strand: Bool
     var seeding: Bool
     var split_seeds: Bool
+    var agree_seeds: Bool
     var window: Int
     var trim: Int
     var lookback: Int
@@ -311,6 +426,7 @@ struct Options(Copyable, Movable):
         self.strand = False
         self.seeding = False
         self.split_seeds = False
+        self.agree_seeds = False
         self.window = 500
         self.trim = 10
         self.lookback = 200
@@ -395,6 +511,7 @@ def _align(
             options.repeat_k,
             options.repeat_distance,
             options.split_seeds,
+            options.agree_seeds,
             row_of,
             scratch,
             workspace,
@@ -794,6 +911,8 @@ def main() raises:
             options.seeding = True
         elif a == "-J":
             options.split_seeds = True
+        elif a == "-Y":
+            options.agree_seeds = True
         elif a == "-n":
             options.window = Int(_value(args, i))
             i += 1
