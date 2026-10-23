@@ -1,20 +1,26 @@
 """An MSA by anchored progressive placement, refined on its sum of pairs, with a copy-level start for tandem arrays.
 
 The distinct sequences join one at a time, longest first. Each new sequence is placed by the exact profile DP of
-`refine.place`, in a band centred on anchors that every sequence already placed votes for: through its own seeds
-against the new one, the first source to anchor a letter deciding it (sporos's MUMs of 51, 31 and 21 letters,
-none inside a tandem repeat at the top level, then MUMs unique within each gap between those, which sit on copies
-carrying something of their own; then SMEMs of 31; then the optimal pairwise alignment); a letter is anchored where
-more than half the votes from at least two sequences name one column, and the anchors kept are the heaviest chain
-rising in letter and column. The MSA is then refined (`refine`, with group moves).
+`refine.place`, in a band centred on anchors that every sequence already placed votes for: by default each placed
+sequence's optimal unit-cost alignment to the new one names a column for each of its letters; a letter is anchored
+where more than half the votes from at least two sequences name one column, and the anchors kept are the heaviest
+chain rising in letter and column. Seeds can vote first (`one_indel` >= -1: sporos's MUMs of 51, 31 and 21 letters
+outside tandem repeats, then inside each array, then SMEMs of 31, the alignment voting only where they do not), but
+on vntr-eval's regions the anchors seeds give inside repeats pair letters no optimal alignment pairs (the anchor
+audit, experiments/anchors: MUMs unique in a repeat window force 1.8% more than the optimum, two-piece alignments
+12%, unit-cost alignments nothing), and placement from the alignments alone is as good or better and faster.
+Anchors centre the band only: holding their letters to their columns locks in the placed rows' own errors.
+
+The MSA is then refined (`refine`, with group moves) on the sum of pairs over every pair of the input sequences, a
+distinct sequence weighing as many as spell it (as vntr-eval's pairs and pgrealign's alleles do), a column of two
+letters costing `mismatch` (2), of a letter and a gap `gap` (2), and each gap a pair opens `gap_open` (1): half a
+mismatch, where vntr-eval's unit and affine costs (0 and 1.5) trade off best (its medians beaten on both in every
+stratum). Where the sequences hold a tandem repeat, the refinement knows its period (`refine`'s copy-aware moves).
 
 Where every sequence holds one clear tandem array (`units.tandem_layout`), a second start is built: the arrays
-aligned copy by copy, the flanks on either side placed as above, refined alike; the start whose refined objective is
-lower is kept; so is a third start, placed and refined with every distinct sequence weighing one before a weighted
-refinement, where it is lower (the objective: the pairs' differing columns plus `gap_open` per gap a pair opens, over every pair of
-the input sequences, so a distinct sequence weighs as many as spell it, as vntr-eval's pairs and pgrealign's alleles
-do). Where the sequences
-hold a tandem repeat, both refinements know its period (`refine`'s copy-aware moves).
+aligned copy by copy, the flanks on either side placed as above, refined alike; and where a sequence repeats, a
+third, placed and refined with every distinct sequence weighing one before a weighted refinement; the start whose
+refined objective is lowest is kept.
 """
 
 from karan import Aligner, Costs, Mode, Ties
@@ -383,10 +389,10 @@ def progressive(
     group_band: Int = 256,
     units: Bool = True,
     even_start: Bool = True,
-    one_indel: Int = -1,
-    unit_votes: Bool = False,
-    mismatch: Int = 1,
-    gap: Int = 1,
+    one_indel: Int = -2,
+    unit_votes: Bool = True,
+    mismatch: Int = 2,
+    gap: Int = 2,
     hard: Int = 0,
     nearest: Bool = False,
 ) raises -> List[List[UInt8]]:

@@ -57,16 +57,17 @@ Options:
     -G INT      the -I refinement's group moves: every split of a UPGMA tree over the rows realigned as two
                 profiles within INT columns of their present merge, each pass [0; 256 with -A]; 0 off
     -A          the MSA by anchored progressive placement instead of the graph: the distinct sequences, longest
-                first, each placed exactly into the MSA so far in a band centred on anchors every placed sequence
-                votes for (sporos's MUMs of 51, 31 and 21 letters outside tandem repeats, then inside each array,
-                then SMEMs of 31, then the optimal alignment); where every sequence holds one clear tandem array,
-                a second start with the arrays aligned copy by copy; each refined (-I, 20 passes by default, with
-                -G's group moves) and the lower sum of pairs kept; the graph is the MSA's
+                first, each placed exactly into the MSA so far in a band centred on the columns every placed sequence
+                votes for its letters through their optimal unit-cost alignment (with -V, through seeds first:
+                sporos's MUMs outside tandem repeats, then inside each array, then SMEMs); where every sequence holds
+                one clear tandem array, a second start with the arrays aligned copy by copy; each refined (-I, 20
+                passes by default, with -G's group moves, at -W's prices) and the lower sum of pairs kept; the graph
+                is the MSA's
     -U          with -A, no copy-level start
-    -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1]
-                (-I's third number prices a gap opening): vntr-eval's unit cost is 1,1 with no opening, its affine
-                cost 4,2 with 6
-    -V INT[,INT[,INT[,INT]]] with -A, the seeds' confidence [-1,0,0,0]: inside tandem repeats an anchor is kept
+    -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
+                2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
+                opening, its affine cost 4,2 with 6
+    -V INT[,INT[,INT[,INT]]] with -A, the seeds' confidence [-2,1,0,0]: inside tandem repeats an anchor is kept
                 only if its diagonal lies within the first number of letters of one end of its gap (its length
                 difference left to one side: one indel), -1 off, -2 no seeds (the optimal pairwise alignments alone
                 vote); the second 1 makes those optimal pairwise alignments, which also centre the refinement's
@@ -246,6 +247,8 @@ struct Options(Copyable, Movable):
     var gap: Int
     var hard: Int
     var nearest: Bool
+    var confidence_set: Bool
+    var prices_set: Bool
     var min_freq: Float64
     var verbose: Bool
 
@@ -287,6 +290,8 @@ struct Options(Copyable, Movable):
         self.gap = 1
         self.hard = 0
         self.nearest = False
+        self.confidence_set = False
+        self.prices_set = False
         self.min_freq = 0.25
         self.verbose = False
 
@@ -474,10 +479,10 @@ def _poa(input: String, options: Options) raises -> String:
             options.group_band if options.group_set else 256,
             options.units,
             True,
-            options.one_indel,
-            options.unit_votes,
-            options.mismatch,
-            options.gap,
+            options.one_indel if options.confidence_set else -2,
+            options.unit_votes if options.confidence_set else True,
+            options.mismatch if options.prices_set else 2,
+            options.gap if options.prices_set else 2,
             options.hard,
             options.nearest,
         )
@@ -778,6 +783,7 @@ def main() raises:
             var both = _pair(_value(args, i))
             options.mismatch = both[0]
             options.gap = both[1] if both[1] >= 0 else both[0]
+            options.prices_set = True
             i += 1
         elif a == "-V":
             var parts = _value(args, i).split(",")
@@ -788,6 +794,7 @@ def main() raises:
                 options.hard = Int(parts[2])
             if len(parts) > 3:
                 options.nearest = Int(parts[3]) == 1
+            options.confidence_set = True
             i += 1
         elif a == "-B":
             options.polish_backbone = True
