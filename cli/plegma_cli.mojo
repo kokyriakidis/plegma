@@ -1,6 +1,7 @@
 """The `plegma` command line: a partial order alignment of the sequences of one FASTA/FASTQ file, as abPOA runs
 one (its flags, defaults and output modes), written as a consensus, an MSA or a GFA graph."""
 
+from std.os import getenv
 from std.sys import argv, exit, stderr
 from std.time import perf_counter_ns
 
@@ -8,7 +9,7 @@ from karan import Costs
 from sporos import read_fasta
 
 from plegma.anchors import Anchor
-from plegma.backbone import Level, MUMS, backbone, windows
+from plegma.backbone import Level, MUMS, backbone, split_anchors, windows
 from plegma.chain import ChainCosts
 from plegma.graph import Graph, GAP
 from plegma.clusters import cluster_rows
@@ -37,6 +38,8 @@ Options:
     -S          anchor each sequence to the consensus path with sporos's MUMs (51, then 31, then 21 letters,
                 seeded again inside every gap, none inside tandem repeats), and align only the windows
                 between anchors
+    -J          with -S, anchors by split_anchors: the flanks' MUMs, then inside tandem repeats the longest match
+                unique in each window that leaves its length difference to one side and holds enough letters for it
     -n INT      gaps of at most INT letters are not seeded again [500]
     -T INT      letters each anchor gives back to the DP at both ends [10]
     -H INT      anchors each anchor's chain search looks back over, at most [200]; 0: all
@@ -67,14 +70,23 @@ Options:
     -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
                 2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
                 opening, its affine cost 4,2 with 6
-    -V INT[,INT[,INT[,INT]]] with -A, the seeds' confidence [-2,1,0,0]: inside tandem repeats an anchor is kept
-                only if its diagonal lies within the first number of letters of one end of its gap (its length
-                difference left to one side: one indel), -1 off, -2 no seeds (the optimal pairwise alignments alone
-                vote); the second 1 makes those optimal pairwise alignments, which also centre the refinement's
-                bands, unit-cost (vntr-eval's), not two-piece; the third holds the letters that many of the best
-                sources anchor to their columns in placement (1: the MUMs), the rest placed between them [0]; a
-                fourth 1 places the sequences nearest first (each next the one nearest by edit distance to one
-                placed), not longest first
+    -V INT[,INT...] with -A, the seeds' confidence [-2,1,0,0,0]: -2 no seeds (the optimal unit-cost alignments
+                to the placed sequences vote, the staged seeds where a pair is too long to align); -4 the staged
+                seeds first (MUMs outside tandem repeats pin the flanks, then MUMs of 1,000, 600 and 400 letters),
+                then the alignments; -5 the split seeds first (backbone.split_anchors); -3 SMEMs of 600 letters or more
+                first; e >= 0 sporos's MUMs and SMEMs, an
+                anchor inside a repeat kept only if its diagonal lies within e letters of one end of its gap (one
+                indel), -1 without that rule; the second 1 makes the optimal pairwise alignments, which also centre
+                the refinement's bands, unit-cost (vntr-eval's), not two-piece; the third holds the letters that many
+                of the best sources anchor to their columns in placement [0]; a fourth 1 places the sequences nearest
+                first, not longest first; a fifth 1 anchors a letter where most of its votes agree (not more than
+                half), each anchor weighing the votes its column won; a sixth n > 0 places them in a random order
+                (after the longest) seeded by n, a restart; a seventh n > 0 places each sequence exactly (the DP
+                unbanded) where that takes n million cells or fewer; an eighth n > 0 runs a refinement pass over the
+                sequences placed so far after every n placements; a ninth s >= 0 keeps each placement inside its
+                co-optimal corridor against its nearest placed relative (alignments within s of their optimum); a
+                tenth 1 adds the subfamily start (the two clusters at the top of a tree aligned each on its own, then
+                merged), an eleventh 1 the tree start (along the minimum spanning tree)
     -B          refinement starts each round's graph from the consensus polished (-P), not the heaviest path
     -P INT[,INT] rounds of consensus polishing, at most [50,20] (global mode): each sequence aligned to the
                 consensus, and every one-letter or whole-repeat-unit edit kept that lowers their summed edit distance
@@ -138,6 +150,7 @@ def _seeded(
     lookback: Int,
     repeat_k: Int,
     repeat_distance: Int,
+    split: Bool,
     mut row_of: List[Int],
     mut scratch: WindowScratch,
     mut workspace: Workspace,
@@ -154,7 +167,8 @@ def _seeded(
     var levels = List[Level]()
     for n in [51, 31, 21]:
         levels.append(Level(MUMS, n))
-    var chained = backbone(
+    # With `split`, `split_anchors` instead: the flanks, then inside the repeats the anchors it is sure of.
+    var chained = split_anchors(Span(letters), query) if split else backbone(
         Span(letters),
         query,
         levels,
@@ -172,6 +186,22 @@ def _seeded(
             anchors.append(
                 Anchor(a.ref_pos + trim, a.query_pos + trim, a.length - 2 * trim, a.ref_copies, a.query_copies)
             )
+    # The seed audit (PLEGMA_SEED_DUMP=<file>): each sequence's path, letters, anchors (as aligned, trimmed) and
+    # where its letters landed on the path, appended for `anchors --seed-audit` to check against its optimal
+    # alignments.
+    var dump = getenv("PLEGMA_SEED_DUMP")
+    if dump != "":
+        var text = String(">path\n")
+        text.write(StringSlice(unsafe_from_utf8=Span(letters)), "\n>query\n")
+        var q = List[UInt8](capacity=len(query))
+        for c in query:
+            q.append(c)
+        text.write(StringSlice(unsafe_from_utf8=Span(q)), "\n>anchors")
+        for a in anchors:
+            text.write(" ", a.ref_pos, ",", a.query_pos, ",", a.length)
+        text.write("\n")
+        with open(dump, "a") as f:
+            f.write(text)
     var gaps = windows(anchors, len(letters), len(query))
     var aligned = List[Int](length=len(query), fill=-1)
     var score = 0
@@ -206,6 +236,17 @@ def _seeded(
             for k in range(a.length):
                 aligned[a.query_pos + k] = path[a.ref_pos + k]
             score += Int(scoring.match_score) * a.length
+    if dump != "":
+        # Each letter's place on the path (-1: aligned off it, or not aligned).
+        var at = Dict[Int, Int]()
+        for k in range(len(path)):
+            at[path[k]] = k
+        var text = String(">aligned")
+        for j in range(len(query)):
+            text.write(" ", at.get(aligned[j], -1) if aligned[j] >= 0 else -1)
+        text.write("\n")
+        with open(dump, "a") as f:
+            f.write(text)
     return GraphAlignment(aligned^, score, cells, peak)
 
 
@@ -218,6 +259,7 @@ struct Options(Copyable, Movable):
     var progressive: Bool
     var strand: Bool
     var seeding: Bool
+    var split_seeds: Bool
     var window: Int
     var trim: Int
     var lookback: Int
@@ -247,6 +289,13 @@ struct Options(Copyable, Movable):
     var gap: Int
     var hard: Int
     var nearest: Bool
+    var consistency: Bool
+    var shuffle: Int
+    var exact_cells: Int
+    var interleave: Int
+    var corridor: Int
+    var subfamilies: Bool
+    var tree_start: Bool
     var confidence_set: Bool
     var prices_set: Bool
     var min_freq: Float64
@@ -261,6 +310,7 @@ struct Options(Copyable, Movable):
         self.progressive = False
         self.strand = False
         self.seeding = False
+        self.split_seeds = False
         self.window = 500
         self.trim = 10
         self.lookback = 200
@@ -290,6 +340,13 @@ struct Options(Copyable, Movable):
         self.gap = 1
         self.hard = 0
         self.nearest = False
+        self.consistency = False
+        self.shuffle = 0
+        self.exact_cells = 0
+        self.interleave = 0
+        self.corridor = -1
+        self.subfamilies = False
+        self.tree_start = False
         self.confidence_set = False
         self.prices_set = False
         self.min_freq = 0.25
@@ -337,6 +394,7 @@ def _align(
             options.lookback,
             options.repeat_k,
             options.repeat_distance,
+            options.split_seeds,
             row_of,
             scratch,
             workspace,
@@ -485,6 +543,13 @@ def _poa(input: String, options: Options) raises -> String:
             options.gap if options.prices_set else 2,
             options.hard,
             options.nearest,
+            options.consistency,
+            options.subfamilies,
+            options.shuffle,
+            options.tree_start,
+            options.exact_cells,
+            options.interleave,
+            options.corridor,
         )
         var names = List[String]()
         for r in range(len(seqs)):
@@ -727,6 +792,8 @@ def main() raises:
             options.strand = True
         elif a == "-S":
             options.seeding = True
+        elif a == "-J":
+            options.split_seeds = True
         elif a == "-n":
             options.window = Int(_value(args, i))
             i += 1
@@ -794,6 +861,20 @@ def main() raises:
                 options.hard = Int(parts[2])
             if len(parts) > 3:
                 options.nearest = Int(parts[3]) == 1
+            if len(parts) > 4:
+                options.consistency = Int(parts[4]) == 1
+            if len(parts) > 5:
+                options.shuffle = Int(parts[5])
+            if len(parts) > 6:
+                options.exact_cells = Int(parts[6]) * 1_000_000
+            if len(parts) > 7:
+                options.interleave = Int(parts[7])
+            if len(parts) > 8:
+                options.corridor = Int(parts[8])
+            if len(parts) > 9:
+                options.subfamilies = Int(parts[9]) == 1
+            if len(parts) > 10:
+                options.tree_start = Int(parts[10]) == 1
             options.confidence_set = True
             i += 1
         elif a == "-B":

@@ -2,7 +2,7 @@
 """pgrealign's realign stage done by plegma: an msas.jsonl.gz for pgrealign replace, from extract's packages.
 
 usage: python3 -I experiments/chr20/realign_plegma.py <plegma> <karan> <packages.jsonl.gz> <out msas.jsonl.gz>
-           [--jobs n] [--timeout s] [--flags "..."] [--max-refined n]
+           [--jobs n] [--timeout s] [--flags "..."] [--max-refined n] [--resume]
 
 Every package whose status is `ok` and whose alleles are not all one (pgrealign's `--select any`) is aligned:
 - its distinct alleles by `plegma <flags> -r 1` (`-L -I 20,64,1` by default: longest first, then the sum-of-pairs
@@ -14,7 +14,8 @@ Every package whose status is `ok` and whose alleles are not all one (pgrealign'
   into the MSA, its extra letters in columns of their own.
 Each record holds `id`, `method` ("plegma"), `status`, `seconds` and, when `ok`, `rows` ({member id: row}) and
 `columns`, every row checked to spell its member; replace reads `id`, `status` and `rows`. A region past `--timeout`
-seconds (900) is `timeout`, one plegma fails on `aligner_failed`; replace leaves both as they are.
+seconds (900) is `timeout`, one plegma fails on `aligner_failed`; replace leaves both as they are. With `--resume`,
+the records an interrupted run left in `<out>.part` (read up to where it was cut) are kept and their regions skipped.
 """
 import gzip
 import json
@@ -124,12 +125,16 @@ def place_fragment(rows, order, alleles, fragment):
             last = c
     new_rows = {m: [] for m in order}
     frag = []
+    # The fragment's letter in each column, once (scanning the fragment for every column costs their product).
+    letter_at = {}
+    for j, p in enumerate(placed):
+        if p is not None and p not in letter_at:
+            letter_at[p] = seq[j]
     for c in range(-1, width):
         if c >= 0:
             for m in order:
                 new_rows[m].append(rows[m][c])
-            hit = [j for j, p in enumerate(placed) if p == c]
-            frag.append(seq[hit[0]] if hit else "-")
+            frag.append(letter_at.get(c, "-"))
         for j in insert_after.get(c, []):
             for m in order:
                 new_rows[m].append("-")
@@ -179,15 +184,30 @@ def realign(package):
     return record
 
 
-def chosen(path):
+def chosen(path, skip=frozenset()):
     with gzip.open(path, "rt") as f:
         for line in f:
             p = json.loads(line)
-            if p.get("status") != "ok":
+            if p.get("status") != "ok" or p["id"] in skip:
                 continue
             if len({a["seq"].upper() for a in p["alleles"]}) < 2 and not p.get("fragments"):
                 continue
             yield p
+
+
+def kept_records(path):
+    """The whole records an interrupted run wrote to `path` (a gzip stream cut anywhere)."""
+    out = []
+    if not os.path.exists(path):
+        return out
+    try:
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                if line.endswith("\n"):
+                    out.append(json.loads(line))
+    except (EOFError, OSError, json.JSONDecodeError):
+        pass
+    return out
 
 
 def init(plegma, karan, flags, timeout, max_refined):
@@ -210,11 +230,21 @@ def main():
     timeout = int(option("--timeout", "900"))
     flags = option("--flags", "-L -I 20,64,1").split()
     max_refined = int(option("--max-refined", "100000"))
+    resume = "--resume" in args
+    args = [a for a in args if a != "--resume"]
     plegma, karan, packages, out = args
     counts = {}
+    kept = kept_records(out + ".part") if resume else []
+    if kept:
+        os.replace(out + ".part", out + ".kept")
+    done = frozenset(r["id"] for r in kept)
+    print("resuming: %d records kept" % len(kept), file=sys.stderr, flush=True)
     with Pool(jobs, initializer=init, initargs=(plegma, karan, flags, timeout, max_refined)) as pool, \
             gzip.open(out + ".part", "wt") as f:
-        for n, record in enumerate(pool.imap(realign, chosen(packages), chunksize=4), 1):
+        for record in kept:
+            f.write(json.dumps(record) + "\n")
+            counts[record["status"]] = counts.get(record["status"], 0) + 1
+        for n, record in enumerate(pool.imap(realign, chosen(packages, done), chunksize=4), len(kept) + 1):
             f.write(json.dumps(record) + "\n")
             counts[record["status"]] = counts.get(record["status"], 0) + 1
             if n % 500 == 0:

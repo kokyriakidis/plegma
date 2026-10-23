@@ -36,11 +36,14 @@ struct Level(ImplicitlyCopyable):
     var kind: Int
     var min_len: Int
     var cap: Int
+    var outside_repeats: Bool
+    """Its anchors kept out of the partner's tandem repeats (`backbone`'s mask) at every depth: the flanks."""
 
-    def __init__(out self, kind: Int, min_len: Int, cap: Int = 1):
+    def __init__(out self, kind: Int, min_len: Int, cap: Int = 1, outside_repeats: Bool = False):
         self.kind = kind
         self.min_len = min_len
         self.cap = cap
+        self.outside_repeats = outside_repeats
 
     def select(self, var anchors: List[Anchor]) -> List[Anchor]:
         if self.kind == MUMS:
@@ -198,7 +201,7 @@ def _refine(
         return
     var current = levels[level]
     var found = current.select(find_anchors(partner, query, current.min_len, current.counted_to()))
-    if repeats.k > 0 and depth < mask_depth:
+    if repeats.k > 0 and (depth < mask_depth or current.outside_repeats):
         var outside = List[Anchor]()
         for a in found:
             if not repeats.covers(ref_offset + a.ref_pos, ref_offset + a.ref_end()):
@@ -296,3 +299,197 @@ def windows(anchors: List[Anchor], ref_len: Int, query_len: Int) -> List[Window]
         query_at = a.query_end()
     out.append(Window(ref_at, ref_len, query_at, query_len))
     return out^
+
+
+def split_anchors(
+    partner: ImmSpan[UInt8, _],
+    query: ImmSpan[UInt8, _],
+    min_len: Int = 51,
+    len_d: Float64 = 0.5,
+    max_depth: Int = 3,
+    one_indel: Int = 2,
+    repeat_k: Int = 12,
+    repeat_distance: Int = 500,
+    ambiguity: Float64 = 0.1,
+) raises -> List[Anchor]:
+    """Non-overlapping anchors in order on both sequences, placed where they are sure. First the flanks: MUMs of 51,
+    31 and 21 letters outside the partner's tandem repeats, chained (`backbone`), which pin where the alignment
+    starts and ends. Then, in every window they leave, one anchor at a time: the longest match unique in both of the
+    window's pieces (its frequencies counted in the window alone), of `min_len` letters or more, and of `len_d` times
+    the window's length difference D or more (the larger the gap a window must place, the more an anchor must hold
+    to decide where it goes), that leaves D to one side of it (its diagonal within `one_indel` letters of one end:
+    one indel); then the same in the two windows it leaves, `max_depth` deep at most. An anchor with a copy
+    (`_ambiguous`: its letters on another diagonal of its window with at most `ambiguity` of them mismatched) is
+    dropped from the flanks and passed over in the windows: inside tandem arrays a long exact match unique in both
+    sequences is often a copy the optimum pairs elsewhere, as in repeats the mask misses (copies over
+    `repeat_distance` apart, or diverged) and in windows whose length difference is no single indel. On vntr-eval's
+    regions (426 pairs, every anchor checked against every optimal alignment, `anchors --brute`) the anchors force
+    no excess over the optima under gap-affine prices (vntr-eval's 4, 6 + 2k and plegma's 2, 1 + 2k), against
+    0.04-0.06% without the copy test and 2-6% for chained MUMs, SMEMs or MEMs; under unit cost 0.01%, ties where a
+    long deletion spreads into many small ones."""
+    var out = List[Anchor]()
+    var flank_levels = List[Level]()
+    for k in [51, 31, 21]:
+        flank_levels.append(Level(MUMS, k, 1, True))
+    var flanks = backbone(
+        partner,
+        query,
+        flank_levels,
+        ChainCosts(substitution=0.1),
+        0,
+        True,
+        repeat_k=repeat_k,
+        repeat_distance=repeat_distance,
+        mask_depth=0,
+    )
+    if ambiguity > 0.0:
+        var kept = List[Anchor]()
+        for f in flanks:
+            if not _ambiguous(partner, query, 0, len(partner), 0, len(query), f, ambiguity):
+                kept.append(f)
+        flanks = kept^
+    var ref_at = 0
+    var query_at = 0
+    for f in flanks:
+        _split(
+            partner,
+            query,
+            ref_at,
+            f.ref_pos,
+            query_at,
+            f.query_pos,
+            min_len,
+            len_d,
+            max_depth,
+            one_indel,
+            1,
+            out,
+            ambiguity,
+        )
+        out.append(f)
+        ref_at = f.ref_end()
+        query_at = f.query_end()
+    _split(
+        partner,
+        query,
+        ref_at,
+        len(partner),
+        query_at,
+        len(query),
+        min_len,
+        len_d,
+        max_depth,
+        one_indel,
+        1,
+        out,
+        ambiguity,
+    )
+    return out^
+
+
+def _ambiguous(
+    partner: ImmSpan[UInt8, _], query: ImmSpan[UInt8, _], r0: Int, r1: Int, q0: Int, q1: Int, x: Anchor, share: Float64
+) -> Bool:
+    """Whether anchor `x` has a copy in its window (`r0 ..< r1` of the partner, `q0 ..< q1` of the query): its
+    partner letters against the query window, or its query letters against the partner window, on another diagonal
+    with at most `share` of them mismatched (no indels)."""
+    var limit = Int(share * Float64(x.length))
+    for s in range(q0, q1 - x.length + 1):
+        if s == x.query_pos:
+            continue
+        var mismatches = 0
+        for k in range(x.length):
+            if partner[x.ref_pos + k] != query[s + k]:
+                mismatches += 1
+                if mismatches > limit:
+                    break
+        if mismatches <= limit:
+            return True
+    for s in range(r0, r1 - x.length + 1):
+        if s == x.ref_pos:
+            continue
+        var mismatches = 0
+        for k in range(x.length):
+            if query[x.query_pos + k] != partner[s + k]:
+                mismatches += 1
+                if mismatches > limit:
+                    break
+        if mismatches <= limit:
+            return True
+    return False
+
+
+def _split(
+    partner: ImmSpan[UInt8, _],
+    query: ImmSpan[UInt8, _],
+    r0: Int,
+    r1: Int,
+    q0: Int,
+    q1: Int,
+    min_len: Int,
+    len_d: Float64,
+    max_depth: Int,
+    one_indel: Int,
+    depth: Int,
+    mut out: List[Anchor],
+    ambiguity: Float64 = 0.0,
+) raises:
+    if r1 - r0 < min_len or q1 - q0 < min_len or depth > max_depth:
+        return
+    var d = (q1 - q0) - (r1 - r0)
+    var need = max(min_len, Int(len_d * Float64(abs(d))))
+    var found = mums(find_anchors(partner[r0:r1], query[q0:q1], need, 2))
+    # The candidates leaving D to one side, longest first; with `ambiguity`, the longest without a copy.
+    var fits = List[Int]()
+    for k in range(len(found)):
+        var start = found[k].query_pos - found[k].ref_pos
+        if start < min(0, d) - one_indel or start > max(0, d) + one_indel:
+            continue
+        if abs(start) > one_indel and abs(d - start) > one_indel:
+            continue
+        fits.append(k)
+    var best = -1
+    while len(fits) > 0:
+        var top = 0
+        for u in range(1, len(fits)):
+            if found[fits[u]].length > found[fits[top]].length:
+                top = u
+        var k = fits[top]
+        if ambiguity <= 0.0 or not _ambiguous(partner, query, r0, r1, q0, q1, found[k].shifted(r0, q0), ambiguity):
+            best = k
+            break
+        _ = fits.pop(top)
+    if best < 0:
+        return
+    var x = found[best]
+    _split(
+        partner,
+        query,
+        r0,
+        r0 + x.ref_pos,
+        q0,
+        q0 + x.query_pos,
+        min_len,
+        len_d,
+        max_depth,
+        one_indel,
+        depth + 1,
+        out,
+        ambiguity,
+    )
+    out.append(x.shifted(r0, q0))
+    _split(
+        partner,
+        query,
+        r0 + x.ref_end(),
+        r1,
+        q0 + x.query_end(),
+        q1,
+        min_len,
+        len_d,
+        max_depth,
+        one_indel,
+        depth + 1,
+        out,
+        ambiguity,
+    )

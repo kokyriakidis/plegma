@@ -4,6 +4,7 @@ usage: placement <msa.fa> <label> <out.tsv> <strategy> [<strategy> ...]
        placement --progressive <sequences.fa> <out.msa.fa> <strategy> [refine passes [group band[,max band]]]
        placement --refine <msa.fa> <out.msa.fa> <passes> [gap [anchored [band [group band [period [min gain]]]]]]
        placement --tandem <sequences.fa>
+       placement --tree <sequences.fa> <out.msa.fa>
 
 Progressive: the MSA grown a sequence at a time, longest first, each new sequence anchored by the strategy's seeds
 against every sequence already in it and placed by the exact profile DP centred on its anchors (an MSA's first
@@ -52,6 +53,7 @@ from plegma.chain import ChainCosts
 from plegma.graph import DELETION, INSERTION, cigar_runs
 from plegma.refine import place, refine, row_cost
 from plegma.units import tandem_layout, tandem_repeat
+from plegma.progressive import _tree_rows
 
 comptime GAP = UInt8(ord("-"))
 
@@ -570,8 +572,40 @@ def _tandem(path: String) raises:
     )
 
 
+def _tree(path: String, out_path: String) raises:
+    """The MSA along the minimum spanning tree of the distinct sequences (`progressive._tree_rows`), unrefined, every
+    input name written with its row."""
+    var records = read_fasta(path)
+    var seqs = List[List[UInt8]]()
+    var names = List[String]()
+    var of = List[Int]()
+    for r in range(len(records)):
+        var letters = List[UInt8](records.seq(r))
+        for k in range(len(letters)):
+            if letters[k] >= UInt8(ord("a")) and letters[k] <= UInt8(ord("z")):
+                letters[k] -= 32
+        names.append(records.names[r])
+        var at = -1
+        for d in range(len(seqs)):
+            if seqs[d] == letters:
+                at = d
+                break
+        if at < 0:
+            at = len(seqs)
+            seqs.append(letters^)
+        of.append(at)
+    var aligner = Aligner()
+    var rows = _tree_rows(seqs, aligner)
+    with open(out_path, "w") as f:
+        for r in range(len(names)):
+            f.write(">", names[r], "\n", String(unsafe_from_utf8=rows[of[r]].copy()), "\n")
+
+
 def main() raises:
     var raw = argv()
+    if len(raw) > 3 and String(raw[1]) == "--tree":
+        _tree(String(raw[2]), String(raw[3]))
+        return
     if len(raw) > 2 and String(raw[1]) == "--tandem":
         _tandem(String(raw[2]))
         return

@@ -13,7 +13,9 @@ is implementation and may change.
   `linked_cost`, `without_overlaps`.
 - Backbones: `backbone` over `Level`s (`MUMS`, `REFERENCE_UNIQUE`, `RARE`,
   `SMEMS`, `ALL`, `RARE_OR_MAXIMAL`), seeding again inside every gap over a
-  budget; `windows` -> `Window`, the gaps an exact aligner fills.
+  budget; `windows` -> `Window`, the gaps an exact aligner fills; `split_anchors`, anchors placed where they are
+  sure (the flanks' MUMs, then the longest match unique in each window that leaves its length difference to one
+  side and holds enough letters for it, recursively).
 - Pairwise alignment through a backbone: `anchored_alignment` -> `Anchored`.
 - The graph: `Graph` (`add`, `fuse` along a path's CIGAR, `fuse_nodes`,
   `msa`), `cigar_runs` -> `Runs`; windows aligned to it between two nodes,
@@ -48,7 +50,19 @@ is implementation and may change.
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
 from .align import Anchored, anchored_alignment, graph_alignment
 from .anchors import Anchor, find_anchors, mums, rare, rare_or_maximal, smems
-from .backbone import ALL, Level, MUMS, RARE, RARE_OR_MAXIMAL, REFERENCE_UNIQUE, SMEMS, Window, backbone, windows
+from .backbone import (
+    ALL,
+    Level,
+    MUMS,
+    RARE,
+    RARE_OR_MAXIMAL,
+    REFERENCE_UNIQUE,
+    SMEMS,
+    Window,
+    backbone,
+    split_anchors,
+    windows,
+)
 from .chain import Chain, ChainCosts, chain, linked_cost, without_overlaps
 from .clusters import cluster_rows
 from .graph import Graph, Runs, cigar_runs
