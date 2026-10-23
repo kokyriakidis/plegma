@@ -5,7 +5,7 @@ on (tools/hardset_strategies.py's `optima` and `score_region`), without mapping 
 
 usage: python3 -I experiments/hardset/hardset.py <vntr-eval> <packages.jsonl.gz> <work dir> <label> [--flags "..."]
            [--regions a,b,... | --pick n] [--jobs n] [--timeout s] [--star] [--gapnorm] [--diagnose] [--sites n]
-           [--against <label>]
+           [--against <label>] [--start <label>]
 
 - Regions: `--regions`, or the `--pick` (6) cheapest of the 45 (distinct alleles x the longest's length squared).
 - Alleles: each region's, from pgrealign extract's packages (the same graph's); a region's optima are cached in
@@ -23,6 +23,8 @@ usage: python3 -I experiments/hardset/hardset.py <vntr-eval> <packages.jsonl.gz>
   site with its interval, letters, pairs, alleles, kinds, shift in periods, the star's wrong letters there and its
   worst pair spelled out (the `--sites` (5) worst per region printed, all in <work dir>/sites.<label>.tsv, the wrong
   letters' coordinates in <work dir>/wrong/<label>/). Needs ANCHORS (build/anchors).
+- With `--start <label>`: plegma refines that earlier run's MSAs (-i, no sequence added) with `--flags` (e.g. the
+  star's: `--start star --flags "-I 20,64,8 -W 6,2"`), to tell the objective from the search.
 - With `--against <label>` (implies `--diagnose`): every site of that earlier run re-scored under this one (`fixed`
   under a tenth of its wrong letters left, `better`, `same`, `worse`) and this run's new sites: whether a change to
   the MSA fixed the sites it was meant to. With `--regions` only those regions run, in seconds.
@@ -96,15 +98,19 @@ def cache_optima(task):
     return region["id"]
 
 
-def plegma_msa(plegma, flags, alleles, timeout):
-    """plegma's rows ({allele id: row}) for the distinct `alleles`, and its seconds."""
+def plegma_msa(plegma, flags, alleles, timeout, start_msa=None):
+    """plegma's rows ({allele id: row}) for the distinct `alleles`, and its seconds; with `start_msa` (an MSA file of
+    the alleles, rows named by allele), plegma started from it (-i) with no sequence to add: that MSA refined."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "in.fa")
         with open(path, "w") as f:
-            for k, (_, s, _) in enumerate(alleles):
-                f.write(">s%d\n%s\n" % (k, s))
+            if start_msa is None:
+                for k, (_, s, _) in enumerate(alleles):
+                    f.write(">s%d\n%s\n" % (k, s))
+        extra = ["-i", start_msa] if start_msa else []
         start = time.time()
-        out = subprocess.run([plegma] + flags + ["-r", "1", path], capture_output=True, text=True, timeout=timeout)
+        out = subprocess.run([plegma] + flags + extra + ["-r", "1", path], capture_output=True, text=True,
+                             timeout=timeout)
         seconds = time.time() - start
         if out.returncode != 0:
             raise RuntimeError(out.stderr.strip()[-200:])
@@ -116,6 +122,8 @@ def plegma_msa(plegma, flags, alleles, timeout):
             rows[name] = []
         elif name is not None:
             rows[name].append(line.strip().upper())
+    if start_msa:
+        return {a[0]: "".join(rows[a[0]]) for a in alleles}, seconds
     return {a[0]: "".join(rows["s%d" % k]) for k, a in enumerate(alleles)}, seconds
 
 
@@ -127,7 +135,7 @@ def star_msa(region, alleles):
 
 
 def one(task):
-    vntr_eval, label, plegma, flags, region, alleles, work, timeout, gapnorm = task
+    vntr_eval, label, plegma, flags, region, alleles, work, timeout, gapnorm, start_label = task
     load(vntr_eval)
     rid = region["id"]
     out = os.path.join(work, "msa", label, rid + ".fa")
@@ -141,7 +149,8 @@ def one(task):
             if isinstance(rows, list):
                 rows = {a[0]: r for a, r in zip(alleles, rows)}
         else:
-            rows, seconds = plegma_msa(plegma, flags, alleles, timeout)
+            start_msa = os.path.join(work, "msa", start_label, rid + ".fa") if start_label else None
+            rows, seconds = plegma_msa(plegma, flags, alleles, timeout, start_msa)
     except subprocess.TimeoutExpired:
         return rid, {"status": "timeout"}
     except Exception as error:  # noqa: BLE001
@@ -226,6 +235,7 @@ def main():
     jobs = int(option("--jobs", "6"))
     timeout = int(option("--timeout", "1800"))
     base = option("--against", "")
+    start_label = option("--start", "")
     shown_sites = int(option("--sites", "5"))
     diagnosing = "--diagnose" in args or bool(base)
     with_star = "--star" in args or diagnosing
@@ -251,8 +261,8 @@ def main():
         tasks = [(vntr_eval, r, alleles[r["id"]], os.path.join(work, "optima", r["id"] + ".jsonl.gz")) for r in picked]
         list(pool.imap_unordered(cache_optima, tasks))
         results = {}
-        tasks = [(vntr_eval, lab, plegma, flags, r, alleles[r["id"]], work, timeout, gapnorm) for lab in labels
-                 for r in picked]
+        tasks = [(vntr_eval, lab, plegma, flags, r, alleles[r["id"]], work, timeout, gapnorm,
+                  start_label if lab == label else None) for lab in labels for r in picked]
         for (rid, res), task in zip(pool.imap(one, tasks), tasks):
             results[(task[1], rid)] = res
     shown = [(lab, False) for lab in labels] + ([(lab, True) for lab in labels] if gapnorm else [])

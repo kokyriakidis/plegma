@@ -468,9 +468,14 @@ def _placed(
             column_of.append(cols^)
         var leading = List[Int](length=m, fill=-1)
         var weight = List[Int](length=m, fill=0)
-        # The voters: every placed sequence, or past VOTERS the nearest that many.
+        # The voters: every placed sequence, or past VOTERS the nearest that many (PLEGMA_VOTERS overrides it, for
+        # experiments).
+        var voter_cap = VOTERS
+        var cap_text = getenv("PLEGMA_VOTERS")
+        if cap_text != "":
+            voter_cap = Int(cap_text)
         var voters = List[Bool](length=len(placed), fill=True)
-        if len(placed) > VOTERS:
+        if len(placed) > voter_cap:
             var keys = List[UInt64]()
             for r in range(len(placed)):
                 var d = aligner.distance(Span(placed[r]), Span(q)) if len(placed[r]) > 0 else Int(UInt32.MAX)
@@ -478,7 +483,7 @@ def _placed(
             sort(keys)
             for r in range(len(placed)):
                 voters[r] = False
-            for t in range(VOTERS):
+            for t in range(voter_cap):
                 voters[Int(keys[t] & 0xFFFFFFFF)] = True
         var top_weight = 1
         for _ in range(len(cascade) - 1):
