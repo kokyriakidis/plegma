@@ -9,7 +9,7 @@ sampled ones, and the flanks are CHM13's).
              <label>=<msas.jsonl.gz | plegma flags> [...] [--jobs n] [--regions a,b|file]
 
 `prep`, once for a set of regions: the reads that the chr20 arms (`arm_<arm>`) align into each region or its flanks
-(its nodes and CHM13's within FLANK letters of them, as region_reads.py finds them), both mates, written per region from the arms' FASTQs; CHM13's sequence over the region
+(its nodes and CHM13's within READ_FLANK letters of them, as region_reads.py finds them), both mates, written per region from the arms' FASTQs; CHM13's sequence over the region
 and FLANK letters each side; and the truth over that interval (the T2T-Q100 small and structural VCFs and benchmark
 beds that score_calls.py sliced into <work dir>/calls/truth), shifted to the interval's coordinates.
 
@@ -33,7 +33,10 @@ import tempfile
 from multiprocessing import Pool
 from pathlib import Path
 
-FLANK = 1000
+FLANK = 1500
+READ_FLANK = 1000
+"""The window's flanks are FLANK letters, the reads taken those mapped within READ_FLANK of the region: a read (and
+most mates) then lies inside the window, where one reaching past its end would be forced through it."""
 MAX_COPIES = 8
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -121,8 +124,8 @@ def prep(args):
                  for a in arms]
         intervals = region_reads.region_intervals(packages, walks[0], walks)
         wanted_ids = set(pkgs)
-        # The reads the arms map within FLANK letters of a region, as well as into it: the local graph has those flanks.
-        flanks = region_reads.flank_nodes(packages, walks[0], walks, FLANK, wanted_ids)
+        # The reads the arms map within READ_FLANK letters of a region, as well as into it.
+        flanks = region_reads.flank_nodes(packages, walks[0], walks, READ_FLANK, wanted_ids)
         for a, arm in enumerate(arms):
             mine = [x for x in intervals[a] if x[2] in wanted_ids]
             for read, rids in region_reads.read_regions(os.path.join(work, "arm_%s" % arm, "short.gaf.gz"), mine,

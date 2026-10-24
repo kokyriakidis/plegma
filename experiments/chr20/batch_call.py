@@ -165,19 +165,34 @@ def graph_of(task):
         rows = sampled(rows, pkg, prep_dir, sample)
     flanked = {a: meta["left"] + r + meta["right"] for a, r in rows.items()}
     g = induce.induce(flanked)
+    # The steps' invariants, checked here and reported (qc.tsv): every row spells its allele, every walk its flanked
+    # allele, CHM13's its window of chr20.
+    alleles = {a["id"]: a["seq"].upper() for a in pkg["alleles"]}
+    window = "".join(x.strip() for x in open(os.path.join(prep_dir, rid, "chr20.fa")) if not x.startswith(">")).upper()
+    ref = pkg.get("ref")
+    qc = {"alleles": len(alleles), "rows": len(rows),
+          "rows_spell": sum(1 for a, r in rows.items() if r.replace("-", "").upper() == alleles.get(a)),
+          "walks_spell": sum(1 for a, w in g.walks.items()
+                             if "".join(g.seq[n] for n in w).upper() == flanked[a].replace("-", "").upper()),
+          "chm13_window": int(ref in rows and (meta["left"] + alleles[ref] + meta["right"]).upper() == window),
+          "nodes": len(g.seq), "edges": len(g.edges), "columns": len(next(iter(rows.values())))}
     # vg haplotypes samples in call_region: the key says so (the rows are then all of them).
     key = hashlib.sha1(json.dumps([rid, sorted(rows.items())] + (["vg haplotypes"] if sample < 0 else []))
                        .encode()).hexdigest()[:20]
     weight = {a["id"]: a["weight"] for a in pkg["alleles"]}
     return rid, {"key": key, "rows": rows, "seq": g.seq, "edges": sorted(g.edges), "walks": g.walks,
-                 "ref": pkg.get("ref"), "weight": weight}, None
+                 "ref": pkg.get("ref"), "weight": weight, "qc": qc}, None
 
 
 def run(cmd, out=None, log=None):
     with open(out, "w") if out else open(os.devnull, "w") as o:
         proc = subprocess.run([str(c) for c in cmd], stdout=o, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(" ".join(str(c) for c in cmd[:3]) + ": " + proc.stderr[-400:])
+        # The cause first (a C++ exception's what(), or vg's error line), then the tail: a crash's stack trace
+        # otherwise buries it.
+        cause = [x.strip() for x in proc.stderr.splitlines() if "what():" in x or x.lstrip().startswith("error")]
+        raise RuntimeError(" ".join(str(c) for c in cmd[:3]) + ": " + " | ".join(cause[:2]) + " | " +
+                           proc.stderr[-300:])
 
 
 def call_region(task):
@@ -211,6 +226,8 @@ def call_region(task):
     vg = os.environ["VG"]
     prefix = os.path.join(d, "map")
     kept = None
+    qc = {"sampling": "vg haplotypes" if kff else "none"}
+    started = time.time()
     try:
         if kff:
             full = os.path.join(d, "full")
@@ -219,6 +236,8 @@ def call_region(task):
             run([vg, "haplotypes", "-t", "1", "-i", full + ".hapl", "-k", kff, "--include-reference", "--set-reference",
                  "CHM13", "--num-haplotypes", "32", "-g", sampled_gbz, full + ".gbz"])
             kept = sampled_alleles(vg, sampled_gbz, g)
+            qc["kept_alleles"] = len(kept)
+            qc["sampled_walks_unmatched"], qc["chm13_path_kept"] = sampled_unmatched(vg, sampled_gbz, g)
             # From a GBZ, autoindex writes the indexes only: the graph is sampled.gbz itself.
             run([vg, "autoindex", "-w", "sr-giraffe", "-G", sampled_gbz, "-p", prefix, "-t", "1", "-T", d])
             gbz = sampled_gbz
@@ -235,7 +254,9 @@ def call_region(task):
                 cmd = [vg, "giraffe"] + idx + sum((["-f", a] for a in args), [])
                 if len(args) == 2:
                     cmd += ["--fragment-mean", "401.7", "--fragment-stdev", "166.4"]
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode != 0:
+                    raise RuntimeError("giraffe: " + proc.stderr[-400:])
                 out.writelines(x + "\n" for x in proc.stdout.splitlines() if x and not x.startswith("@"))
         gafbase = os.environ["GAFBASE"]
         run([gafbase, "sort", gaf, "-o", gaf + ".sorted"])
@@ -245,7 +266,7 @@ def call_region(task):
         run([vg, "call", gbz, "-p", "CHM13#0#%s" % rid, "-d", "2", "-t", "1", "-s", "HG002", "--mismap-max", "0.95",
              "--read-likelihood", "--phased", "--gaf-base", db, "--gbz-base", gbz], vcf)
     except RuntimeError as error:
-        return rid, None, str(error), None
+        return rid, None, str(error), None, None
     header, body = [], []
     for line in open(vcf):
         if line.startswith("#"):
@@ -253,8 +274,88 @@ def call_region(task):
                 header.append(line)
         else:
             body.append(line)
+    qc.update(read_qc(src, gaf))
+    qc.update(call_qc(body))
+    qc["seconds"] = round(time.time() - started, 1)
     shutil.rmtree(d, ignore_errors=True)
-    return rid, header, body, kept
+    return rid, header, body, kept, qc
+
+
+def read_qc(src, gaf):
+    """The mapping's numbers: reads given (each mate one), alignments, mapped, at MAPQ 0, at MAPQ >= 30, mean
+    identity of the mapped (GAF's matches over its block), and those under 0.9 (forced: a read from elsewhere, or
+    reaching past the window)."""
+    given = 0
+    for name in ("R1", "R2", "single"):
+        with open(os.path.join(src, name + ".fq")) as f:
+            given += sum(1 for k, _ in enumerate(f) if k % 4 == 0)
+    aligned = mapped = q0 = q30 = low = 0
+    matches = block = 0
+    for line in open(gaf):
+        w = line.split("\t", 12)
+        aligned += 1
+        if w[5] == "*":
+            continue
+        mapped += 1
+        q = int(w[11])
+        q0 += q == 0
+        q30 += q >= 30
+        matches += int(w[9])
+        block += int(w[10])
+        low += int(w[9]) < 0.9 * int(w[10])
+    return {"reads": given, "alignments": aligned, "mapped": mapped, "mapq0": q0, "mapq30": q30,
+            "identity": round(matches / block, 4) if block else 0.0, "identity_below_0.9": low}
+
+
+def call_qc(body):
+    """The calls' numbers: records, records with an indel of 10 letters or more, their least and median GQ."""
+    gq = []
+    big = 0
+    for line in body:
+        w = line.rstrip("\n").split("\t")
+        if abs(max(len(a) for a in w[4].split(",")) - len(w[3])) < 10:
+            continue
+        big += 1
+        f = dict(zip(w[8].split(":"), w[9].split(":")))
+        gq.append(int(f["GQ"]) if f.get("GQ", ".").lstrip("-").isdigit() else 0)
+    gq.sort()
+    return {"records": len(body), "indel_records": big, "gq_min": gq[0] if gq else "",
+            "gq_median": gq[len(gq) // 2] if gq else ""}
+
+
+def sampled_unmatched(vg, gbz, g):
+    """The sampled haplotypes no allele spells whole (recombinants, which no row of the MSA is), and whether CHM13's
+    path still spells its window (test_arm.sh checks the same of chr20)."""
+    comp = str.maketrans("ACGT", "TGCA")
+    proc = subprocess.run([vg, "convert", "-f", gbz], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    seq, walks = {}, []
+    for line in proc.stdout.splitlines():
+        w = line.split("\t")
+        if w[0] == "S":
+            seq[w[1]] = w[2]
+        elif w[0] == "W":
+            walks.append((w[1], w[6]))
+    spelled = {"".join(g["seq"][n] for n in walk).upper() for walk in g["walks"].values()}
+    window = "".join(g["seq"][n] for n in g["walks"][g["ref"]]).upper()
+    unmatched = 0
+    chm13 = 0
+    for sample, steps in walks:
+        text, k = [], 0
+        while k < len(steps):
+            j = k + 1
+            while j < len(steps) and steps[j] not in "<>":
+                j += 1
+            s = seq[steps[k + 1 : j]]
+            text.append(s if steps[k] == ">" else s.translate(comp)[::-1])
+            k = j
+        hap = "".join(text).upper()
+        if steps.startswith("<"):
+            hap = hap.translate(comp)[::-1]
+        if sample == "CHM13":
+            chm13 = int(hap == window)
+        else:
+            unmatched += hap not in spelled
+    return unmatched, chm13
 
 
 def region_kff(prep_dir, rid):
@@ -390,6 +491,20 @@ def score(order, calls, header, prep_dir, d, jobs, truvari):
                         per[line.split("\t", 1)[0]][key] += 1
                         if key != "tp":
                             split[line.split("\t", 1)[0]][key].append(line)
+    # Small variants per region: aardvark marks each record (BD: TP, FN, FP) in its truth and query.
+    adir = os.path.join(d, "score", "batch.aardvark")
+    for part, wanted in (("truth.vcf.gz", ("TP", "FN")), ("query.vcf.gz", ("FP",))):
+        path = os.path.join(adir, part)
+        if not os.path.exists(path):
+            continue
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                w = line.rstrip("\n").split("\t")
+                fields = dict(zip(w[8].split(":"), w[9].split(":")))
+                if fields.get("BD") in wanted:
+                    per[w[0]]["sm_" + fields["BD"].lower()] += 1
     return r, sv, small, per, split
 
 
@@ -458,10 +573,12 @@ def main():
             t = time.time()
             tasks = [(rid, g, prep_dir, os.path.join(d, "work", rid), kff) for rid, g in todo.items()]
             with Pool(jobs) as pool:
-                for rid, header, body, kept in pool.imap_unordered(call_region, tasks):
+                for rid, header, body, kept, qc in pool.imap_unordered(call_region, tasks):
                     if header is None:
                         failed[rid] = body
                         continue
+                    with open(os.path.join(cache, todo[rid]["key"] + ".qc.json"), "w") as f:
+                        json.dump(qc, f)
                     if not os.path.exists(header_path):
                         with open(header_path, "w") as f:
                             f.writelines(header)
@@ -485,10 +602,13 @@ def main():
                 tasks = [(rid, g, prep_dir, os.path.join(d, "work", rid), None) for rid, g in again.items()
                          if not os.path.exists(os.path.join(cache, g["key"] + ".vcf"))]
                 with Pool(jobs) as pool:
-                    for rid, header, body, kept in pool.imap_unordered(call_region, tasks):
+                    for rid, header, body, kept, qc in pool.imap_unordered(call_region, tasks):
                         if header is not None:
                             with open(os.path.join(cache, again[rid]["key"] + ".vcf"), "w") as f:
                                 f.writelines(body)
+                            qc["sampling"] = "greedy (vg refused)"
+                            with open(os.path.join(cache, again[rid]["key"] + ".qc.json"), "w") as f:
+                                json.dump(qc, f)
                 for rid in again:
                     if os.path.exists(os.path.join(cache, again[rid]["key"] + ".vcf")):
                         failed.pop(rid, None)
@@ -524,6 +644,29 @@ def main():
             for part in ("fn", "fp"):
                 with gzip.open(os.path.join(sd, part + ".vcf.gz"), "wt") as f:
                     f.writelines(split[rid][part])
+        # Every step's numbers per region (graph_of's invariants, call_region's sampling, mapping and calls, the
+        # scores), and the regions whose invariants fail.
+        cols = ["alleles", "rows", "rows_spell", "walks_spell", "chm13_window", "columns", "nodes", "edges", "sampling",
+                "kept_alleles", "sampled_walks_unmatched", "chm13_path_kept", "reads", "alignments", "mapped", "mapq0", "mapq30",
+                "identity", "identity_below_0.9", "records", "indel_records", "gq_min", "gq_median", "seconds"]
+        broken = []
+        with open(os.path.join(d, "qc.tsv"), "w") as f:
+            f.write("region\t" + "\t".join(cols) + "\tsv_tp\tsv_fn\tsv_fp\tsm_tp\tsm_fn\tsm_fp\terror\n")
+            for rid in ids:
+                q = dict(graphs[rid]["qc"]) if rid in graphs else {}
+                qp = os.path.join(cache, graphs[rid]["key"] + ".qc.json") if rid in graphs else ""
+                if qp and os.path.exists(qp):
+                    q.update(json.load(open(qp)))
+                p = per.get(rid, collections.Counter())
+                f.write("%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n" % (
+                    rid, "\t".join(str(q.get(c, "")) for c in cols), p["tp"], p["fn"], p["fp"], p["sm_tp"], p["sm_fn"],
+                    p["sm_fp"], failed.get(rid, "")[:200]))
+                if q and (q.get("rows_spell") != q.get("rows") or q.get("walks_spell") != q.get("rows")
+                          or not q.get("chm13_window") or (q.get("reads") and not q.get("mapped"))
+                          or q.get("chm13_path_kept") == 0):
+                    broken.append(rid)
+        if broken:
+            print("   invariants failing in %d regions (qc.tsv): %s" % (len(broken), " ".join(broken[:10])))
         with open(os.path.join(d, "batch_calls.tsv"), "w") as f:
             f.write("region\tsv_tp\tsv_fn\tsv_fp\terror\n")
             for rid in ids:
