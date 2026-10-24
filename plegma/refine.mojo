@@ -10,6 +10,9 @@ one gains nothing. On a hotspot VNTR whose POA (abPOA's, or plegma's longest fir
 three passes took it to 1.13.
 """
 
+from std.os import getenv
+from std.sys import stderr
+from std.time import perf_counter_ns
 from karan import Aligner, Costs, Mode, Ties
 
 from .align import anchored_alignment
@@ -238,25 +241,29 @@ struct Partners(Movable):
                 self.facing[b][a] = ba^
 
 
-def _anchored_centre(rows: List[List[UInt8]], s: Int, partners: Partners, mut centre: List[Int]):
+def _columns_of(rows: List[List[UInt8]]) -> List[List[Int32]]:
+    """Each row's letters' columns."""
+    var out = List[List[Int32]]()
+    for r in range(len(rows)):
+        var cols = List[Int32]()
+        for c in range(len(rows[r])):
+            if rows[r][c] != GAP:
+                cols.append(Int32(c))
+        out.append(cols^)
+    return out^
+
+
+def _anchored_centre(
+    rows: List[List[UInt8]], s: Int, partners: Partners, mut centre: List[Int], column_of: List[List[Int32]]
+):
     """Where each column's band is centred for row `s`: the sequence's letters before the column as its confident
     anchors put them. Each other row votes, through its optimal pairwise alignment to the sequence, a column for
     every letter of the sequence; a letter is anchored where more than half of the rows vote one column, and the
     anchors kept are the most that rise in both letter and column (a longest increasing chain). Between them the
-    centre is interpolated."""
+    centre is interpolated. `column_of` is `_columns_of(rows)`, which the caller keeps while the rows stay."""
     var columns = len(rows[0])
     var n_rows = len(rows)
-    # Each row's letters' columns.
-    var column_of = List[List[Int32]]()
-    var n = 0
-    for r in range(n_rows):
-        var cols = List[Int32]()
-        for c in range(columns):
-            if rows[r][c] != GAP:
-                cols.append(Int32(c))
-        if r == s:
-            n = len(cols)
-        column_of.append(cols^)
+    var n = len(column_of[s])
     var anchor_j = List[Int]()
     var anchor_c = List[Int]()
     var votes = List[Int32]()
@@ -339,6 +346,161 @@ def _anchored_centre(rows: List[List[UInt8]], s: Int, partners: Partners, mut ce
             centre[c] = min(n, max(0, j0 + (c - c0) * (j1 - j0) // (c1 - c0)))
 
 
+struct Profile(Copyable, Movable):
+    """Every row's symbol counts per column, and per column how many rows hold a letter, start a gap or end one,
+    each row counting its weight: what `_realign` scores a row against, less that row's own share."""
+
+    var counts: List[Int32]
+    var held: List[Int32]
+    var starts: List[Int32]
+    var ends: List[Int32]
+    var total: Int32
+    var valid: Bool
+
+    def __init__(out self):
+        self.counts = List[Int32]()
+        self.held = List[Int32]()
+        self.starts = List[Int32]()
+        self.ends = List[Int32]()
+        self.total = 0
+        self.valid = False
+
+    def __init__(out self, rows: List[List[UInt8]], weights: List[Int]):
+        var columns = len(rows[0])
+        self.counts = List[Int32](length=columns * SYMBOLS, fill=0)
+        self.held = List[Int32](length=columns, fill=0)
+        self.starts = List[Int32](length=columns, fill=0)
+        self.ends = List[Int32](length=columns, fill=0)
+        self.total = 0
+        self.valid = True
+        for r in range(len(rows)):
+            self.add(rows[r], Int32(_w(weights, r)))
+
+    def add(mut self, row: List[UInt8], w: Int32):
+        """Counts `row` with weight `w` (a negative weight takes it away)."""
+        self.total += w
+        var was_letter = True
+        for c in range(len(row)):
+            var x = row[c]
+            self.counts[c * SYMBOLS + _symbol(x)] += w
+            if x != GAP:
+                self.held[c] += w
+                if not was_letter:
+                    self.ends[c] += w
+            elif was_letter:
+                self.starts[c] += w
+            was_letter = x != GAP
+
+
+comptime LANES = 8
+"""Band cells `_column_mg` takes at once."""
+
+
+def _column_mg(
+    cp: Pointer[Int32, _],
+    width: Int,
+    w2: Int,
+    prv: Int,
+    lo: Int,
+    shift: Int,
+    k_first: Int,
+    k_last: Int,
+    open_start: Int32,
+    open_held: Int32,
+    open_end: Int32,
+    gap_here: Int32,
+    unit: List[Int32],
+    symbol_of: List[Int],
+    mut m_buf: List[Int32],
+    mut g_buf: List[Int32],
+    mut m_how_buf: List[UInt8],
+    mut g_how_buf: List[UInt8],
+    mut unit_buf: List[Int32],
+):
+    """`_realign`'s M and G states for one column's band cells (`k_first` to `k_last`; BIG elsewhere), from the
+    previous column's (at `prv`, its band `shift` cells lower), LANES cells at a time: the same costs and the same
+    moves as cell by cell, ties going to M, then G, then O as there."""
+    comptime V = SIMD[DType.int32, LANES]
+    comptime H = SIMD[DType.uint8, LANES]
+    m_buf.resize(width + LANES, BIG)
+    g_buf.resize(width + LANES, BIG)
+    m_how_buf.resize(width + LANES, 0)
+    g_how_buf.resize(width + LANES, 0)
+    unit_buf.resize(width + LANES, 0)
+    for k in range(width + LANES):
+        m_buf[k] = BIG
+        g_buf[k] = BIG
+        m_how_buf[k] = 0
+        g_how_buf[k] = 0
+    # M: letter j - 1 (j = lo + k, j >= 1) from the previous column's cell k + shift - 1.
+    var m_lo = max(k_first, max(1 - lo, 1 - shift))
+    var m_hi = min(k_last, width - shift)
+    # G: from the previous column's cell k + shift.
+    var g_lo = max(k_first, -shift)
+    var g_hi = min(k_last, width - 1 - shift)
+    for k in range(m_lo, m_hi + 1):
+        unit_buf[k] = unit[symbol_of[lo + k - 1]]
+    var big = V(BIG)
+    var mb = m_buf.unsafe_ptr()
+    var gb = g_buf.unsafe_ptr()
+    var mh = m_how_buf.unsafe_ptr()
+    var gh = g_how_buf.unsafe_ptr()
+    var ub = unit_buf.unsafe_ptr()
+    var k = m_lo
+    while k <= m_hi:
+        var at = prv + k + shift - 1
+        var fm = cp.unsafe_offset(at).unsafe_load[width=LANES]()
+        var fg = cp.unsafe_offset(w2 + at).unsafe_load[width=LANES]()
+        var fo = cp.unsafe_offset(2 * w2 + at).unsafe_load[width=LANES]()
+        var best = big
+        var how = H(0)
+        var cand = fm.lt(big).select(fm + open_start, big)
+        var better = cand.lt(best)
+        best = better.select(cand, best)
+        cand = fg.lt(big).select(fg + open_start, big)
+        better = cand.lt(best)
+        best = better.select(cand, best)
+        how = better.select(H(1), how)
+        cand = fo.lt(big).select(fo, big)
+        better = cand.lt(best)
+        best = better.select(cand, best)
+        how = better.select(H(2), how)
+        best = best.lt(big).select(best + ub.unsafe_offset(k).unsafe_load[width=LANES](), best)
+        # Lanes past m_hi stay as they were: the buffers hold LANES spare cells, and the lanes there are rewritten below.
+        mb.unsafe_offset(k).unsafe_store(best)
+        mh.unsafe_offset(k).unsafe_store(how)
+        k += LANES
+    for t in range(m_hi + 1, min(m_hi + LANES + 1, width + LANES)):
+        m_buf[t] = BIG
+        m_how_buf[t] = 0
+    k = g_lo
+    while k <= g_hi:
+        var at = prv + k + shift
+        var fm = cp.unsafe_offset(at).unsafe_load[width=LANES]()
+        var fg = cp.unsafe_offset(w2 + at).unsafe_load[width=LANES]()
+        var fo = cp.unsafe_offset(2 * w2 + at).unsafe_load[width=LANES]()
+        var best = big
+        var how = H(0)
+        var cand = fm.lt(big).select(fm + open_held, big)
+        var better = cand.lt(best)
+        best = better.select(cand, best)
+        cand = fg.lt(big).select(fg + open_end, big)
+        better = cand.lt(best)
+        best = better.select(cand, best)
+        how = better.select(H(1), how)
+        cand = fo.lt(big).select(fo + open_held, big)
+        better = cand.lt(best)
+        best = better.select(cand, best)
+        how = better.select(H(2), how)
+        best = best.lt(big).select(best + gap_here, best)
+        gb.unsafe_offset(k).unsafe_store(best)
+        gh.unsafe_offset(k).unsafe_store(how)
+        k += LANES
+    for t in range(g_hi + 1, min(g_hi + LANES + 1, width + LANES)):
+        g_buf[t] = BIG
+        g_how_buf[t] = 0
+
+
 def _realign(
     mut rows: List[List[UInt8]],
     s: Int,
@@ -355,6 +517,7 @@ def _realign(
     gap: Int32 = 1,
     j_lo: List[Int] = List[Int](),
     j_hi: List[Int] = List[Int](),
+    whole: Profile = Profile(),
 ) -> Tuple[Int, Int]:
     """Row `s` realigned to the others' profile within `band` letters of its place (or of `centre`, when given),
     widened while the best path touches the band's edge, up to `max_band`; the rows rewritten (all-gap columns
@@ -368,7 +531,9 @@ def _realign(
     new row is kept only if its exact cost (`row_cost`) is no more than the present one's (or always, with `always`).
     `forced[j]`, where given and not -1, is the column letter j must take; `j_lo` and `j_hi`, where given, bound
     the letters placed before each column (len(rows[0]) + 1 of them): a corridor the row may not leave. Every other row counts its weight
-    (`weights`, 1 each where empty). Returns the exact costs before and after (equal when the row stays)."""
+    (`weights`, 1 each where empty). `whole`, where valid, is every row's `Profile` (the caller's, kept while the rows
+    stay): the others' is that less row `s`, not counted again. Returns the exact costs before and after (equal when
+    the row stays; without `always`, a row the DP leaves where it was returns 0, 0 and costs nothing more)."""
     var has_forced = len(forced) > 0
     var corridor = len(j_lo) > 0
     var columns = len(rows[0])
@@ -378,25 +543,17 @@ def _realign(
             others += Int32(_w(weights, r))
     # The others' symbol counts per column, and per column how many of them hold a letter, start a gap (a letter
     # in the column before), or end one (a gap before).
-    var counts = List[Int32](length=columns * SYMBOLS, fill=0)
-    var held = List[Int32](length=columns, fill=0)
-    var starts = List[Int32](length=columns, fill=0)
-    var ends = List[Int32](length=columns, fill=0)
-    for r in range(len(rows)):
-        if r == s:
-            continue
-        var was_letter = True
-        var w = Int32(_w(weights, r))
-        for c in range(columns):
-            var x = rows[r][c]
-            counts[c * SYMBOLS + _symbol(x)] += w
-            if x != GAP:
-                held[c] += w
-                if not was_letter:
-                    ends[c] += w
-            elif was_letter:
-                starts[c] += w
-            was_letter = x != GAP
+    var others_profile: Profile
+    if whole.valid:
+        others_profile = whole.copy()
+        others_profile.add(rows[s], -Int32(_w(weights, s)))
+    else:
+        others_profile = Profile(rows, weights)
+        others_profile.add(rows[s], -Int32(_w(weights, s)))
+    ref counts = others_profile.counts
+    ref held = others_profile.held
+    ref starts = others_profile.starts
+    ref ends = others_profile.ends
     var letters = List[UInt8]()
     var before = List[Int](length=columns + 1, fill=0)
     for c in range(columns):
@@ -406,18 +563,40 @@ def _realign(
     before[columns] = len(letters)
     var n = len(letters)
     var mid = centre.copy() if len(centre) == columns + 1 else before.copy()
+    var symbol_of = List[Int](capacity=n)
+    for j in range(n):
+        symbol_of.append(_symbol(letters[j]))
     var g = gap_open
     var b = band
     var steps = List[Int]()
     var mine = List[UInt8]()
+    # PLEGMA_REFINE_TRACE=2: each realignment's columns, letters, last band and cells swept, on stderr.
+    var trace = getenv("PLEGMA_REFINE_TRACE") == "2"
+    var swept = 0
+    var started = perf_counter_ns()
+    # The M and G states of a column read only the column before: without forced letters or a corridor, a band's
+    # worth of them at once in lanes (`_column_mg`), the O state then cell by cell along the column.
+    var lanes = not has_forced and not corridor
+    var m_buf = List[Int32]()
+    var g_buf = List[Int32]()
+    var m_how_buf = List[UInt8]()
+    var g_how_buf = List[UInt8]()
+    var unit_buf = List[Int32]()
     while True:
         var width = 2 * b + 1
         var cells = (columns + 1) * width
         # Costs for two columns only, rolling: state t's cell (c, j) at t * 2 * width + (c & 1) * width + j -
         # (mid[c] - b). Moves for every cell, the three states' in one byte (two bits each), as the traceback needs.
         var w2 = 2 * width
-        cost.resize(3 * w2, BIG)
+        # LANES cells past the third state: a lane load near its end reads them (and its result is dropped).
+        cost.resize(3 * w2 + LANES, BIG)
         moves.resize(cells, 0)
+        var cp = cost.unsafe_ptr()
+        var mp = moves.unsafe_ptr()
+        swept += cells
+        # Per column, what a cell's moves cost there, worked out once rather than in every cell of the band: the
+        # letter's cost against each symbol, and the gap openings against the column's starts, letters and ends.
+        var unit = List[Int32](length=SYMBOLS, fill=0)
         for c in range(columns + 1):
             var lo = mid[c] - b
             var base = c * width
@@ -427,7 +606,88 @@ def _realign(
             var prv = ((c - 1) & 1) * width
             # Opening against the rows holding a letter in this column (before the first: every row).
             var held_here = held[x] if c > 0 else others
+            var open_own = g * held_here
+            var own_letter = gap * others
+            var open_start = Int32(0)
+            var open_held = Int32(0)
+            var open_end = Int32(0)
+            var gap_here = Int32(0)
+            if c > 0:
+                var spread = gap * (others - held[x])
+                for t in range(SYMBOLS):
+                    unit[t] = mismatch * (held[x] - counts[x * SYMBOLS + t]) + spread
+                open_start = g * starts[x]
+                open_held = g * held[x]
+                open_end = g * ends[x]
+                gap_here = gap * held[x]
+            # The cells whose letter count is a place for one: inside the sequence and the corridor.
+            var j_first = 0
+            var j_last = n
+            if corridor:
+                j_first = max(j_first, j_lo[c])
+                j_last = min(j_last, j_hi[c])
+            var k_first = max(0, j_first - lo)
+            var k_last = min(width - 1, j_last - lo)
+            if lanes and c > 0:
+                _column_mg(
+                    cp,
+                    width,
+                    w2,
+                    prv,
+                    lo,
+                    lo - lo_prev,
+                    k_first,
+                    k_last,
+                    open_start,
+                    open_held,
+                    open_end,
+                    gap_here,
+                    unit,
+                    symbol_of,
+                    m_buf,
+                    g_buf,
+                    m_how_buf,
+                    g_how_buf,
+                    unit_buf,
+                )
+                for k in range(width):
+                    if k < k_first or k > k_last:
+                        cp[unsafe_offset=cur + k] = BIG
+                        cp[unsafe_offset=w2 + cur + k] = BIG
+                        cp[unsafe_offset=2 * w2 + cur + k] = BIG
+                        mp[unsafe_offset=base + k] = 0
+                        continue
+                    var j = lo + k
+                    var o_best = BIG
+                    var o_how = MATCHED
+                    # O: letter j - 1 in a column of its own after column x.
+                    if j > 0 and k > 0:
+                        var from_m = cp[unsafe_offset=cur + k - 1]
+                        var from_g = cp[unsafe_offset=w2 + cur + k - 1]
+                        var from_o = cp[unsafe_offset=2 * w2 + cur + k - 1]
+                        if from_m < BIG and from_m + open_own < o_best:
+                            o_best = from_m + open_own
+                            o_how = MATCHED
+                        if from_g < BIG and from_g + open_own < o_best:
+                            o_best = from_g + open_own
+                            o_how = GAPPED
+                        if from_o < BIG and from_o < o_best:
+                            o_best = from_o
+                            o_how = OWN
+                        if o_best < BIG:
+                            o_best += own_letter
+                    cp[unsafe_offset=cur + k] = m_buf[k]
+                    cp[unsafe_offset=w2 + cur + k] = g_buf[k]
+                    cp[unsafe_offset=2 * w2 + cur + k] = o_best
+                    mp[unsafe_offset=base + k] = m_how_buf[k] | (g_how_buf[k] << 2) | (o_how << 4)
+                continue
             for k in range(width):
+                if k < k_first or k > k_last:
+                    cp[unsafe_offset=cur + k] = BIG
+                    cp[unsafe_offset=w2 + cur + k] = BIG
+                    cp[unsafe_offset=2 * w2 + cur + k] = BIG
+                    mp[unsafe_offset=base + k] = 0
+                    continue
                 var j = lo + k
                 var m_best = BIG
                 var m_how = MATCHED
@@ -435,68 +695,64 @@ def _realign(
                 var g_how = MATCHED
                 var o_best = BIG
                 var o_how = MATCHED
-                if j >= 0 and j <= n and (not corridor or (j >= j_lo[c] and j <= j_hi[c])):
-                    if c == 0 and j == 0:
-                        m_best = 0
-                    if c > 0:
-                        # M: letter j - 1 in column x.
-                        if j > 0 and (not has_forced or forced[j - 1] < 0 or forced[j - 1] == x):
-                            var km = j - 1 - lo_prev
-                            if km >= 0 and km < width:
-                                var unit = mismatch * (
-                                    held[x] - counts[x * SYMBOLS + _symbol(letters[j - 1])]
-                                ) + gap * (others - held[x])
-                                var from_m = cost[prv + km]
-                                var from_g = cost[w2 + prv + km]
-                                var from_o = cost[2 * w2 + prv + km]
-                                if from_m < BIG and from_m + g * starts[x] < m_best:
-                                    m_best = from_m + g * starts[x]
-                                    m_how = MATCHED
-                                if from_g < BIG and from_g + g * starts[x] < m_best:
-                                    m_best = from_g + g * starts[x]
-                                    m_how = GAPPED
-                                if from_o < BIG and from_o < m_best:
-                                    m_best = from_o
-                                    m_how = OWN
-                                if m_best < BIG:
-                                    m_best += unit
-                        # G: the sequence gapped in column x.
-                        var kp = j - lo_prev
-                        if kp >= 0 and kp < width:
-                            var from_m = cost[prv + kp]
-                            var from_g = cost[w2 + prv + kp]
-                            var from_o = cost[2 * w2 + prv + kp]
-                            if from_m < BIG and from_m + g * held[x] < g_best:
-                                g_best = from_m + g * held[x]
-                                g_how = MATCHED
-                            if from_g < BIG and from_g + g * ends[x] < g_best:
-                                g_best = from_g + g * ends[x]
-                                g_how = GAPPED
-                            if from_o < BIG and from_o + g * held[x] < g_best:
-                                g_best = from_o + g * held[x]
-                                g_how = OWN
-                            if g_best < BIG:
-                                g_best += gap * held[x]
-                    # O: letter j - 1 in a column of its own after column x.
-                    if j > 0 and k > 0 and (not has_forced or forced[j - 1] < 0):
-                        var from_m = cost[cur + k - 1]
-                        var from_g = cost[w2 + cur + k - 1]
-                        var from_o = cost[2 * w2 + cur + k - 1]
-                        if from_m < BIG and from_m + g * held_here < o_best:
-                            o_best = from_m + g * held_here
-                            o_how = MATCHED
-                        if from_g < BIG and from_g + g * held_here < o_best:
-                            o_best = from_g + g * held_here
-                            o_how = GAPPED
-                        if from_o < BIG and from_o < o_best:
-                            o_best = from_o
-                            o_how = OWN
-                        if o_best < BIG:
-                            o_best += gap * others
-                cost[cur + k] = m_best
-                cost[w2 + cur + k] = g_best
-                cost[2 * w2 + cur + k] = o_best
-                moves[base + k] = m_how | (g_how << 2) | (o_how << 4)
+                if c == 0 and j == 0:
+                    m_best = 0
+                if c > 0:
+                    # M: letter j - 1 in column x.
+                    if j > 0 and (not has_forced or forced[j - 1] < 0 or forced[j - 1] == x):
+                        var km = j - 1 - lo_prev
+                        if km >= 0 and km < width:
+                            var from_m = cp[unsafe_offset=prv + km]
+                            var from_g = cp[unsafe_offset=w2 + prv + km]
+                            var from_o = cp[unsafe_offset=2 * w2 + prv + km]
+                            if from_m < BIG and from_m + open_start < m_best:
+                                m_best = from_m + open_start
+                                m_how = MATCHED
+                            if from_g < BIG and from_g + open_start < m_best:
+                                m_best = from_g + open_start
+                                m_how = GAPPED
+                            if from_o < BIG and from_o < m_best:
+                                m_best = from_o
+                                m_how = OWN
+                            if m_best < BIG:
+                                m_best += unit[symbol_of[j - 1]]
+                    # G: the sequence gapped in column x.
+                    var kp = j - lo_prev
+                    if kp >= 0 and kp < width:
+                        var from_m = cp[unsafe_offset=prv + kp]
+                        var from_g = cp[unsafe_offset=w2 + prv + kp]
+                        var from_o = cp[unsafe_offset=2 * w2 + prv + kp]
+                        if from_m < BIG and from_m + open_held < g_best:
+                            g_best = from_m + open_held
+                            g_how = MATCHED
+                        if from_g < BIG and from_g + open_end < g_best:
+                            g_best = from_g + open_end
+                            g_how = GAPPED
+                        if from_o < BIG and from_o + open_held < g_best:
+                            g_best = from_o + open_held
+                            g_how = OWN
+                        if g_best < BIG:
+                            g_best += gap_here
+                # O: letter j - 1 in a column of its own after column x.
+                if j > 0 and k > 0 and (not has_forced or forced[j - 1] < 0):
+                    var from_m = cp[unsafe_offset=cur + k - 1]
+                    var from_g = cp[unsafe_offset=w2 + cur + k - 1]
+                    var from_o = cp[unsafe_offset=2 * w2 + cur + k - 1]
+                    if from_m < BIG and from_m + open_own < o_best:
+                        o_best = from_m + open_own
+                        o_how = MATCHED
+                    if from_g < BIG and from_g + open_own < o_best:
+                        o_best = from_g + open_own
+                        o_how = GAPPED
+                    if from_o < BIG and from_o < o_best:
+                        o_best = from_o
+                        o_how = OWN
+                    if o_best < BIG:
+                        o_best += own_letter
+                cp[unsafe_offset=cur + k] = m_best
+                cp[unsafe_offset=w2 + cur + k] = g_best
+                cp[unsafe_offset=2 * w2 + cur + k] = o_best
+                mp[unsafe_offset=base + k] = m_how | (g_how << 2) | (o_how << 4)
         var end = n - (mid[columns] - b)
         var final_state = 0
         var final_cost = BIG
@@ -540,6 +796,33 @@ def _realign(
             b = min(2 * b, max_band)
             continue
         break
+    if trace:
+        print(
+            "realign",
+            s,
+            "columns",
+            columns,
+            "letters",
+            n,
+            "band",
+            b,
+            "cells",
+            swept,
+            "dp_ms",
+            Float64(perf_counter_ns() - started) / 1e6,
+            file=stderr,
+        )
+    if not always and len(steps) == columns:
+        # The DP's row where the row already is (every step its own column, in order, the same letter or gap): the
+        # rows would be rebuilt as they are, at no change of cost.
+        var same = True
+        for t in range(len(steps)):
+            var c = columns - 1 - t
+            if steps[t] != c or mine[t] != rows[s][c]:
+                same = False
+                break
+        if same:
+            return (0, 0)
     var fresh = List[List[UInt8]]()
     for r in range(len(rows)):
         var row = List[UInt8](capacity=len(steps))
@@ -807,7 +1090,8 @@ def _merge_groups(
         # (mid[i] - b); moves for every cell, the three states' in one byte. M pairs A's column i - 1 with B's j - 1,
         # A (GAPPED) takes A's column i - 1 alone, B (OWN) takes B's column j - 1 alone.
         var w2 = 2 * width
-        cost.resize(3 * w2, BIG)
+        # LANES cells past the third state: a lane load near its end reads them (and its result is dropped).
+        cost.resize(3 * w2 + LANES, BIG)
         moves.resize(cells, 0)
         for i in range(la + 1):
             var lo = mid[i] - b
@@ -1029,11 +1313,21 @@ def refine(
     var row_band = max(band, period + 2 * EDGE + 8) if period > 0 else band
     var groups_band = max(group_band, 2 * period + 16) if period > 0 else group_band
     var last = _objective(work, gap_open, weight, mismatch, gap)
-    for _ in range(passes):
+    # The rows' column maps and profile, rebuilt only after a move changed the rows: in the later passes most rows
+    # stay, and rebuilding both for every row cost each pass the rows' square times the columns.
+    var column_of = _columns_of(work)
+    var whole = Profile(work, weight)
+    # PLEGMA_REFINE_TRACE=1: each pass's rows moved, objective and seconds on stderr.
+    var trace = getenv("PLEGMA_REFINE_TRACE") == "1"
+    for pass_number in range(passes):
+        var moved = 0
+        var pass_start = perf_counter_ns()
         for s in range(len(work)):
             centre.clear()
             if anchored:
-                _anchored_centre(work, s, partners, centre)
+                _anchored_centre(work, s, partners, centre, column_of)
+            var width_before = len(work[0])
+            var row_before = work[s].copy()
             _ = _realign(
                 work,
                 s,
@@ -1048,7 +1342,15 @@ def refine(
                 weight,
                 Int32(mismatch),
                 Int32(gap),
+                List[Int](),
+                List[Int](),
+                whole,
             )
+            if len(work[0]) != width_before or work[s] != row_before:
+                moved += 1
+                column_of = _columns_of(work)
+                whole = Profile(work, weight)
+        var rows_seconds = Float64(perf_counter_ns() - pass_start) / 1e9
         if group_band > 0 or period > 0:
             var all_groups = _tree_groups(work)
             if period > 0:
@@ -1076,7 +1378,25 @@ def refine(
                     Int32(mismatch),
                     Int32(gap),
                 )
+            column_of = _columns_of(work)
+            whole = Profile(work, weight)
         var now = _objective(work, gap_open, weight, mismatch, gap)
+        if trace:
+            print(
+                "refine pass",
+                pass_number,
+                "rows",
+                len(work),
+                "moved",
+                moved,
+                "objective",
+                now,
+                "rows s",
+                rows_seconds,
+                "all s",
+                Float64(perf_counter_ns() - pass_start) / 1e9,
+                file=stderr,
+            )
         # A pass gaining under 1/min_gain of the objective (0.1%) ends the refinement: the later passes of a long run
         # gain little. min_gain 0: only a pass gaining nothing does.
         if now >= last or (last - now) * min_gain < last:

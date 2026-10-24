@@ -693,7 +693,8 @@ def _poa(input: String, options: Options) raises -> String:
                 options.sp_passes,
                 options.sp_band,
                 options.sp_max_band,
-                True,
+                # PLEGMA_REFINE_UNANCHORED=1 (an experiment): each row's band centred where it is, no partners aligned.
+                getenv("PLEGMA_REFINE_UNANCHORED") != "1",
                 # The bands' centres come from pairwise alignments at -A's vote costs (vntr-eval's affine): under the
                 # reference's two-piece costs karan may refuse a divergent pair at its default memory.
                 Costs.affine(4, 6, 2),
