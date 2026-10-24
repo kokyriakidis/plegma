@@ -1018,6 +1018,196 @@ def on_reference(seqs: List[List[UInt8]], costs: Costs) raises -> List[List[UInt
     return out^
 
 
+comptime TREE_K = 15
+"""`on_tree`'s k-mers, for each sequence's nearest relative."""
+
+
+def _kmer_counts(seq: List[UInt8]) -> List[UInt64]:
+    """The sequence's k-mers of `TREE_K` ACGT letters as 2-bit codes, sorted, a k-mer as often as it occurs (copies
+    of a tandem unit count apart, so two arrays differing in copy number differ here)."""
+    var out = List[UInt64]()
+    var code = UInt64(0)
+    var valid = 0
+    var mask = (UInt64(1) << UInt64(2 * TREE_K)) - 1
+    for x in seq:
+        var b: UInt64
+        if x == UInt8(ord("A")):
+            b = 0
+        elif x == UInt8(ord("C")):
+            b = 1
+        elif x == UInt8(ord("G")):
+            b = 2
+        elif x == UInt8(ord("T")):
+            b = 3
+        else:
+            valid = 0
+            continue
+        code = ((code << 2) | b) & mask
+        valid += 1
+        if valid >= TREE_K:
+            out.append(code)
+    sort(out)
+    return out^
+
+
+def _similarity(a: List[UInt64], b: List[UInt64]) -> Float64:
+    """The weighted Jaccard index of two sorted k-mer multisets: the k-mers they share (each as often as the rarer
+    holds it) over the k-mers either holds."""
+    var shared = 0
+    var i = 0
+    var j = 0
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            shared += 1
+            i += 1
+            j += 1
+        elif a[i] < b[j]:
+            i += 1
+        else:
+            j += 1
+    var union = len(a) + len(b) - shared
+    return Float64(shared) / Float64(union) if union > 0 else 0.0
+
+
+struct _Columns(Movable):
+    """An MSA's columns as a linked list between a head (0) and a tail (1), so columns go in anywhere for free; their
+    order is read once at the end."""
+
+    var next: List[Int]
+    var prev: List[Int]
+
+    def __init__(out self):
+        self.next = [1, 1]
+        self.prev = [0, 0]
+
+    def before(mut self, x: Int) -> Int:
+        """A new column just before column `x`."""
+        var id = len(self.next)
+        var p = self.prev[x]
+        self.next.append(x)
+        self.prev.append(p)
+        self.next[p] = id
+        self.prev[x] = id
+        return id
+
+    def ranks(self) -> List[Int]:
+        """Each column's place in the MSA, from 0 (the head and tail -1)."""
+        var rank = List[Int](length=len(self.next), fill=-1)
+        var at = self.next[0]
+        var k = 0
+        while at != 1:
+            rank[at] = k
+            k += 1
+            at = self.next[at]
+        return rank^
+
+
+def on_tree(seqs: List[List[UInt8]], costs: Costs, share: Float64 = 0.0) raises -> List[List[UInt8]]:
+    """The MSA of `seqs` along a tree rooted at the first, the reference: each distinct sequence aligned exactly to
+    its parent (karan, `costs`, gaps shifted left), its letters taking the parent's columns and those it inserts new
+    columns just before the parent's next letter. A difference a family of sequences shares is made once, on the
+    tree edge into the family, and every member inherits it the same way: a copy-number change most of the panel
+    carries is one deletion of the reference for all of them, an allele that adds copies to it that deletion and an
+    insertion, where aligning each to the reference on its own (`on_reference`) splits every member's change at
+    places of its own.
+
+    The centres, the reference and every sequence at least `share` of the inputs spell (a sequence weighs as many as
+    spell it; 0: every one), join first, nearest first (Prim's, on the weighted Jaccard index of k-mer multisets),
+    each through its most similar centre already in; then every other through its most similar centre. A family
+    hangs one edge below its centre: along a chain of near relatives the small differences of every edge add up to a
+    family's change split in pieces. Rows in `seqs`' order."""
+    var n = len(seqs)
+    if n == 0:
+        return List[List[UInt8]]()
+    var distinct = List[Int]()
+    var of = List[Int](length=n, fill=-1)
+    for k in range(n):
+        for d in range(len(distinct)):
+            if seqs[distinct[d]] == seqs[k]:
+                of[k] = d
+                break
+        if of[k] < 0:
+            of[k] = len(distinct)
+            distinct.append(k)
+    var m = len(distinct)
+    var weight = List[Int](length=m, fill=0)
+    for k in range(n):
+        weight[of[k]] += 1
+    var centre = List[Bool](length=m, fill=False)
+    for d in range(m):
+        centre[d] = d == 0 or Float64(weight[d]) >= share * Float64(n)
+    var kmers = List[List[UInt64]]()
+    for d in range(m):
+        kmers.append(_kmer_counts(seqs[distinct[d]]))
+    # The centres heaviest first from the reference (the commonest allele takes its own alignment to the reference,
+    # a lighter one its relation to a heavier), each joining through the most similar centre already in; the others
+    # after, each through its most similar centre. With every sequence a centre (`share` 0), Prim's order instead.
+    var parent = List[Int](length=m, fill=0)
+    var near = List[Float64](length=m, fill=-1.0)
+    var done = List[Bool](length=m, fill=False)
+    var order = List[Int]()
+    var at = 0
+    while at >= 0:
+        done[at] = True
+        order.append(at)
+        var next = -1
+        for d in range(m):
+            if done[d]:
+                continue
+            var s = _similarity(kmers[at], kmers[d])
+            if s > near[d]:
+                near[d] = s
+                parent[d] = at
+            if centre[d] and (
+                next < 0
+                or (share > 0.0 and weight[d] > weight[next])
+                or ((share == 0.0 or weight[d] == weight[next]) and near[d] > near[next])
+            ):
+                next = d
+        at = next
+    for d in range(m):
+        if not done[d]:
+            order.append(d)
+    var columns = _Columns()
+    var col_of = List[List[Int]]()
+    for _ in range(m):
+        col_of.append(List[Int]())
+    for _ in range(len(seqs[distinct[0]])):
+        col_of[0].append(columns.before(1))
+    var aligner = Aligner()
+    for t in range(1, m):
+        var d = order[t]
+        var p = parent[d]
+        ref c = seqs[distinct[p]]
+        ref q = seqs[distinct[d]]
+        var found = aligner.align(Span(c), Span(q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY)
+        var runs = cigar_runs(found.cigar)
+        var i = 0
+        for x in range(len(runs.ops)):
+            var op = runs.ops[x]
+            for _ in range(runs.counts[x]):
+                if op == DELETION:
+                    i += 1
+                elif op == INSERTION:
+                    col_of[d].append(columns.before(col_of[p][i] if i < len(c) else 1))
+                else:
+                    col_of[d].append(col_of[p][i])
+                    i += 1
+    var rank = columns.ranks()
+    var width = len(columns.next) - 2
+    var rows_of = List[List[UInt8]]()
+    for d in range(m):
+        ref q = seqs[distinct[d]]
+        var row = List[UInt8](length=width, fill=GAP)
+        for j in range(len(q)):
+            row[rank[col_of[d][j]]] = q[j]
+        rows_of.append(row^)
+    var out = List[List[UInt8]]()
+    for k in range(n):
+        out.append(rows_of[of[k]].copy())
+    return out^
+
+
 def progressive(
     seqs: List[List[UInt8]],
     passes: Int = 20,

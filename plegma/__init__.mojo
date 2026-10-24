@@ -40,7 +40,8 @@ is implementation and may change.
   placed sequence votes for, MUMs then SMEMs then optimal alignments; refined;
   for a tandem array, also a start aligned copy by copy, the cheaper kept);
   its votes' costs `UNIT_VOTES`, `PRICED_VOTES`, `AFFINE_VOTES`, `TWO_PIECE_VOTES`; `on_reference`, the MSA
-  anchored on its first sequence (each other aligned to it exactly), for calling variants against that reference.
+  anchored on its first sequence (each other aligned to it exactly), for calling variants against that reference;
+  `on_tree`, the same along a tree from the reference through the heaviest sequences (an experiment).
 - Tandem arrays: `tandem_repeat` -> `Repeat` (a sequence's array and period),
   `tandem_layout` -> `Layout` (a region's arrays cut into copies phased by one
   unit, the copies aligned as symbols on their sum of pairs, then as letters).
@@ -82,6 +83,6 @@ from .kernel import (
 from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window
 from .polish import polish
-from .progressive import AFFINE_VOTES, PRICED_VOTES, TWO_PIECE_VOTES, UNIT_VOTES, on_reference, progressive
+from .progressive import AFFINE_VOTES, PRICED_VOTES, TWO_PIECE_VOTES, UNIT_VOTES, on_reference, on_tree, progressive
 from .refine import gap_opens, objective, refine, sum_of_pairs
 from .units import Layout, Repeat, tandem_layout, tandem_repeat

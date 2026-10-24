@@ -4,10 +4,14 @@ parallel (seconds each), its calls cached by its MSA, so a rerun maps and calls 
 then all of them scored at once.
 
 usage: python3 -I experiments/chr20/batch_call.py <prep dir> <packages.jsonl.gz> <out dir>
-           <label>=<msas.jsonl.gz | plegma flags> [...] [--regions a,b|file] [--jobs n]
+           <label>=<msas.jsonl.gz | plegma flags> [...] [--regions a,b|file] [--jobs n] [--seed-rows] [--sample n]
 
 Prep is local_call.py prep's (each region's flanks, reads, CHM13 slice and truth). Per label:
-1. each region's MSA (in parallel; as local_call.py makes it), flanked by CHM13's flanks and induced into a graph
+1. each region's MSA (in parallel; as local_call.py makes it; plegma's cached by the binary, the flags and the alleles,
+   and with `--seed-rows` taken from a previous run's <out dir>/<label>.<region>/rows.json when not cached yet),
+   restricted (`--sample`, 32; 0 keeps all) to CHM13's row and the alleles the region's reads support best, as the
+   production pipeline's vg haplotypes samples 32 haplotypes by the sample's k-mers before mapping (a graph of every
+   allele, hundreds of haplotypes, takes minutes to index and map and genotypes a harder graph than production's), flanked by CHM13's flanks and induced into a graph
    (pgrealign's induce.py), and a key: the hash of its rows;
 2. each region whose key has no cached calls (<out dir>/cache/<key>.vcf), in parallel: its graph as a GFA (its
    CHM13 walk the contig `CHM13#0#<region>`, each allele a haplotype walk per haplotype spelling it, up to
@@ -38,20 +42,93 @@ sys.path.insert(0, HERE)
 import local_call  # noqa: E402
 
 
+def msa_key(source, pkg):
+    """The key of a region's MSA made by plegma flags: the binary, the flags, the environment switches plegma reads and
+    the region's alleles."""
+    binary = os.environ.get("PLEGMA", "")
+    stamp = ""
+    if binary and os.path.exists(binary):
+        st = os.stat(binary)
+        stamp = "%d.%d" % (st.st_size, int(st.st_mtime))
+    alleles = sorted((a["id"], a["seq"].upper(), a["weight"]) for a in pkg["alleles"])
+    # The environment switches plegma reads (PLEGMA_QCOSTS, PLEGMA_VOTERS, ...) and WEIGHTED change the MSA too.
+    switches = sorted((k, v) for k, v in os.environ.items() if (k.startswith("PLEGMA_") or k == "WEIGHTED"))
+    text = json.dumps([binary, stamp, source, pkg.get("ref"), alleles, switches])
+    return hashlib.sha1(text.encode()).hexdigest()[:20]
+
+
+K = 29
+
+
+def read_kmers(prep_dir, rid):
+    """The 29-mers of a region's reads, both strands."""
+    comp = str.maketrans("ACGT", "TGCA")
+    out = set()
+    for name in ("R1", "R2", "single"):
+        path = os.path.join(prep_dir, rid, name + ".fq")
+        with open(path) as f:
+            for k, line in enumerate(f):
+                if k % 4 != 1:
+                    continue
+                seq = line.strip().upper()
+                for s in (seq, seq.translate(comp)[::-1]):
+                    for i in range(len(s) - K + 1):
+                        out.add(s[i : i + K])
+    return out
+
+
+def sampled(rows, pkg, prep_dir, count):
+    """The MSA restricted to CHM13's row and the `count` alleles the region's reads support best (an allele's distinct
+    29-mers the reads hold less those they do not, then its haplotypes: an allele the reads fit whole outranks a
+    shorter one whose fewer k-mers they also hold), as vg haplotypes samples the haplotypes the production graph keeps
+    by the sample's k-mers; the columns no kept row uses dropped."""
+    kmers = read_kmers(prep_dir, pkg["id"])
+    weight = {a["id"]: a["weight"] for a in pkg["alleles"]}
+    score = {}
+    for a, r in rows.items():
+        seq = r.replace("-", "")
+        mine = {seq[i : i + K] for i in range(len(seq) - K + 1)}
+        held = len(mine & kmers)
+        score[a] = (held - (len(mine) - held), weight.get(a, 0))
+    by_seq = {}
+    for a in sorted(rows, key=lambda a: score[a], reverse=True):
+        by_seq.setdefault(rows[a].replace("-", ""), a)
+    keep = set(list(by_seq.values())[:count]) | {pkg.get("ref")}
+    kept = {a: r for a, r in rows.items() if a in keep}
+    width = len(next(iter(kept.values())))
+    cols = [c for c in range(width) if any(r[c] != "-" for r in kept.values())]
+    return {a: "".join(r[c] for c in cols) for a, r in kept.items()}
+
+
 def graph_of(task):
-    """A region's MSA rows, its flanked graph and the rows' key."""
-    label, source, pkg, msas, prep_dir = task
+    """A region's MSA rows (cached by msa_key when plegma makes them; with `seed`, a previous run's rows.json of the
+    label taken as the MSA when the cache has none), its flanked graph and the rows' key."""
+    label, source, pkg, msas, prep_dir, cache, seed, sample = task
     sys.path.insert(0, os.environ["VNTR_PGREALIGN"])
     from pgrealign import induce  # noqa: E402
 
     rid = pkg["id"]
     meta = json.load(open(os.path.join(prep_dir, rid, "region.json")))
+    rows = None
+    cached = None
+    if not source.endswith(".jsonl.gz"):
+        cached = os.path.join(cache, "msa." + msa_key(source, pkg) + ".json")
+        if os.path.exists(cached):
+            rows = json.load(open(cached))
+        elif seed and os.path.exists(seed):
+            rows = json.load(open(seed))
     try:
-        rows = local_call.msa_rows(source, pkg, msas)
+        if rows is None:
+            rows = local_call.msa_rows(source, pkg, msas)
     except subprocess.CalledProcessError as error:
         return rid, None, "plegma failed: %s" % (error.stderr or "")[-120:]
+    if cached and rows is not None and not os.path.exists(cached):
+        with open(cached, "w") as f:
+            json.dump(rows, f)
     if rows is None:
         return rid, None, "no MSA"
+    if sample > 0:
+        rows = sampled(rows, pkg, prep_dir, sample)
     flanked = {a: meta["left"] + r + meta["right"] for a, r in rows.items()}
     g = induce.induce(flanked)
     key = hashlib.sha1(json.dumps([rid, sorted(rows.items())]).encode()).hexdigest()[:20]
@@ -132,6 +209,12 @@ def main():
     if "--jobs" in args:
         jobs = int(args[args.index("--jobs") + 1])
         del args[args.index("--jobs") : args.index("--jobs") + 2]
+    sample = 32
+    if "--sample" in args:
+        sample = int(args[args.index("--sample") + 1])
+        del args[args.index("--sample") : args.index("--sample") + 2]
+    seed_rows = "--seed-rows" in args
+    args = [a for a in args if a != "--seed-rows"]
     chosen = None
     if "--regions" in args:
         chosen = local_call.region_ids(args[args.index("--regions") + 1])
@@ -162,7 +245,8 @@ def main():
                     r = json.loads(line)
                     if r["id"] in pkgs:
                         msas[r["id"]] = r
-        tasks = [(label, source, pkgs[i], {i: msas[i]} if i in msas else {}, prep_dir) for i in ids]
+        tasks = [(label, source, pkgs[i], {i: msas[i]} if i in msas else {}, prep_dir, cache,
+                  os.path.join(out_dir, "%s.%s" % (label, i), "rows.json") if seed_rows else None, sample) for i in ids]
         graphs, failed = {}, {}
         with Pool(jobs) as pool:
             for rid, g, error in pool.imap_unordered(graph_of, tasks):
@@ -224,7 +308,14 @@ def main():
                     lines = f.readlines()
                 if head is None:
                     head = [x for x in lines if x.startswith("#") and not x.startswith("##contig")]
-                records += ["%s\t%s" % (rid, x.split("\t", 1)[1]) for x in lines if not x.startswith("#")]
+                # Only records wholly inside the window: one reaching past its end has a reference allele the local
+                # reference no longer spells, which bcftools norm refuses.
+                for x in lines:
+                    if x.startswith("#"):
+                        continue
+                    w = x.split("\t", 4)
+                    if int(w[1]) - 1 + len(w[3]) <= lengths[rid]:
+                        records.append("%s\t%s" % (rid, x.split("\t", 1)[1]))
             path = os.path.join(c, "truth.batch.%s.vcf" % kind)
             with open(path, "w") as f:
                 f.writelines(head[:-1])

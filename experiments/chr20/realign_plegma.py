@@ -33,13 +33,16 @@ TIMEOUT = 900
 MAX_REFINED = 100000
 
 
-def plegma_rows(seqs, timeout):
-    """plegma's MSA of the distinct sequences `seqs` (a list), as rows in the same order."""
+def plegma_rows(seqs, timeout, copies=None):
+    """plegma's MSA of the distinct sequences `seqs` (a list), as rows in the same order; with `copies`, each written
+    as many times as it says (so plegma weighs a sequence by the haplotypes spelling it)."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "in.fa")
         with open(path, "w") as f:
             for k, s in enumerate(seqs):
                 f.write(">s%d\n%s\n" % (k, s))
+                for c in range((copies or {}).get(s, 1) - 1):
+                    f.write(">s%d_%d\n%s\n" % (k, c, s))
         flags = FLAGS if len(seqs) <= MAX_REFINED else [x for x in FLAGS if x != "-I" and not re.match(r"^\d+(,\d+)*$", x)]
         out = subprocess.run([PLEGMA] + flags + ["-r", "1", path], capture_output=True, text=True, timeout=timeout)
         if out.returncode != 0:
@@ -160,7 +163,13 @@ def realign(package):
         if len(distinct) == 1:
             msa = [distinct[0]]
         else:
-            msa = plegma_rows(distinct, TIMEOUT)
+            # WEIGHTED=1: each distinct sequence once per haplotype spelling it (-A -Q's centre tree needs weights).
+            copies = None
+            if os.environ.get("WEIGHTED") == "1":
+                copies = {}
+                for a in alleles:
+                    copies[a["seq"].upper()] = copies.get(a["seq"].upper(), 0) + a["weight"]
+            msa = plegma_rows(distinct, TIMEOUT, copies)
         row_of = dict(zip(distinct, msa))
         order = [a["id"] for a in alleles]
         rows = {a["id"]: row_of[a["seq"].upper()] for a in alleles}

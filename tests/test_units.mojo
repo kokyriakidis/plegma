@@ -3,7 +3,7 @@ from std.testing import assert_equal, assert_true, TestSuite
 
 from karan import Costs
 
-from plegma.progressive import on_reference, progressive
+from plegma.progressive import on_reference, on_tree, progressive
 from plegma.refine import gap_opens, sum_of_pairs
 from plegma.units import tandem_layout, tandem_repeat
 
@@ -161,6 +161,35 @@ def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
     # The copies inserted at one place take no more columns than the longest insertion there.
     var extra = len(rows[0]) - len(reference)
     assert_true(extra <= 6 * 23)
+
+
+def test_on_tree_keeps_a_shared_deletion_the_same_in_every_member() raises:
+    seed(61)
+    var left = _random(80)
+    var right = _random(80)
+    var unit = _random(23)
+    var extra = _random(30)
+    var reference = _array(left, unit, 20, right, 0.0)
+    var family = _array(left, unit, 14, right, 0.0)
+    # A member of the family with a stretch of its own inside the array: the family's deletion and an insertion.
+    var member = _array(left, unit, 7, List[UInt8](), 0.0)
+    member.extend(extra.copy())
+    member.extend(_array(List[UInt8](), unit, 7, right, 0.0))
+    var seqs = List[List[UInt8]]()
+    seqs.append(reference.copy())
+    seqs.append(member.copy())
+    seqs.append(family.copy())
+    seqs.append(family.copy())
+    var rows = on_tree(seqs, Costs.two_piece(24, 16, 12, 96, 5))
+    for k in range(len(seqs)):
+        assert_true(_ungapped(rows[k]) == seqs[k])
+        assert_equal(len(rows[k]), len(rows[0]))
+    assert_true(rows[2] == rows[3])
+    # Wherever the family has a letter, the member has the same one: it adds the stretch and nothing else.
+    for c in range(len(rows[0])):
+        if rows[2][c] != UInt8(ord("-")):
+            assert_equal(rows[1][c], rows[2][c])
+    assert_true(_gap_runs(rows[0], rows[2]) <= 1)
 
 
 def main() raises:

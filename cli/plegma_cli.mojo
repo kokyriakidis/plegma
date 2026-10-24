@@ -17,7 +17,7 @@ from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
 from plegma.polish import polish
-from plegma.progressive import on_reference, progressive
+from plegma.progressive import on_reference, on_tree, progressive
 from plegma.refine import refine
 
 
@@ -657,7 +657,24 @@ def _poa(input: String, options: Options) raises -> String:
         # -Q: anchored on the first sequence, pgrealign's scores as costs (abPOA's 8, 16, 16+8k, 96+k halved:
         # a mismatch 24, a gap of k letters min(16 + 12k, 96 + 5k)).
         var reference_costs = Costs.two_piece(24, 16, 12, 96, 5)
-        var bytes = on_reference(seqs, reference_costs)
+        # PLEGMA_QCOSTS=x,o,e or x,o1,e1,o2,e2 (an experiment): other costs for the alignments to the reference.
+        var q_costs = getenv("PLEGMA_QCOSTS")
+        if q_costs != "":
+            var parts = q_costs.split(",")
+            if len(parts) == 3:
+                reference_costs = Costs.affine(Int(String(parts[0])), Int(String(parts[1])), Int(String(parts[2])))
+            else:
+                reference_costs = Costs.two_piece(
+                    Int(String(parts[0])),
+                    Int(String(parts[1])),
+                    Int(String(parts[2])),
+                    Int(String(parts[3])),
+                    Int(String(parts[4])),
+                )
+        # PLEGMA_TREE=<share> (an experiment): along a tree from the reference through the sequences at least that
+        # share of the input spells.
+        var tree = getenv("PLEGMA_TREE")
+        var bytes = on_tree(seqs, reference_costs, Float64(tree)) if tree != "" else on_reference(seqs, reference_costs)
         if options.sp_set and options.sp_passes > 0:
             # With -I, refined on the sum of pairs with the reference's row weighing 4 times the rows' number: the
             # other rows move only among the placements that keep their alignment with the reference as good, the
