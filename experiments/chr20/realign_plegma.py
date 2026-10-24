@@ -5,9 +5,10 @@ usage: python3 -I experiments/chr20/realign_plegma.py <plegma> <karan> <packages
            [--jobs n] [--timeout s] [--flags "..."] [--max-refined n] [--resume]
 
 Every package whose status is `ok` and whose alleles are not all one (pgrealign's `--select any`) is aligned:
-- its distinct alleles, the reference allele (CHM13's, else the heaviest) first, by `plegma <flags> -r 1` (`-L -I 20,64,1` by default: longest first, then the sum-of-pairs
-  refinement with gap opening, whose anchors come from each allele's nearest 24 partners past that many); past
-  `--max-refined` distinct alleles (100,000 by default, so none), by `-L` alone;
+- its distinct alleles, the reference allele (CHM13's, else the heaviest) first, by `plegma <flags> -r 1` (`-L -I
+  20,64,1` by default; `-A` anchors the MSA on that first allele); past `--max-refined` distinct alleles (100,000 by
+  default, so none), or past the time limit, without -I's refinement (a timed-out region then gets three times the
+  limit);
 - each fragment, a partial walk at the region's edge or inside it, into the row of an allele holding it exactly where
   its side says (a prefix for `left`, a suffix for `right`, anywhere for `internal`), the allele's letters outside it
   gapped; else aligned (karan, unit costs) to the heaviest allele as a prefix, a suffix or an infix of it and threaded
@@ -33,9 +34,14 @@ TIMEOUT = 900
 MAX_REFINED = 100000
 
 
-def plegma_rows(seqs, timeout, copies=None):
+def unrefined(flags):
+    """`flags` without -I's refinement."""
+    return [x for x in flags if x != "-I" and not re.match(r"^\d+(,\d+)*$", x)]
+
+
+def plegma_rows(seqs, timeout, copies=None, flags=None):
     """plegma's MSA of the distinct sequences `seqs` (a list), as rows in the same order; with `copies`, each written
-    as many times as it says (so plegma weighs a sequence by the haplotypes spelling it)."""
+    as many times as it says (so plegma weighs a sequence by the haplotypes spelling it); `flags` for FLAGS."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "in.fa")
         with open(path, "w") as f:
@@ -43,7 +49,7 @@ def plegma_rows(seqs, timeout, copies=None):
                 f.write(">s%d\n%s\n" % (k, s))
                 for c in range((copies or {}).get(s, 1) - 1):
                     f.write(">s%d_%d\n%s\n" % (k, c, s))
-        flags = FLAGS if len(seqs) <= MAX_REFINED else [x for x in FLAGS if x != "-I" and not re.match(r"^\d+(,\d+)*$", x)]
+        flags = flags if flags is not None else FLAGS if len(seqs) <= MAX_REFINED else unrefined(FLAGS)
         out = subprocess.run([PLEGMA] + flags + ["-r", "1", path], capture_output=True, text=True, timeout=timeout)
         if out.returncode != 0:
             raise RuntimeError("plegma exited %d: %s" % (out.returncode, out.stderr.strip()[-200:]))
@@ -169,7 +175,15 @@ def realign(package):
                 copies = {}
                 for a in alleles:
                     copies[a["seq"].upper()] = copies.get(a["seq"].upper(), 0) + a["weight"]
-            msa = plegma_rows(distinct, TIMEOUT, copies)
+            try:
+                msa = plegma_rows(distinct, TIMEOUT, copies)
+            except subprocess.TimeoutExpired:
+                # Past the time limit refined, the unrefined MSA (three times the limit): the region keeps a plegma
+                # MSA rather than its original alignment.
+                if unrefined(FLAGS) == FLAGS:
+                    raise
+                msa = plegma_rows(distinct, 3 * TIMEOUT, copies, unrefined(FLAGS))
+                record["refined"] = False
         row_of = dict(zip(distinct, msa))
         order = [a["id"] for a in alleles]
         rows = {a["id"]: row_of[a["seq"].upper()] for a in alleles}

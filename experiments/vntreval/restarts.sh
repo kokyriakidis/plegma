@@ -16,7 +16,7 @@ for r in "$@"; do
   for s in $(seq 0 $((SEEDS - 1))); do
     echo "$r $s"
   done
-done | xargs -P "${JOBS:-2}" -n 2 sh -c "\"$PLEGMA\" -A -V -2,1,0,0,0,\$1 -r 1 \"$VE/regions/\$0/hap32.fa\" > \"$OUT/\$0.\$1.msa.fa\" 2> /dev/null"
+done | xargs -P "${JOBS:-2}" -n 2 sh -c "\"$PLEGMA\" -A -N -V -2,1,0,0,0,\$1 -r 1 \"$VE/regions/\$0/hap32.fa\" > \"$OUT/\$0.\$1.msa.fa\" 2> /dev/null"
 for f in "$OUT"/*.msa.fa; do
   unit=$(python3 -I "$HERE/implied.py" "$VE" "$f" 2>&1 | grep -v "^\[" | sed "s/.*anchored\/optimal //; s/, induced.*//")
   more=$(python3 -I -c "import sys; sys.path.insert(0, '$HERE'); from diagnose import costs; u, r, a = costs('$f'); print('objective', u + r, 'affine', a)")

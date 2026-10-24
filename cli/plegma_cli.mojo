@@ -62,24 +62,26 @@ Options:
                 [0]; the fifth caps the band's widening [4096] (MSA and GFA outputs)
     -G INT      the -I refinement's group moves: every split of a UPGMA tree over the rows realigned as two
                 profiles within INT columns of their present merge, each pass [0; 256 with -A]; 0 off
-    -A          the MSA by anchored progressive placement instead of the graph: the distinct sequences, longest
-                first, each placed exactly into the MSA so far in a band centred on the columns every placed sequence
-                votes for its letters through their optimal alignment, at vntr-eval's affine costs (with -V, through seeds first:
-                sporos's MUMs outside tandem repeats, then inside each array, then SMEMs); where every sequence holds
-                one clear tandem array, a second start with the arrays aligned copy by copy; each refined (-I, 20
-                passes by default, with -G's group moves, at -W's prices) and the lower sum of pairs kept; the graph
-                is the MSA's
-    -Q          with -A, the MSA anchored on the first sequence (the reference): every other aligned to it exactly
-                (pgrealign's scores as costs, gaps left-normalized), its letters in the reference's columns and its
-                insertions between them; each sequence's alignment with the reference is then its own optimal one, as a
-                caller reporting variants against the reference needs; with -I, then refined on the sum of pairs (-W,
-                -I's prices) with the reference weighing 4 times the rows' number, so the others choose among the
-                placements as good against it the one that suits each other
-    -U          with -A, no copy-level start
+    -A          the MSA instead of the graph, anchored on the first sequence (the reference): every other
+                aligned to it exactly (pgrealign's scores as costs, gaps left-normalized), its letters in the
+                reference's columns and the runs inserted at one place aligned to each other on the longest; each
+                sequence's alignment with the reference is then its own optimal one, as a caller reporting variants
+                against the reference needs; with -I, then refined on the sum of pairs (-W, -I's prices) with the
+                reference weighing 4 times the rows' number, so the others choose among the placements as good
+                against it the one that suits each other; the graph is the MSA's
+    -N          with -A, placement by votes instead (no reference): the distinct sequences, longest first, each
+                placed exactly into the MSA so far in a band centred on the columns every placed sequence votes for
+                its letters through their optimal alignment, at vntr-eval's affine costs (with -V, through seeds
+                first: sporos's MUMs outside tandem repeats, then inside each array, then SMEMs); where every
+                sequence holds one clear tandem array, a second start with the arrays aligned copy by copy; each
+                refined (-I, 20 passes by default, with -G's group moves, at -W's prices) and the lower sum of pairs
+                kept (lowest on vntr-eval's costs; on chr20 its graphs genotype worse, splitting copy-number changes)
+    -Q          with -A, the default (kept for older command lines)
+    -U          with -A -N, no copy-level start
     -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
                 2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
                 opening, its affine cost 4,2 with 6
-    -V INT[,INT...] with -A, the seeds' confidence [-2,3,0,0,0]: -2 no seeds (the optimal alignments
+    -V INT[,INT...] with -A -N, the seeds' confidence [-2,3,0,0,0]: -2 no seeds (the optimal alignments
                 to the placed sequences vote, the staged seeds where a pair is too long to align); -4 the staged
                 seeds first (MUMs outside tandem repeats pin the flanks, then MUMs of 1,000, 600 and 400 letters),
                 then the alignments; -5 the split seeds first (backbone.split_anchors); -3 SMEMs of 600 letters or more
@@ -381,7 +383,7 @@ struct Options(Copyable, Movable):
     var strand: Bool
     var seeding: Bool
     var split_seeds: Bool
-    var on_reference: Bool
+    var voted: Bool
     var agree_seeds: Bool
     var window: Int
     var trim: Int
@@ -434,7 +436,7 @@ struct Options(Copyable, Movable):
         self.strand = False
         self.seeding = False
         self.split_seeds = False
-        self.on_reference = False
+        self.voted = False
         self.agree_seeds = False
         self.window = 500
         self.trim = 10
@@ -653,7 +655,7 @@ def _poa(input: String, options: Options) raises -> String:
     var graph = Graph()
     # -A: the MSA by anchored progressive placement; its graph is built from it, and its rows are the output's.
     var anchored_rows = List[String]()
-    if options.anchored and options.on_reference:
+    if options.anchored and not options.voted:
         # -Q: anchored on the first sequence, pgrealign's scores as costs (abPOA's 8, 16, 16+8k, 96+k halved:
         # a mismatch 24, a gap of k letters min(16 + 12k, 96 + 5k)).
         var reference_costs = Costs.two_piece(24, 16, 12, 96, 5)
@@ -975,7 +977,10 @@ def main() raises:
         elif a == "-Y":
             options.agree_seeds = True
         elif a == "-Q":
-            options.on_reference = True
+            # The default with -A; kept for older command lines.
+            pass
+        elif a == "-N":
+            options.voted = True
         elif a == "-n":
             options.window = Int(_value(args, i))
             i += 1
