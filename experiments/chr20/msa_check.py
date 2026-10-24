@@ -199,8 +199,8 @@ def check(task):
         return rid, None, "%s: %s" % (type(error).__name__, error)
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
 
     def option(name, default):
         if name in args:

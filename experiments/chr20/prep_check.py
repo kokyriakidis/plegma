@@ -110,8 +110,8 @@ def check(task):
     return out
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
     regions = None
     jobs = 8
     if "--regions" in args:

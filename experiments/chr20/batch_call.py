@@ -24,7 +24,8 @@ Prep is local_call.py prep's (each region's flanks, reads, CHM13 slice and truth
    spurious counts split by region.
 Prints per label the totals and the time of each step; writes <out dir>/<label>/batch_calls.tsv (per region), keeps
 each label's batch under <out dir>/<label>/, and per region <out dir>/<label>.<region>/ with its rows and its missed
-and spurious calls, as event_presence.py reads them. Needs what local_call.py run needs.
+and spurious calls (what strata.py, msa_check.py and evaluate.py report read). Needs VG, GAFBASE, BCFTOOLS_DIR,
+AARDVARK_DIR, VCE, VNTR_PGREALIGN and, for plegma flags, PLEGMA.
 """
 import collections
 import gzip
@@ -508,8 +509,8 @@ def score(order, calls, header, prep_dir, d, jobs, truvari):
     return r, sv, small, per, split
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
     jobs = 8
     if "--jobs" in args:
         jobs = int(args[args.index("--jobs") + 1])
@@ -622,7 +623,7 @@ def main():
                                                  for rid in order}, open(header_path).readlines(), prep_dir,
                                          os.path.join(d, "batch_score"), jobs, truvari)
         t_score = time.time() - t
-        # Per region, the layout event_presence.py reads: <out dir>/<label>.<region>/rows.json and its share of
+        # Per region, the layout evaluate.py report reads: <out dir>/<label>.<region>/rows.json and its share of
         # truvari's missed and spurious calls.
         for rid in order:
             rd = os.path.join(out_dir, "%s.%s" % (label, rid))

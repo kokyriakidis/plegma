@@ -55,9 +55,10 @@ def genome_counts(kmers, genome, work):
     return out
 
 
-def main():
-    prep_dir, packages, out_dir, genome = sys.argv[1:5]
-    fastqs = sys.argv[5:]
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    prep_dir, packages, out_dir, genome = args[:4]
+    fastqs = args[4:]
     ids = sorted(x for x in os.listdir(prep_dir) if os.path.exists(os.path.join(prep_dir, x, "region.json")))
     wanted = set(ids)
     owners = collections.defaultdict(set)
@@ -84,9 +85,11 @@ def main():
               if in_genome.get(km, 0) <= in_windows.get(km, 0)}
     print("K-mers of %d regions: %d, %d of them the genome holds only in the regions" % (len(ids), before, len(owners)),
           flush=True)
-    if os.path.exists(out_dir):
-        shutil.rmtree(out_dir)
-    shutil.copytree(prep_dir, out_dir, ignore=shutil.ignore_patterns("reads.kff*"))
+    # Into a copy of the prep, or the prep itself when <out prep dir> is it.
+    if os.path.abspath(out_dir) != os.path.abspath(prep_dir):
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir)
+        shutil.copytree(prep_dir, out_dir, ignore=shutil.ignore_patterns("reads.kff*"))
     added = collections.defaultdict(list)
     seen = 0
     for path in fastqs:

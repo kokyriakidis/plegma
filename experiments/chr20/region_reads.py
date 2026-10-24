@@ -109,8 +109,7 @@ def flank_nodes(packages_path, walk_first, walks, flank, wanted):
 
 
 def read_regions(gaf, intervals, every=False, extra=None):
-    """{read: region} for the reads whose alignment visits a region's nodes (the read keyed as compare_reads.sh
-    keys it: name/mate); with `every`, {read: set of regions}, every region whose nodes, or `extra` nodes ({node id:
+    """{read: region} for the reads whose alignment visits a region's nodes (the read keyed as name/mate); with `every`, {read: set of regions}, every region whose nodes, or `extra` nodes ({node id:
     regions}), it visits."""
     starts = [x[0] for x in intervals]
     out = {}

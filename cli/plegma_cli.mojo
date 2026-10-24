@@ -61,7 +61,7 @@ Options:
                 the fourth 1 seeds those pairwise alignments (flanks pinned by MUMs, then MUMs inside each array)
                 [0]; the fifth caps the band's widening [4096] (MSA and GFA outputs)
     -G INT      the -I refinement's group moves: every split of a UPGMA tree over the rows realigned as two
-                profiles within INT columns of their present merge, each pass [0; 256 with -A]; 0 off
+                profiles within INT columns of their present merge, each pass [0; 256 with -A -N]; 0 off
     -A          the MSA instead of the graph, anchored on the first sequence (the reference): every other
                 aligned to it exactly (pgrealign's scores as costs, gaps left-normalized), its letters in the
                 reference's columns and the runs inserted at one place aligned to each other on the longest; each
@@ -700,7 +700,9 @@ def _poa(input: String, options: Options) raises -> String:
                 Costs.affine(4, 6, 2),
                 options.sp_gap_open,
                 False,
-                options.group_band if options.group_set else 256,
+                # No group moves by default: on -A's MSAs they left the objective as it was (or within 0.03%) at a tenth
+                # to a half of the refinement's time.
+                options.group_band if options.group_set else 0,
                 0,
                 weights,
                 1000,

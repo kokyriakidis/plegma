@@ -161,8 +161,8 @@ def fixable(s):
     return any(x in s.split() for x in FIXABLE) or "+other" in s
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
 
     def option(name, default):
         if name in args:
