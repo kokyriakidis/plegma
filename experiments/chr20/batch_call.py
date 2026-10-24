@@ -203,6 +203,81 @@ def call_region(task):
     return rid, header, body
 
 
+def score(order, calls, header, prep_dir, d, jobs, truvari):
+    """The calls of the regions `order` ({region: VCF record lines on its local contig}, under one VCF `header`)
+    scored together, as vg-call-eval scores a contig: one multi-contig reference, truth and calls under <d>/batch.
+    Returns score_contig's result, the structural and small-variant counts, per region its structural tp/fn/fp and
+    its truvari fn and fp lines."""
+    import bench_wgs  # noqa: E402
+    import bench_metrics as bm  # noqa: E402
+
+    c = os.path.join(d, "batch")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(c)
+    lengths = {}
+    with open(os.path.join(c, "batch.fa"), "w") as fa, open(os.path.join(c, "batch.fa.fai"), "w") as fai:
+        at = 0
+        for rid in order:
+            seq = "".join(line.strip() for line in open(os.path.join(prep_dir, rid, "chr20.fa"))
+                          if not line.startswith(">"))
+            lengths[rid] = len(seq)
+            fa.write(">%s\n%s\n" % (rid, seq))
+            fai.write("%s\t%d\t%d\t%d\t%d\n" % (rid, len(seq), at + len(rid) + 2, len(seq), len(seq) + 1))
+            at += len(rid) + 2 + len(seq) + 1
+    contigs = "".join("##contig=<ID=%s,length=%d>\n" % (rid, lengths[rid]) for rid in order)
+    with open(os.path.join(c, "batch.vcf"), "w") as f:
+        f.writelines(header[:-1])
+        f.write(contigs)
+        f.write(header[-1])
+        for rid in order:
+            f.writelines(calls[rid])
+    run(["bgzip", "-f", os.path.join(c, "batch.vcf")])
+    run(["tabix", "-f", "-p", "vcf", os.path.join(c, "batch.vcf.gz")])
+    for kind in ("smvar", "stvar"):
+        records, head = [], None
+        for rid in order:
+            with gzip.open(os.path.join(prep_dir, rid, "truth.chr20.%s.vcf.gz" % kind), "rt") as f:
+                lines = f.readlines()
+            if head is None:
+                head = [x for x in lines if x.startswith("#") and not x.startswith("##contig")]
+            # Only records wholly inside the window: one reaching past its end has a reference allele the local
+            # reference no longer spells, which bcftools norm refuses.
+            for x in lines:
+                if x.startswith("#"):
+                    continue
+                w = x.split("\t", 4)
+                if int(w[1]) - 1 + len(w[3]) <= lengths[rid]:
+                    records.append("%s\t%s" % (rid, x.split("\t", 1)[1]))
+        path = os.path.join(c, "truth.batch.%s.vcf" % kind)
+        with open(path, "w") as f:
+            f.writelines(head[:-1])
+            f.write(contigs)
+            f.write(head[-1])
+            f.writelines(records)
+        run(["bgzip", "-f", path])
+        run(["tabix", "-f", "-p", "vcf", path + ".gz"])
+        with open(os.path.join(c, "truth.batch.%s.bed" % kind), "w") as out:
+            for rid in order:
+                for line in open(os.path.join(prep_dir, rid, "truth.chr20.%s.bed" % kind)):
+                    out.write(rid + "\t" + line.split("\t", 1)[1])
+    r = bench_wgs.score_contig(Path(d), "batch", "HG002", jobs, truvari)
+    small = bm.aardvark_counts(bench_wgs.pick(r.get("aardvark"), "GT", "ALL"))
+    sv = bm.truvari_counts(r.get("truvari"))
+    per = collections.defaultdict(collections.Counter)
+    split = collections.defaultdict(lambda: collections.defaultdict(list))
+    tdir = os.path.join(d, "score", "batch.truvari")
+    for part, key in (("tp-base", "tp"), ("fn", "fn"), ("fp", "fp")):
+        path = os.path.join(tdir, part + ".vcf.gz")
+        if os.path.exists(path):
+            with gzip.open(path, "rt") as f:
+                for line in f:
+                    if not line.startswith("#"):
+                        per[line.split("\t", 1)[0]][key] += 1
+                        if key != "tp":
+                            split[line.split("\t", 1)[0]][key].append(line)
+    return r, sv, small, per, split
+
+
 def main():
     args = sys.argv[1:]
     jobs = 8
@@ -232,9 +307,6 @@ def main():
     vce = os.environ["VCE"]
     for sub in ("scripts/wgs", "scripts/tier2", "scripts", "src"):
         sys.path.insert(0, os.path.join(vce, sub))
-    import bench_wgs  # noqa: E402
-    import bench_metrics as bm  # noqa: E402
-
     truvari = os.environ.get("TRUVARI", os.path.join(vce, "work", "truvari-venv", "bin", "truvari"))
     for label, source in labels:
         started = time.time()
@@ -278,80 +350,13 @@ def main():
         order_ok = [rid for rid in ids if rid in graphs and rid not in failed]
         # Score every region together: one multi-contig reference, truth and calls.
         t = time.time()
-        c = os.path.join(d, "batch_score", "batch")
-        os.makedirs(c)
         order = order_ok
-        lengths = {}
-        with open(os.path.join(c, "batch.fa"), "w") as fa, open(os.path.join(c, "batch.fa.fai"), "w") as fai:
-            at = 0
-            for rid in order:
-                seq = "".join(line.strip() for line in open(os.path.join(prep_dir, rid, "chr20.fa"))
-                              if not line.startswith(">"))
-                lengths[rid] = len(seq)
-                fa.write(">%s\n%s\n" % (rid, seq))
-                fai.write("%s\t%d\t%d\t%d\t%d\n" % (rid, len(seq), at + len(rid) + 2, len(seq), len(seq) + 1))
-                at += len(rid) + 2 + len(seq) + 1
-        contigs = "".join("##contig=<ID=%s,length=%d>\n" % (rid, lengths[rid]) for rid in order)
-        with open(os.path.join(c, "batch.vcf"), "w") as f:
-            header = open(header_path).readlines()
-            f.writelines(header[:-1])
-            f.write(contigs)
-            f.write(header[-1])
-            for rid in order:
-                f.writelines(open(os.path.join(cache, graphs[rid]["key"] + ".vcf")).readlines())
-        run(["bgzip", "-f", os.path.join(c, "batch.vcf")])
-        run(["tabix", "-f", "-p", "vcf", os.path.join(c, "batch.vcf.gz")])
-        for kind in ("smvar", "stvar"):
-            records, head = [], None
-            for rid in order:
-                with gzip.open(os.path.join(prep_dir, rid, "truth.chr20.%s.vcf.gz" % kind), "rt") as f:
-                    lines = f.readlines()
-                if head is None:
-                    head = [x for x in lines if x.startswith("#") and not x.startswith("##contig")]
-                # Only records wholly inside the window: one reaching past its end has a reference allele the local
-                # reference no longer spells, which bcftools norm refuses.
-                for x in lines:
-                    if x.startswith("#"):
-                        continue
-                    w = x.split("\t", 4)
-                    if int(w[1]) - 1 + len(w[3]) <= lengths[rid]:
-                        records.append("%s\t%s" % (rid, x.split("\t", 1)[1]))
-            path = os.path.join(c, "truth.batch.%s.vcf" % kind)
-            with open(path, "w") as f:
-                f.writelines(head[:-1])
-                f.write(contigs)
-                f.write(head[-1])
-                f.writelines(records)
-            run(["bgzip", "-f", path])
-            run(["tabix", "-f", "-p", "vcf", path + ".gz"])
-            with open(os.path.join(c, "truth.batch.%s.bed" % kind), "w") as out:
-                for rid in order:
-                    for line in open(os.path.join(prep_dir, rid, "truth.chr20.%s.bed" % kind)):
-                        out.write(rid + "\t" + line.split("\t", 1)[1])
-        r = bench_wgs.score_contig(Path(os.path.join(d, "batch_score")), "batch", "HG002", jobs, truvari)
+        r, sv, small, per, split = score(order, {rid: open(os.path.join(cache, graphs[rid]["key"] + ".vcf")).readlines()
+                                                 for rid in order}, open(header_path).readlines(), prep_dir,
+                                         os.path.join(d, "batch_score"), jobs, truvari)
         t_score = time.time() - t
-        a = bench_wgs.pick(r.get("aardvark"), "GT", "ALL")
-        small = bm.aardvark_counts(a)
-        sv = bm.truvari_counts(r.get("truvari"))
-        per = collections.defaultdict(collections.Counter)
-        tdir = os.path.join(d, "batch_score", "score", "batch.truvari")
-        for part, key in (("tp-base", "tp"), ("fn", "fn"), ("fp", "fp")):
-            path = os.path.join(tdir, part + ".vcf.gz")
-            if os.path.exists(path):
-                with gzip.open(path, "rt") as f:
-                    for line in f:
-                        if not line.startswith("#"):
-                            per[line.split("\t", 1)[0]][key] += 1
         # Per region, the layout event_presence.py reads: <out dir>/<label>.<region>/rows.json and its share of
         # truvari's missed and spurious calls.
-        split = collections.defaultdict(lambda: collections.defaultdict(list))
-        for part in ("fn", "fp"):
-            path = os.path.join(tdir, part + ".vcf.gz")
-            if os.path.exists(path):
-                with gzip.open(path, "rt") as f:
-                    for line in f:
-                        if not line.startswith("#"):
-                            split[line.split("\t", 1)[0]][part].append(line)
         for rid in order:
             rd = os.path.join(out_dir, "%s.%s" % (label, rid))
             sd = os.path.join(rd, "score", "chr20.truvari")
