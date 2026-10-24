@@ -16,9 +16,10 @@ genotype the whole chromosome, to compare MSAs in minutes and see why each errs.
       each graph only CHM13's row and the rows nearest HG002's truth (a diagnostic: do the reads and vg call get the
       truth when nothing else is there?).
   report  <prep dir> <packages.jsonl.gz> <out dir> <label> ... [--regions file]
-      per region and label: structural TP/FN/FP, the MSA's width over its longest allele, its scattered changes (one
-      change of one length at several places), the called haplotypes' edit distance to HG002's truth against the least
-      the graph's rows allow, the sampling and mapping numbers; then totals.
+      per region and label: the MSA's own properties, which need no truth (its width over its longest allele, its
+      scattered changes: one change of one length at several places, its indels per allele against CHM13); the called
+      haplotypes' edit distance to HG002's truth against the least the graph's rows allow (right when within 1%,
+      however the records split them); the records' structural TP/FN/FP; the sampling and mapping numbers; totals.
   strata  <out dir> <prep dir> <packages.jsonl.gz> <label> [--others a,b] [--regions file] [--jobs n] [--out tsv]
       each structural error put in a class: on the MSA's side or not (strata.py).
   check   <out dir> <prep dir> <packages.jsonl.gz> <label> ... [--regions file] [--jobs n] [--out dir]
@@ -104,9 +105,9 @@ def report(args):
             p = json.loads(line)
             if p["id"] in regions:
                 pkgs[p["id"]] = p
-    totals = {label: [0, 0, 0, 0, 0] for label in labels}
-    print("%-20s %-6s %10s %6s %5s %15s %7s %13s" % ("region", "label", "tp/fn/fp", "width", "scat", "called/least",
-                                                     "kept", "mapped/reads"))
+    totals = {label: [0, 0, 0, 0, 0, 0, 0, 0, 0.0] for label in labels}
+    print("%-20s %-6s %10s %6s %5s %6s %15s %7s %13s" % ("region", "label", "tp/fn/fp", "width", "scat", "ev/al",
+                                                         "called/least", "kept", "mapped/reads"))
     for rid in regions:
         if rid not in pkgs:
             continue
@@ -132,8 +133,16 @@ def report(args):
             rows = json.load(open(os.path.join(out_dir, "%s.%s" % (label, rid), "rows.json")))
             scat = msa_check.scattered(rows, pkg["ref"]) if pkg.get("ref") in rows else -1
             width = int(q["columns"]) / longest if q.get("columns") else 0
-            print("%-20s %-6s %10s %6.1f %5d %7d/%-7d %7s %6s/%-6s" % (
-                rid, label, "%d/%d/%d" % (tp, fn, fp), width, scat, got, least, q.get("kept_alleles", ""),
+            # Parsimony, with no truth: each row's indels of 10 letters or more against CHM13's row.
+            ref_row = rows.get(pkg["ref"])
+            events = [len(msa_check.indels(msa_check.records_from(ref_row, r, 0, "N" * (len(ref_row) + 1))))
+                      for a, r in rows.items() if a != pkg["ref"]] if ref_row else []
+            per_allele = sum(events) / max(len(events), 1)
+            # The haplotypes called as near HG002's as the graph's rows allow (a score of the haplotypes, however
+            # the records split them): within 1% of the truth's length past the least.
+            right = got >= 0 and got <= least + max(20, (len(truth[0]) + len(truth[1])) // 100)
+            print("%-20s %-6s %10s %6.1f %5d %6.2f %7d/%-7d %7s %6s/%-6s" % (
+                rid, label, "%d/%d/%d" % (tp, fn, fp), width, scat, per_allele, got, least, q.get("kept_alleles", ""),
                 q.get("mapped", ""), q.get("reads", "")))
             t = totals[label]
             t[0] += tp
@@ -141,11 +150,17 @@ def report(args):
             t[2] += fp
             t[3] += max(got - least, 0)
             t[4] += max(scat, 0)
-    print("totals")
-    for label, (tp, fn, fp, excess, scat) in totals.items():
+            t[5] += 1
+            t[6] += right
+            t[7] += width
+            t[8] += per_allele
+    print("totals (the MSA's own properties need no truth: width over the longest allele, scattered changes, indels per")
+    print("allele; the haplotypes' and records' scores use HG002's)")
+    for label, (tp, fn, fp, excess, scat, n, right, width, per_allele) in totals.items():
         p, r = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
-        print("  %-6s structural TP %d FN %d FP %d F1 %.3f | haplotype excess over least %d | scattered %d" % (
-            label, tp, fn, fp, 2 * p * r / max(p + r, 1e-9), excess, scat))
+        print("  %-6s width %.2f scattered %d indels/allele %.2f | haplotypes right %d/%d, excess %d | records: structural "
+              "TP %d FN %d FP %d F1 %.3f" % (label, width / max(n, 1), scat, per_allele / max(n, 1), right, n, excess,
+                                             tp, fn, fp, 2 * p * r / max(p + r, 1e-9)))
 
 
 def main():

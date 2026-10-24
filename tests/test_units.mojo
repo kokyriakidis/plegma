@@ -1,3 +1,4 @@
+from std.collections import Set
 from std.random import random_ui64, seed
 from std.testing import assert_equal, assert_true, TestSuite
 
@@ -139,6 +140,35 @@ def _gap_runs(a: List[UInt8], b: List[UInt8]) -> Int:
     return runs
 
 
+def _long_change_places(rows: List[List[UInt8]], least: Int) -> Int:
+    """The distinct columns where some row's insertion or deletion of `least` letters or more against `rows[0]`
+    starts (an insertion: letters facing the reference's gaps)."""
+    var gap = UInt8(ord("-"))
+    var starts = Set[Int]()
+    for k in range(1, len(rows)):
+        var c = 0
+        while c < len(rows[0]):
+            var deleting = rows[0][c] != gap and rows[k][c] == gap
+            var inserting = rows[0][c] == gap and rows[k][c] != gap
+            if not deleting and not inserting:
+                c += 1
+                continue
+            var end = c
+            var letters = 0
+            while end < len(rows[0]):
+                if deleting and rows[0][end] != gap and rows[k][end] == gap:
+                    letters += 1
+                elif inserting and rows[0][end] == gap and rows[k][end] != gap:
+                    letters += 1
+                elif not (rows[0][end] == gap and rows[k][end] == gap):
+                    break
+                end += 1
+            if letters >= least:
+                starts.add(c * 2 + Int(inserting))
+            c = end
+    return len(starts)
+
+
 def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
     seed(59)
     var left = _random(80)
@@ -161,6 +191,31 @@ def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
     # The copies inserted at one place take no more columns than the longest insertion there.
     var extra = len(rows[0]) - len(reference)
     assert_true(extra <= 6 * 23)
+
+
+def test_on_reference_consolidates_copy_number_changes_inside_an_array() raises:
+    seed(67)
+    var left = _random(80)
+    var right = _random(80)
+    var unit = _random(23)
+    # Copies a few percent apart: each sequence's own optimum puts its copy-number change at a place of its own.
+    var seqs = List[List[UInt8]]()
+    seqs.append(_array(left, unit, 20, right, 0.04))
+    for copies in [14, 9, 26, 24, 11, 17, 23]:
+        seqs.append(_array(left, unit, copies, right, 0.04))
+    var costs = Costs.two_piece(24, 16, 12, 96, 5)
+    var plain = on_reference(seqs, costs)
+    var rows = on_reference(seqs, costs, consolidate=True)
+    for k in range(len(seqs)):
+        assert_true(_ungapped(rows[k]) == seqs[k])
+        assert_equal(len(rows[k]), len(rows[0]))
+    # The long changes at fewer places than each sequence's own optimum puts them, and no allele with more gaps
+    # against the reference.
+    var places = _long_change_places(rows, 10)
+    var plain_places = _long_change_places(plain, 10)
+    assert_true(places < plain_places, String(places, " ", plain_places))
+    for k in range(1, len(seqs)):
+        assert_true(_gap_runs(rows[0], rows[k]) <= _gap_runs(plain[0], plain[k]) + 1)
 
 
 def test_on_tree_keeps_each_allele_as_simple_against_the_reference() raises:

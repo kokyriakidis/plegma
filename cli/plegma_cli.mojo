@@ -680,7 +680,7 @@ def _poa(input: String, options: Options) raises -> String:
         # share of the input spells.
         var tree = getenv("PLEGMA_TREE")
         var bytes = on_tree(seqs, reference_costs, Float64(tree)) if tree != "" else on_reference(
-            seqs, reference_costs, getenv("PLEGMA_SNAP") == "1", options.threads
+            seqs, reference_costs, getenv("PLEGMA_SNAP") == "1", options.threads, getenv("PLEGMA_CONSOLIDATE") == "1"
         )
         if options.sp_set and options.sp_passes > 0:
             # With -I, refined on the sum of pairs with the reference's row weighing 4 times the rows' number: the

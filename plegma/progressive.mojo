@@ -873,7 +873,7 @@ comptime REFERENCE_MEMORY = 2 << 30
 
 
 def on_reference(
-    seqs: List[List[UInt8]], costs: Costs, snap: Bool = False, threads: Int = 1
+    seqs: List[List[UInt8]], costs: Costs, snap: Bool = False, threads: Int = 1, consolidate: Bool = False
 ) raises -> List[List[UInt8]]:
     """The MSA of `seqs` anchored on the first, the reference: every other distinct sequence aligned to it exactly
     (karan, `costs`, gaps shifted left through repeats as variant callers normalize them) and its letters put in the
@@ -888,7 +888,13 @@ def on_reference(
     before it (the heavier, as the input repeats them, then the earlier) put an event of its kind and length (within
     a tenth) within `_snap_window` of it, where that costs no more than `_snap_tolerance` mismatches: inside a tandem array the sequences' own optima put
     one copy-number change at places a few copies apart, by their copies' few differences, and the graph then holds
-    it as several bubbles whose reads split between them."""
+    it as several bubbles whose reads split between them.
+
+    With `consolidate`, inside each tandem array of the reference the insertions and deletions of `SNAP_LENGTH`
+    letters or more move, whole, to the array's one place for their kind (the slot, or the deletion start, the most
+    sequences' events use), the stretch between realigned exactly, where that costs no more than
+    `_consolidate_tolerance` and opens no other long gap: one copy-number change at one place, so the alleles' changes
+    share columns instead of scattering over the array."""
     var n = len(seqs)
     if n == 0:
         return List[List[UInt8]]()
@@ -914,6 +920,8 @@ def on_reference(
         var aligner = Aligner()
         for d in range(1, len(distinct)):
             partner.append(_onto(aligner, seqs[distinct[0]], seqs[distinct[d]], costs))
+    if consolidate:
+        _consolidate(seqs, distinct, partner, costs)
     if snap:
         _snap(seqs, distinct, partner)
     var rows_of = _on_reference_columns(seqs, distinct, partner, costs)
@@ -923,12 +931,359 @@ def on_reference(
     return out^
 
 
+def _stretch_cost(
+    c: List[UInt8], q: List[UInt8], p: List[Int], j_from: Int, j_to: Int, r_from: Int, r_to: Int, costs: Costs
+) -> Int:
+    """What the present alignment of query letters [j_from, j_to) against reference letters [r_from, r_to) costs: its
+    substitutions, its runs of inserted letters, and the reference letters between its paired ones (and at either end
+    of the stretch) as deletions, each run one gap at `costs`."""
+    var total = 0
+    var next_ref = r_from
+    var inserting = 0
+    for j in range(j_from, j_to):
+        if p[j] < 0:
+            inserting += 1
+            continue
+        if inserting > 0:
+            total += costs.gap(inserting, False)
+            inserting = 0
+        if p[j] > next_ref:
+            total += costs.gap(p[j] - next_ref, True)
+        if c[p[j]] != q[j]:
+            total += costs.mismatch
+        next_ref = p[j] + 1
+    if inserting > 0:
+        total += costs.gap(inserting, False)
+    if r_to > next_ref:
+        total += costs.gap(r_to - next_ref, True)
+    return total
+
+
+def _long_gaps(p: List[Int], j_from: Int, j_to: Int, r_from: Int, r_to: Int) -> Int:
+    """The insertions and deletions of `SNAP_LENGTH` letters or more in an alignment's stretch (query letters [j_from,
+    j_to) against reference letters [r_from, r_to); `p` the query letters' reference letters, -1 inserted)."""
+    var count = 0
+    var next_ref = r_from
+    var inserting = 0
+    for j in range(j_from, j_to):
+        if p[j] < 0:
+            inserting += 1
+            continue
+        if inserting >= SNAP_LENGTH:
+            count += 1
+        inserting = 0
+        if p[j] - next_ref >= SNAP_LENGTH:
+            count += 1
+        next_ref = p[j] + 1
+    if inserting >= SNAP_LENGTH:
+        count += 1
+    if r_to - next_ref >= SNAP_LENGTH:
+        count += 1
+    return count
+
+
+def _window_pairs(cigar: String, r_from: Int) raises -> List[Int]:
+    """The query letters' reference letters (-1: inserted) of a window's global alignment, the window starting at
+    reference letter `r_from`."""
+    var pairs = _pairing(cigar, 0)
+    for k in range(len(pairs)):
+        if pairs[k] >= 0:
+            pairs[k] += r_from
+    return pairs^
+
+
+def _consolidate(seqs: List[List[UInt8]], distinct: List[Int], mut partner: List[List[Int]], costs: Costs) raises:
+    """Each distinct sequence's insertions and deletions of `SNAP_LENGTH` letters or more inside the reference's
+    tandem array moved, whole, to one place per kind: the slot where the heaviest share of the sequences already
+    insert, the start where they already delete. The stretch between an event's place and that one is aligned again,
+    exactly (karan, `costs`), around the moved event, so other events in it do not block the move; a move is kept
+    when the sequence's alignment there costs no more than `_snap_tolerance`-like mismatches more. Changes of any
+    size in one array then meet at one place and share columns (`_on_reference_columns` aligns runs inserted at one
+    place to each other), where each sequence's own optimum scatters them over the array."""
+    ref c = seqs[distinct[0]]
+    var repeat = tandem_repeat(c)
+    if repeat.period == 0:
+        return
+    var lo = repeat.start
+    var hi = repeat.end
+    var weight = List[Int](length=len(distinct), fill=0)
+    for k in range(len(seqs)):
+        weight[_index_of(seqs, distinct, k)] += 1
+    # The canonical places: the slot (after reference letter s) and the deletion start the most weight uses there.
+    var insert_weight = Dict[Int, Int]()
+    var delete_weight = Dict[Int, Int]()
+    for d in range(1, len(distinct)):
+        ref p = partner[d]
+        var x = 0
+        while x < len(p):
+            if p[x] < 0:
+                var y = x
+                while y < len(p) and p[y] < 0:
+                    y += 1
+                var slot = p[x - 1] if x > 0 else -1
+                if y - x >= SNAP_LENGTH and slot >= lo - 1 and slot < hi:
+                    insert_weight[slot] = insert_weight.get(slot, 0) + weight[d]
+                x = y
+                continue
+            if x > 0 and p[x - 1] >= 0 and p[x] - p[x - 1] - 1 >= SNAP_LENGTH:
+                var start = p[x - 1] + 1
+                if start >= lo and start < hi:
+                    delete_weight[start] = delete_weight.get(start, 0) + weight[d]
+            x += 1
+    var canonical_slot = -2
+    var best = 0
+    for entry in insert_weight.items():
+        if entry.value > best or (entry.value == best and entry.key < canonical_slot):
+            best = entry.value
+            canonical_slot = entry.key
+    var canonical_start = -1
+    best = 0
+    for entry in delete_weight.items():
+        if entry.value > best or (entry.value == best and entry.key < canonical_start):
+            best = entry.value
+            canonical_start = entry.key
+    var trace = getenv("PLEGMA_CONSOLIDATE_TRACE") == "1"
+    if trace:
+        print(
+            "consolidate array",
+            lo,
+            hi,
+            "period",
+            repeat.period,
+            "slot",
+            canonical_slot,
+            "start",
+            canonical_start,
+            file=stderr,
+        )
+    var aligner = Aligner()
+    for d in range(1, len(distinct)):
+        ref q = seqs[distinct[d]]
+        var tried = 0
+        var moved = True
+        while moved and tried < 64:
+            moved = False
+            ref p = partner[d]
+            # The first event inside the array away from its kind's place, tried once each pass.
+            var x = 1
+            while x < len(p) and not moved:
+                if canonical_slot > -2 and p[x] < 0 and p[x - 1] >= 0:
+                    var j0 = x
+                    var j1 = x
+                    while j1 < len(p) and p[j1] < 0:
+                        j1 += 1
+                    var s = p[j0 - 1]
+                    var length = j1 - j0
+                    x = j1
+                    if (
+                        length < SNAP_LENGTH
+                        or s == canonical_slot
+                        or s < lo - 1
+                        or s >= hi
+                        or j1 >= len(p)
+                        or p[j1] != s + 1
+                    ):
+                        continue
+                    tried += 1
+                    var t = canonical_slot
+                    var a: Int
+                    var b: Int
+                    var r_from: Int
+                    var r_to: Int
+                    if t < s:
+                        # Leftward: the letters paired with reference (t, s] come after the moved block.
+                        var k = j0 - 1
+                        while k >= 0 and (p[k] < 0 or p[k] > t):
+                            k -= 1
+                        if k < 0 or p[k] != t:
+                            continue
+                        # A run the sequence already inserts at slot t: the moved block joins it, after it.
+                        a = k + 1
+                        while a < j0 and p[a] < 0:
+                            a += 1
+                        b = j1
+                        r_from = t + 1
+                        r_to = s + 1
+                    else:
+                        var k = j1
+                        while k < len(p) and (p[k] < 0 or p[k] <= t):
+                            k += 1
+                        if k >= len(p) or p[k] != t + 1:
+                            continue
+                        a = j0
+                        b = k
+                        # A run the sequence already inserts at slot t: the moved block joins it, before it.
+                        while b > j1 and p[b - 1] < 0:
+                            b -= 1
+                        r_from = s + 1
+                        r_to = t + 1
+                    var before = _stretch_cost(c, q, p, a, b, r_from, r_to, costs)
+                    var window_q = List[UInt8]()
+                    var window_r = List[UInt8]()
+                    for i in range(r_from, r_to):
+                        window_r.append(c[i])
+                    var q_from = a + length if t < s else a
+                    var q_to = b if t < s else b - length
+                    for j in range(q_from, q_to):
+                        window_q.append(q[j])
+                    if len(window_q) == 0 or len(window_r) == 0:
+                        continue
+                    var found = aligner.align(
+                        Span(window_r), Span(window_q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY
+                    )
+                    var after = found.cost + costs.gap(length, False)
+                    var pairs = _window_pairs(found.cigar, r_from)
+                    # The stretch aligned again must not make a long gap of its own: the moved one's own (the old
+                    # stretch's long gaps less it) at most, else the move adds events rather than moving one.
+                    var fresh_gaps = _long_gaps(pairs, 0, len(pairs), r_from, r_to)
+                    if fresh_gaps > _long_gaps(p, a, b, r_from, r_to) - 1:
+                        continue
+                    if trace:
+                        print(
+                            "  seq",
+                            d,
+                            "insertion",
+                            length,
+                            "slot",
+                            s,
+                            "->",
+                            t,
+                            "cost",
+                            before,
+                            "->",
+                            after,
+                            "kept" if after - before <= _consolidate_tolerance(length, costs) else "refused",
+                            file=stderr,
+                        )
+                    if after - before > _consolidate_tolerance(length, costs):
+                        continue
+                    if t < s:
+                        for i in range(length):
+                            p[a + i] = -1
+                        for i in range(len(pairs)):
+                            p[q_from + i] = pairs[i]
+                    else:
+                        for i in range(len(pairs)):
+                            p[a + i] = pairs[i]
+                        for i in range(length):
+                            p[q_to + i] = -1
+                    moved = True
+                    continue
+                if canonical_start >= 0 and p[x] >= 0 and p[x - 1] >= 0 and p[x] - p[x - 1] - 1 >= SNAP_LENGTH:
+                    var a0 = p[x - 1] + 1
+                    var length = p[x] - a0
+                    var k = x
+                    x += 1
+                    if a0 == canonical_start or a0 < lo or a0 >= hi:
+                        continue
+                    # A sequence already deleting at the canonical start keeps its other deletions where they are:
+                    # moving one onto it would only make the stretch delete again elsewhere.
+                    var deletes_there = False
+                    for z in range(1, len(p)):
+                        if p[z] >= 0 and p[z - 1] >= 0 and p[z - 1] < canonical_start and p[z] > canonical_start:
+                            deletes_there = True
+                            break
+                    if deletes_there:
+                        continue
+                    tried += 1
+                    var t = canonical_start
+                    var u: Int
+                    var v: Int
+                    var r_from: Int
+                    var r_to: Int
+                    if t < a0:
+                        # Leftward: the letters paired with reference [t, a0) pair with [t + length, a0 + length).
+                        var y = k - 1
+                        while y >= 0 and (p[y] < 0 or p[y] >= t):
+                            y -= 1
+                        if y < 0 or p[y] != t - 1:
+                            continue
+                        u = y + 1
+                        v = k
+                        r_from = t
+                        r_to = a0 + length
+                    else:
+                        var y = k
+                        while y < len(p) and (p[y] < 0 or p[y] < t + length):
+                            y += 1
+                        if y >= len(p) or p[y] != t + length:
+                            continue
+                        u = k
+                        v = y
+                        r_from = a0
+                        r_to = t + length
+                    var before = _stretch_cost(c, q, p, u, v, r_from, r_to, costs)
+                    var window_q = List[UInt8]()
+                    var window_r = List[UInt8]()
+                    var w_from = r_from + length if t < a0 else r_from
+                    var w_to = r_to if t < a0 else r_to - length
+                    for i in range(w_from, w_to):
+                        window_r.append(c[i])
+                    for j in range(u, v):
+                        window_q.append(q[j])
+                    if len(window_q) == 0 or len(window_r) == 0:
+                        continue
+                    var found = aligner.align(
+                        Span(window_r), Span(window_q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY
+                    )
+                    var after = found.cost + costs.gap(length, True)
+                    var pairs = _window_pairs(found.cigar, w_from)
+                    if _long_gaps(pairs, 0, len(pairs), w_from, w_to) > _long_gaps(p, u, v, r_from, r_to) - 1:
+                        continue
+                    if trace:
+                        print(
+                            "  seq",
+                            d,
+                            "deletion",
+                            length,
+                            "start",
+                            a0,
+                            "->",
+                            t,
+                            "cost",
+                            before,
+                            "->",
+                            after,
+                            "kept" if after - before <= _consolidate_tolerance(length, costs) else "refused",
+                            file=stderr,
+                        )
+                    if after - before > _consolidate_tolerance(length, costs):
+                        continue
+                    for i in range(len(pairs)):
+                        p[u + i] = pairs[i]
+                    moved = True
+                    continue
+                x += 1
+
+
+def _consolidate_tolerance(length: Int, costs: Costs) -> Int:
+    """What moving an event of `length` letters may add to a sequence's alignment cost: two mismatches and one per
+    50 letters (PLEGMA_CONSOLIDATE_SLACK=a,b: a + length // b mismatches, an experiment)."""
+    var a = 2
+    var b = 50
+    var slack = getenv("PLEGMA_CONSOLIDATE_SLACK")
+    if slack != "":
+        try:
+            var parts = slack.split(",")
+            a = Int(String(parts[0]))
+            b = Int(String(parts[1]))
+        except:
+            pass
+    return (a + length // max(b, 1)) * costs.mismatch
+
+
 comptime SNAP_LENGTH = 10
 """The shortest insertion or deletion `on_reference`'s snapping moves."""
 
 
 def _snap_window(length: Int) -> Int:
-    """How far an event of `length` letters may move."""
+    """How far an event of `length` letters may move (PLEGMA_SNAP_WINDOW=N, an experiment: N letters)."""
+    var fixed = getenv("PLEGMA_SNAP_WINDOW")
+    if fixed != "":
+        try:
+            return Int(fixed)
+        except:
+            pass
     return max(2 * length, 100)
 
 
@@ -1095,7 +1450,10 @@ def _snap(seqs: List[List[UInt8]], distinct: List[Int], mut partner: List[List[I
 
 
 def _same_length(a: Int, b: Int) -> Bool:
-    """Two events' lengths within a tenth (5 letters at least): one change, not two changes at one place."""
+    """Two events' lengths within a tenth (5 letters at least): one change, not two changes at one place
+    (PLEGMA_SNAP_ANY_LENGTH=1, an experiment: any lengths, an array's copy-number changes of every size together)."""
+    if getenv("PLEGMA_SNAP_ANY_LENGTH") == "1":
+        return True
     return abs(a - b) <= max(5, max(a, b) // 10)
 
 
