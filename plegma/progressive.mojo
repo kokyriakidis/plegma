@@ -26,7 +26,7 @@ refined objective is lowest is kept.
 from std.os import getenv
 from std.sys import stderr
 
-from karan import Aligner, Costs, Mode, Ties
+from karan import Aligner, Costs, Mode, Ties, alignments
 
 from .backbone import Level, MUMS, SMEMS, backbone, split_anchors
 from .chain import ChainCosts
@@ -872,13 +872,17 @@ comptime REFERENCE_MEMORY = 2 << 30
 """`on_reference`'s memory cap per pair (karan's default, 80 MB, refuses some divergent pairs of a few kb)."""
 
 
-def on_reference(seqs: List[List[UInt8]], costs: Costs, snap: Bool = False) raises -> List[List[UInt8]]:
+def on_reference(
+    seqs: List[List[UInt8]], costs: Costs, snap: Bool = False, threads: Int = 1
+) raises -> List[List[UInt8]]:
     """The MSA of `seqs` anchored on the first, the reference: every other distinct sequence aligned to it exactly
     (karan, `costs`, gaps shifted left through repeats as variant callers normalize them) and its letters put in the
     reference letters' columns, the letters it inserts in the columns between them (the runs different sequences
     insert at one place aligned to each other the same way, on the longest). So the alignment of the reference with every sequence
     is that pair's own optimal one: what a caller reports against the reference path keeps each event whole, where a
     placement by many partners' votes can split a copy-number change into copy-sized pieces. Rows in `seqs`' order.
+
+    With `threads` above one, the alignments to the reference run over that many threads (karan's batch).
 
     With `snap`, each insertion or deletion of `SNAP_LENGTH` letters or more then moves, whole, to a place a sequence
     before it (the heavier, as the input repeats them, then the earlier) put an event of its kind and length (within
@@ -890,14 +894,25 @@ def on_reference(seqs: List[List[UInt8]], costs: Costs, snap: Bool = False) rais
         return List[List[UInt8]]()
     var distinct = _distinct(seqs)
     var partner = List[List[Int]]()
-    var aligner = Aligner()
-    for d in range(len(distinct)):
-        if d == 0:
-            var identity = List[Int]()
-            for i in range(len(seqs[distinct[0]])):
-                identity.append(i)
-            partner.append(identity^)
-        else:
+    var identity = List[Int]()
+    for i in range(len(seqs[distinct[0]])):
+        identity.append(i)
+    partner.append(identity^)
+    if threads > 1 and len(distinct) > 2:
+        # The alignments are independent: karan's batch spreads them over `threads`, the longest first.
+        var references = List[String]()
+        var queries = List[String]()
+        for d in range(1, len(distinct)):
+            references.append(String(unsafe_from_utf8=Span(seqs[distinct[0]])))
+            queries.append(String(unsafe_from_utf8=Span(seqs[distinct[d]])))
+        var found = alignments(
+            references, queries, costs, Mode.GLOBAL, ties=Ties.LEFT, threads=threads, max_memory=REFERENCE_MEMORY
+        )
+        for d in range(1, len(distinct)):
+            partner.append(_pairing(found[d - 1].cigar, len(seqs[distinct[d]])))
+    else:
+        var aligner = Aligner()
+        for d in range(1, len(distinct)):
             partner.append(_onto(aligner, seqs[distinct[0]], seqs[distinct[d]], costs))
     if snap:
         _snap(seqs, distinct, partner)
@@ -1269,8 +1284,13 @@ def _similarity(a: List[UInt64], b: List[UInt64]) -> Float64:
 def _onto(mut aligner: Aligner, c: List[UInt8], q: List[UInt8], costs: Costs) raises -> List[Int]:
     """For each letter of `q`, the letter of `c` its exact alignment to `c` pairs it with (-1: inserted)."""
     var found = aligner.align(Span(c), Span(q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY)
-    var runs = cigar_runs(found.cigar)
-    var out = List[Int](capacity=len(q))
+    return _pairing(found.cigar, len(q))
+
+
+def _pairing(cigar: String, q_length: Int) raises -> List[Int]:
+    """For each query letter of a global alignment's CIGAR, the reference letter it pairs with (-1: inserted)."""
+    var runs = cigar_runs(cigar)
+    var out = List[Int](capacity=q_length)
     var i = 0
     for x in range(len(runs.ops)):
         var op = runs.ops[x]

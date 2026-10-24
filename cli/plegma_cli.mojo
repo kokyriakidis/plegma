@@ -77,6 +77,7 @@ Options:
                 refined (-I, 20 passes by default, with -G's group moves, at -W's prices) and the lower sum of pairs
                 kept (lowest on vntr-eval's costs; on chr20 its graphs genotype worse, splitting copy-number changes)
     -Q          with -A, the default (kept for older command lines)
+    -t INT      threads for -A's alignments to the reference [1]
     -U          with -A -N, no copy-level start
     -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
                 2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
@@ -384,6 +385,7 @@ struct Options(Copyable, Movable):
     var seeding: Bool
     var split_seeds: Bool
     var voted: Bool
+    var threads: Int
     var agree_seeds: Bool
     var window: Int
     var trim: Int
@@ -437,6 +439,7 @@ struct Options(Copyable, Movable):
         self.seeding = False
         self.split_seeds = False
         self.voted = False
+        self.threads = 1
         self.agree_seeds = False
         self.window = 500
         self.trim = 10
@@ -677,7 +680,7 @@ def _poa(input: String, options: Options) raises -> String:
         # share of the input spells.
         var tree = getenv("PLEGMA_TREE")
         var bytes = on_tree(seqs, reference_costs, Float64(tree)) if tree != "" else on_reference(
-            seqs, reference_costs, getenv("PLEGMA_SNAP") == "1"
+            seqs, reference_costs, getenv("PLEGMA_SNAP") == "1", options.threads
         )
         if options.sp_set and options.sp_passes > 0:
             # With -I, refined on the sum of pairs with the reference's row weighing 4 times the rows' number: the
@@ -983,6 +986,9 @@ def main() raises:
             pass
         elif a == "-N":
             options.voted = True
+        elif a == "-t":
+            options.threads = Int(_value(args, i))
+            i += 1
         elif a == "-n":
             options.window = Int(_value(args, i))
             i += 1

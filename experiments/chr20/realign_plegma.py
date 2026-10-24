@@ -19,6 +19,7 @@ seconds (900) is `timeout`, one plegma fails on `aligner_failed`; replace leaves
 the `ok` records an interrupted run left in `<out>.part` (read up to where it was cut) are kept and their regions
 skipped; the others are tried again.
 """
+import collections
 import gzip
 import json
 import os
@@ -75,93 +76,99 @@ def plegma_rows(seqs, timeout, copies=None, flags=None):
     return ["".join(rows["s%d" % k]) for k in range(len(seqs))]
 
 
-def karan_pairing(reference, query, mode):
-    """For each query letter, the reference letter it is aligned to (= or X), or -1 (inserted)."""
+def karan_pairings(reference, queries, mode):
+    """For each query, for each of its letters, the reference letter it is aligned to (= or X), or -1 (inserted): one
+    karan run for all of them."""
+    if not queries:
+        return []
     with tempfile.TemporaryDirectory() as tmp:
         tsv = os.path.join(tmp, "p.tsv")
         with open(tsv, "w") as f:
-            f.write("q\t%s\t%s\n" % (reference, query))
-        out = subprocess.run([KARAN, "--pairs", tsv, "--mode", mode], capture_output=True, text=True).stdout
-    line = out.strip().splitlines()[-1].split("\t")
-    i = int(line[5])
-    j = int(line[7])
-    pair = [-1] * len(query)
-    for n, op in re.findall(r"(\d+)([=XIDM])", line[9]):
-        for _ in range(int(n)):
-            if op == "D":
-                i += 1
-            elif op == "I":
-                j += 1
-            else:
-                pair[j] = i
-                i += 1
-                j += 1
-    return pair
-
-
-def place_fragment(rows, order, alleles, fragment):
-    """A row for `fragment` in the MSA `rows` (dict, rewritten in place when columns are added)."""
-    seq, side = fragment["seq"].upper(), fragment["side"]
-    heaviest = sorted(alleles, key=lambda a: -a["weight"])
-    for a in heaviest:
-        s = a["seq"].upper()
-        at = 0 if side == "left" and s.startswith(seq) else (len(s) - len(seq) if side == "right" and s.endswith(seq)
-                                                             else (s.find(seq) if side == "internal" else -1))
-        if at < 0 or (side == "left" and at != 0):
+            for k, q in enumerate(queries):
+                f.write("q%d\t%s\t%s\n" % (k, reference, q))
+        out = subprocess.run([KARAN, "--pairs", tsv, "--mode", mode], capture_output=True, text=True, check=True).stdout
+    pairs = [None] * len(queries)
+    for line in out.strip().splitlines():
+        w = line.split("\t")
+        if not w[0].startswith("q") or not w[0][1:].isdigit() or len(w) < 10:
             continue
-        row = rows[a["id"]]
-        out, k = [], 0
-        for x in row:
-            if x == "-":
-                out.append("-")
-            else:
-                out.append(x if at <= k < at + len(seq) else "-")
-                k += 1
-        return "".join(out)
-    # Aligned to the heaviest allele, then threaded: its letters take the allele's columns, the rest new ones.
-    a = heaviest[0]
-    s = a["seq"].upper()
-    mode = {"left": "prefix", "right": "suffix"}.get(side, "infix")
-    pair = karan_pairing(s, seq, mode)
-    row = rows[a["id"]]
-    column_of = [c for c, x in enumerate(row) if x != "-"]
-    # The fragment's letters, each with its column, or None (a new column after the last placed column).
-    width = len(row)
-    placed = []
-    last = -1
-    for j, i in enumerate(pair):
-        if i >= 0 and column_of[i] > last:
-            last = column_of[i]
-            placed.append(last)
+        k = int(w[0][1:])
+        i, j = int(w[5]), int(w[7])
+        pair = [-1] * len(queries[k])
+        for n, op in re.findall(r"(\d+)([=XIDM])", w[9]):
+            for _ in range(int(n)):
+                if op == "D":
+                    i += 1
+                elif op == "I":
+                    j += 1
+                else:
+                    pair[j] = i
+                    i += 1
+                    j += 1
+        pairs[k] = pair
+    if any(p is None for p in pairs):
+        raise RuntimeError("karan returned %d of %d pairings" % (sum(p is not None for p in pairs), len(pairs)))
+    return pairs
+
+
+def place_fragments(rows, order, alleles, fragments):
+    """Rows for all of a region's `fragments` in the MSA `rows` (dict, rewritten once when columns are added): a
+    fragment an allele holds whole where its side says takes that allele's columns; any other is aligned (karan, one
+    run per mode) to the heaviest allele, its letters taking the allele's columns and the rest columns of their own
+    after the last column it placed. Every row is built once: placing fragments one by one rebuilt every row, the
+    fragments placed before included, per fragment (hundreds of fragments times hundreds of rows times kilobases)."""
+    heaviest = sorted(alleles, key=lambda a: -a["weight"])
+    width = len(next(iter(rows.values())))
+    # Per fragment: the column of each placed letter, and the letters after each column that need columns of their own.
+    placements = {}
+    aligned = collections.defaultdict(list)
+    for frag in fragments:
+        seq, side = frag["seq"].upper(), frag["side"]
+        for a in heaviest:
+            s = a["seq"].upper()
+            at = 0 if side == "left" and s.startswith(seq) else (len(s) - len(seq) if side == "right" and
+                                                                 s.endswith(seq) else (s.find(seq) if side ==
+                                                                                       "internal" else -1))
+            if at < 0 or (side == "left" and at != 0):
+                continue
+            column_of = [c for c, x in enumerate(rows[a["id"]]) if x != "-"]
+            placements[frag["id"]] = ({column_of[at + j]: seq[j] for j in range(len(seq))}, {})
+            break
         else:
-            placed.append(None)
-    # New columns: after column `last` before each unplaced letter.
-    insert_after = {}
-    last = -1
-    for j, c in enumerate(placed):
-        if c is None:
-            insert_after.setdefault(last, []).append(j)
-        else:
-            last = c
-    new_rows = {m: [] for m in order}
-    frag = []
-    # The fragment's letter in each column, once (scanning the fragment for every column costs their product).
-    letter_at = {}
-    for j, p in enumerate(placed):
-        if p is not None and p not in letter_at:
-            letter_at[p] = seq[j]
+            aligned[{"left": "prefix", "right": "suffix"}.get(side, "infix")].append(frag)
+    base = heaviest[0]
+    column_of = [c for c, x in enumerate(rows[base["id"]]) if x != "-"]
+    for mode, frags in aligned.items():
+        seqs = [f["seq"].upper() for f in frags]
+        for frag, seq, pair in zip(frags, seqs, karan_pairings(base["seq"].upper(), seqs, mode)):
+            letter_at, insert_after = {}, collections.defaultdict(list)
+            last = -1
+            for j, i in enumerate(pair):
+                if i >= 0 and column_of[i] > last:
+                    last = column_of[i]
+                    letter_at[last] = seq[j]
+                else:
+                    insert_after[last].append(seq[j])
+            placements[frag["id"]] = (letter_at, insert_after)
+    # The columns: each old column, then after it every fragment's own letters there, fragment by fragment.
+    ids = [f["id"] for f in fragments]
+    out = {m: [] for m in list(rows) + ids}
     for c in range(-1, width):
         if c >= 0:
-            for m in order:
-                new_rows[m].append(rows[m][c])
-            frag.append(letter_at.get(c, "-"))
-        for j in insert_after.get(c, []):
-            for m in order:
-                new_rows[m].append("-")
-            frag.append(seq[j])
-    for m in order:
-        rows[m] = "".join(new_rows[m])
-    return "".join(frag)
+            for m in rows:
+                out[m].append(rows[m][c])
+            for f in ids:
+                out[f].append(placements[f][0].get(c, "-"))
+        for f in ids:
+            extra = placements[f][1].get(c)
+            if not extra:
+                continue
+            for m in out:
+                if m == f:
+                    out[m].extend(extra)
+                else:
+                    out[m].extend("-" * len(extra))
+    return {m: "".join(x) for m, x in out.items()}
 
 
 def realign(package):
@@ -198,10 +205,10 @@ def realign(package):
         row_of = dict(zip(distinct, msa))
         order = [a["id"] for a in alleles]
         rows = {a["id"]: row_of[a["seq"].upper()] for a in alleles}
-        for frag in package.get("fragments", []):
-            order_now = list(rows)
-            rows[frag["id"]] = place_fragment(rows, order_now, alleles, frag)
-            order.append(frag["id"])
+        fragments = package.get("fragments", [])
+        if fragments:
+            rows = place_fragments(rows, order, alleles, fragments)
+            order += [f["id"] for f in fragments]
         # Columns gapped in every row go; every row must spell its member.
         width = len(next(iter(rows.values())))
         keep = [c for c in range(width) if any(r[c] != "-" for r in rows.values())]
