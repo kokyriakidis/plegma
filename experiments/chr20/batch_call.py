@@ -32,6 +32,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,34 @@ MAX_COPIES = 8
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import local_call  # noqa: E402
+
+
+def fixed_msas(source, ids, cache):
+    """{region: record} of an msas.jsonl.gz (an MSA made once, the star's), each region's record kept in the cache
+    under the file's path, size and time: the file (every chr20 region) is read only for regions not cached yet, and
+    then a record parsed only when its id is wanted."""
+    st = os.stat(source)
+    stamp = hashlib.sha1(json.dumps([os.path.abspath(source), st.st_size, int(st.st_mtime)]).encode()).hexdigest()[:12]
+    out, missing = {}, set()
+    for rid in ids:
+        path = os.path.join(cache, "fixed.%s.%s.json" % (stamp, rid))
+        if os.path.exists(path):
+            out[rid] = json.load(open(path))
+        else:
+            missing.add(rid)
+    if missing:
+        with gzip.open(source, "rt") as f:
+            for line in f:
+                # The id is the record's first field: parse only the wanted.
+                found = re.match(r'\{"id":\s*"([^"]+)"', line)
+                if found is not None and found.group(1) not in missing:
+                    continue
+                r = json.loads(line)
+                if r["id"] in missing:
+                    out[r["id"]] = r
+                    with open(os.path.join(cache, "fixed.%s.%s.json" % (stamp, r["id"])), "w") as g:
+                        json.dump(r, g)
+    return out
 
 
 def msa_key(source, pkg):
@@ -549,11 +578,7 @@ def main(argv=None):
         started = time.time()
         msas = {}
         if source.endswith(".jsonl.gz"):
-            with gzip.open(source, "rt") as f:
-                for line in f:
-                    r = json.loads(line)
-                    if r["id"] in pkgs:
-                        msas[r["id"]] = r
+            msas = fixed_msas(source, [i for i in ids if i in pkgs], cache)
         tasks = [(label, source, pkgs[i], {i: msas[i]} if i in msas else {}, prep_dir, cache,
                   os.path.join(out_dir, "%s.%s" % (label, i), "rows.json") if seed_rows else None, sample) for i in ids]
         graphs, failed = {}, {}
