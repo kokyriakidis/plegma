@@ -882,61 +882,77 @@ def on_reference(seqs: List[List[UInt8]], costs: Costs) raises -> List[List[UInt
     var n = len(seqs)
     if n == 0:
         return List[List[UInt8]]()
-    ref c = seqs[0]
-    var width = len(c)
-    # The distinct sequences, the reference's first.
-    var distinct = List[Int]()
-    var of = List[Int](length=n, fill=-1)
-    for k in range(n):
-        for d in range(len(distinct)):
-            if seqs[distinct[d]] == seqs[k]:
-                of[k] = d
-                break
-        if of[k] < 0:
-            of[k] = len(distinct)
-            distinct.append(k)
-    # Each distinct sequence's letters: the reference letter each takes (-1: inserted), and for an inserted one the
-    # slot (after reference letter i, -1 for before the first) and its place in that slot's run.
+    var distinct = _distinct(seqs)
     var partner = List[List[Int]]()
-    var slot = List[List[Int]]()
-    var place_in = List[List[Int]]()
-    for _ in range(len(distinct)):
-        partner.append(List[Int]())
-        slot.append(List[Int]())
-        place_in.append(List[Int]())
-    var slot_width = List[Int](length=width + 1, fill=0)
     var aligner = Aligner()
     for d in range(len(distinct)):
-        ref q = seqs[distinct[d]]
         if d == 0:
-            for i in range(len(q)):
-                partner[0].append(i)
-                slot[0].append(-2)
-                place_in[0].append(0)
-            continue
-        # A divergent pair under these costs may need more than karan's default memory for its fronts.
-        var found = aligner.align(Span(c), Span(q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY)
-        var runs = cigar_runs(found.cigar)
-        var i = 0
+            var identity = List[Int]()
+            for i in range(len(seqs[distinct[0]])):
+                identity.append(i)
+            partner.append(identity^)
+        else:
+            partner.append(_onto(aligner, seqs[distinct[0]], seqs[distinct[d]], costs))
+    var rows_of = _on_reference_columns(seqs, distinct, partner, costs)
+    var out = List[List[UInt8]]()
+    for k in range(n):
+        out.append(rows_of[_index_of(seqs, distinct, k)].copy())
+    return out^
+
+
+def _distinct(seqs: List[List[UInt8]]) -> List[Int]:
+    """The first index of each distinct sequence, in order."""
+    var distinct = List[Int]()
+    for k in range(len(seqs)):
+        var seen = False
+        for d in range(len(distinct)):
+            if seqs[distinct[d]] == seqs[k]:
+                seen = True
+                break
+        if not seen:
+            distinct.append(k)
+    return distinct^
+
+
+def _index_of(seqs: List[List[UInt8]], distinct: List[Int], k: Int) -> Int:
+    """Which distinct sequence sequence `k` is."""
+    for d in range(len(distinct)):
+        if seqs[distinct[d]] == seqs[k]:
+            return d
+    return -1
+
+
+def _on_reference_columns(
+    seqs: List[List[UInt8]], distinct: List[Int], partner: List[List[Int]], costs: Costs
+) raises -> List[List[UInt8]]:
+    """The rows of the distinct sequences (`distinct[0]` the reference) whose letters `partner` pairs with reference
+    letters (-1: inserted): each letter on its reference letter's column, the runs inserted at one place aligned to
+    each other on the longest (`on_reference`, `costs`), so their copies share columns."""
+    ref c = seqs[distinct[0]]
+    var width = len(c)
+    # For an inserted letter, its slot (after reference letter i, -1 for before the first) and its place in that
+    # slot's run.
+    var slot = List[List[Int]]()
+    var place_in = List[List[Int]]()
+    var slot_width = List[Int](length=width + 1, fill=0)
+    for d in range(len(distinct)):
+        var slots = List[Int]()
+        var places = List[Int]()
+        var last = -1
         var run = 0
-        for x in range(len(runs.ops)):
-            var op = runs.ops[x]
-            for _ in range(runs.counts[x]):
-                if op == DELETION:
-                    i += 1
-                    run = 0
-                elif op == INSERTION:
-                    partner[d].append(-1)
-                    slot[d].append(i - 1)
-                    place_in[d].append(run)
-                    run += 1
-                    slot_width[i] = max(slot_width[i], run)
-                else:
-                    partner[d].append(i)
-                    slot[d].append(-2)
-                    place_in[d].append(0)
-                    i += 1
-                    run = 0
+        for j in range(len(partner[d])):
+            if partner[d][j] >= 0:
+                slots.append(-2)
+                places.append(0)
+                last = partner[d][j]
+                run = 0
+            else:
+                slots.append(last)
+                places.append(run)
+                run += 1
+                slot_width[last + 1] = max(slot_width[last + 1], run)
+        slot.append(slots^)
+        place_in.append(places^)
     # Where several sequences insert different letters at one place, those runs aligned to each other the same way
     # (on the longest of them), so their copies share columns rather than stand left-justified side by side.
     var start_of = List[Dict[Int, Int]]()
@@ -1012,10 +1028,7 @@ def on_reference(seqs: List[List[UInt8]], costs: Costs) raises -> List[List[UInt
             else:
                 row[slot_start[slot[d][j] + 1] + place_in[d][j]] = q[j]
         rows_of.append(row^)
-    var out = List[List[UInt8]]()
-    for k in range(n):
-        out.append(rows_of[of[k]].copy())
-    return out^
+    return rows_of^
 
 
 comptime TREE_K = 15
@@ -1069,43 +1082,52 @@ def _similarity(a: List[UInt64], b: List[UInt64]) -> Float64:
     return Float64(shared) / Float64(union) if union > 0 else 0.0
 
 
-struct _Columns(Movable):
-    """An MSA's columns as a linked list between a head (0) and a tail (1), so columns go in anywhere for free; their
-    order is read once at the end."""
+def _onto(mut aligner: Aligner, c: List[UInt8], q: List[UInt8], costs: Costs) raises -> List[Int]:
+    """For each letter of `q`, the letter of `c` its exact alignment to `c` pairs it with (-1: inserted)."""
+    var found = aligner.align(Span(c), Span(q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY)
+    var runs = cigar_runs(found.cigar)
+    var out = List[Int](capacity=len(q))
+    var i = 0
+    for x in range(len(runs.ops)):
+        var op = runs.ops[x]
+        for _ in range(runs.counts[x]):
+            if op == DELETION:
+                i += 1
+            elif op == INSERTION:
+                out.append(-1)
+            else:
+                out.append(i)
+                i += 1
+    return out^
 
-    var next: List[Int]
-    var prev: List[Int]
 
-    def __init__(out self):
-        self.next = [1, 1]
-        self.prev = [0, 0]
-
-    def before(mut self, x: Int) -> Int:
-        """A new column just before column `x`."""
-        var id = len(self.next)
-        var p = self.prev[x]
-        self.next.append(x)
-        self.prev.append(p)
-        self.next[p] = id
-        self.prev[x] = id
-        return id
-
-    def ranks(self) -> List[Int]:
-        """Each column's place in the MSA, from 0 (the head and tail -1)."""
-        var rank = List[Int](length=len(self.next), fill=-1)
-        var at = self.next[0]
-        var k = 0
-        while at != 1:
-            rank[at] = k
-            k += 1
-            at = self.next[at]
-        return rank^
+def _events(onto: List[Int], parent_on_ref: List[Int], reference_length: Int) -> Int:
+    """The insertions and deletions against the reference of a sequence whose letters pair with its parent's letters
+    `onto`, the parent's own pairing with the reference `parent_on_ref`: its runs of letters on no reference letter,
+    and of reference letters between two consecutive of its own (or past its ends)."""
+    var events = 0
+    var last = -1
+    var inserting = False
+    for j in range(len(onto)):
+        var r = parent_on_ref[onto[j]] if onto[j] >= 0 else -1
+        if r < 0:
+            if not inserting:
+                events += 1
+            inserting = True
+            continue
+        inserting = False
+        if r > last + 1:
+            events += 1
+        last = r
+    if last + 1 < reference_length:
+        events += 1
+    return events
 
 
 def on_tree(seqs: List[List[UInt8]], costs: Costs, share: Float64 = 0.0) raises -> List[List[UInt8]]:
     """The MSA of `seqs` along a tree rooted at the first, the reference: each distinct sequence aligned exactly to
-    its parent (karan, `costs`, gaps shifted left), its letters taking the parent's columns and those it inserts new
-    columns just before the parent's next letter. A difference a family of sequences shares is made once, on the
+    its parent (karan, `costs`, gaps shifted left), its letters taking the reference letters the parent's take, and
+    the runs inserted at one place aligned to each other as `on_reference` aligns them. A difference a family of sequences shares is made once, on the
     tree edge into the family, and every member inherits it the same way: a copy-number change most of the panel
     carries is one deletion of the reference for all of them, an allele that adds copies to it that deletion and an
     insertion, where aligning each to the reference on its own (`on_reference`) splits every member's change at
@@ -1115,7 +1137,10 @@ def on_tree(seqs: List[List[UInt8]], costs: Costs, share: Float64 = 0.0) raises 
     spell it; 0: every one), join first, nearest first (Prim's, on the weighted Jaccard index of k-mer multisets),
     each through its most similar centre already in; then every other through its most similar centre. A family
     hangs one edge below its centre: along a chain of near relatives the small differences of every edge add up to a
-    family's change split in pieces. Rows in `seqs`' order."""
+    family's change split in pieces. A sequence joins through its centre only where that leaves it fewer insertions
+    and deletions against the reference than its own alignment to the reference does (parsimony): where the centre is
+    itself a patchwork of copy differences, a member would inherit them and add copies back beside them. Rows in
+    `seqs`' order."""
     var n = len(seqs)
     if n == 0:
         return List[List[UInt8]]()
@@ -1168,40 +1193,30 @@ def on_tree(seqs: List[List[UInt8]], costs: Costs, share: Float64 = 0.0) raises 
     for d in range(m):
         if not done[d]:
             order.append(d)
-    var columns = _Columns()
-    var col_of = List[List[Int]]()
+    # Each sequence's letters' reference letters (-1: inserted against the reference), through its parents.
+    var on_ref = List[List[Int]]()
     for _ in range(m):
-        col_of.append(List[Int]())
-    for _ in range(len(seqs[distinct[0]])):
-        col_of[0].append(columns.before(1))
+        on_ref.append(List[Int]())
+    for i in range(len(seqs[distinct[0]])):
+        on_ref[0].append(i)
+    var reference_length = len(seqs[distinct[0]])
     var aligner = Aligner()
     for t in range(1, m):
         var d = order[t]
+        ref q = seqs[distinct[d]]
+        # Through its most similar centre or straight onto the reference, whichever makes it differ from the
+        # reference by fewer events (the reference on a tie): a family's shared change is inherited where that is
+        # the simpler account, and an allele whose centre's own changes it would inherit and undo stays apart.
         var p = parent[d]
-        ref c = seqs[distinct[p]]
-        ref q = seqs[distinct[d]]
-        var found = aligner.align(Span(c), Span(q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY)
-        var runs = cigar_runs(found.cigar)
-        var i = 0
-        for x in range(len(runs.ops)):
-            var op = runs.ops[x]
-            for _ in range(runs.counts[x]):
-                if op == DELETION:
-                    i += 1
-                elif op == INSERTION:
-                    col_of[d].append(columns.before(col_of[p][i] if i < len(c) else 1))
-                else:
-                    col_of[d].append(col_of[p][i])
-                    i += 1
-    var rank = columns.ranks()
-    var width = len(columns.next) - 2
-    var rows_of = List[List[UInt8]]()
-    for d in range(m):
-        ref q = seqs[distinct[d]]
-        var row = List[UInt8](length=width, fill=GAP)
+        var onto = _onto(aligner, seqs[distinct[p]], q, costs)
+        if p != 0:
+            var direct = _onto(aligner, seqs[distinct[0]], q, costs)
+            if _events(direct, on_ref[0], reference_length) <= _events(onto, on_ref[p], reference_length):
+                p = 0
+                onto = direct^
         for j in range(len(q)):
-            row[rank[col_of[d][j]]] = q[j]
-        rows_of.append(row^)
+            on_ref[d].append(on_ref[p][onto[j]] if onto[j] >= 0 else -1)
+    var rows_of = _on_reference_columns(seqs, distinct, on_ref, costs)
     var out = List[List[UInt8]]()
     for k in range(n):
         out.append(rows_of[of[k]].copy())

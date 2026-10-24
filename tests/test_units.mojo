@@ -163,7 +163,7 @@ def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
     assert_true(extra <= 6 * 23)
 
 
-def test_on_tree_keeps_a_shared_deletion_the_same_in_every_member() raises:
+def test_on_tree_keeps_each_allele_as_simple_against_the_reference() raises:
     seed(61)
     var left = _random(80)
     var right = _random(80)
@@ -178,18 +178,17 @@ def test_on_tree_keeps_a_shared_deletion_the_same_in_every_member() raises:
     var seqs = List[List[UInt8]]()
     seqs.append(reference.copy())
     seqs.append(member.copy())
-    seqs.append(family.copy())
-    seqs.append(family.copy())
-    var rows = on_tree(seqs, Costs.two_piece(24, 16, 12, 96, 5))
-    for k in range(len(seqs)):
-        assert_true(_ungapped(rows[k]) == seqs[k])
-        assert_equal(len(rows[k]), len(rows[0]))
-    assert_true(rows[2] == rows[3])
-    # Wherever the family has a letter, the member has the same one: it adds the stretch and nothing else.
-    for c in range(len(rows[0])):
-        if rows[2][c] != UInt8(ord("-")):
-            assert_equal(rows[1][c], rows[2][c])
-    assert_true(_gap_runs(rows[0], rows[2]) <= 1)
+    for _ in range(3):
+        seqs.append(family.copy())
+    for share in [0.0, 0.5]:
+        var rows = on_tree(seqs, Costs.two_piece(24, 16, 12, 96, 5), share)
+        for k in range(len(seqs)):
+            assert_true(_ungapped(rows[k]) == seqs[k])
+            assert_equal(len(rows[k]), len(rows[0]))
+        assert_true(rows[2] == rows[4])
+        # Against the reference the family is one deletion, the member that deletion and its insertion.
+        assert_equal(_gap_runs(rows[0], rows[2]) + _gap_runs(rows[2], rows[0]), 1)
+        assert_equal(_gap_runs(rows[0], rows[1]) + _gap_runs(rows[1], rows[0]), 2)
 
 
 def main() raises:
