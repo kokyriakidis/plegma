@@ -1,7 +1,9 @@
 from std.random import random_ui64, seed
 from std.testing import assert_equal, assert_true, TestSuite
 
-from plegma.progressive import progressive
+from karan import Costs
+
+from plegma.progressive import on_reference, progressive
 from plegma.refine import gap_opens, sum_of_pairs
 from plegma.units import tandem_layout, tandem_repeat
 
@@ -121,6 +123,44 @@ def test_progressive_keeps_the_sequences_and_the_copy_start_helps() raises:
     assert_true(both[1] == both[len(seqs) - 1])
     # The copy-level start is kept only when cheaper.
     assert_true(sum_of_pairs(both) + gap_opens(both) <= sum_of_pairs(placed) + gap_opens(placed))
+
+
+def _gap_runs(a: List[UInt8], b: List[UInt8]) -> Int:
+    """The runs of letters of `a` facing gaps in `b`, over the columns where either holds a letter."""
+    var runs = 0
+    var inside = False
+    for c in range(len(a)):
+        if a[c] == UInt8(ord("-")) and b[c] == UInt8(ord("-")):
+            continue
+        var gap = a[c] != UInt8(ord("-")) and b[c] == UInt8(ord("-"))
+        if gap and not inside:
+            runs += 1
+        inside = gap
+    return runs
+
+
+def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
+    seed(59)
+    var left = _random(80)
+    var right = _random(80)
+    var unit = _random(23)
+    var reference = _array(left, unit, 20, right, 0.0)
+    var seqs = List[List[UInt8]]()
+    seqs.append(reference.copy())
+    # Sequences with copies deleted, and some with copies added: against the reference one deletion each.
+    for copies in [14, 9, 20, 26, 24, 11, 14]:
+        seqs.append(_array(left, unit, copies, right, 0.0))
+    var rows = on_reference(seqs, Costs.two_piece(24, 16, 12, 96, 5))
+    for k in range(len(seqs)):
+        assert_true(_ungapped(rows[k]) == seqs[k])
+        assert_equal(len(rows[k]), len(rows[0]))
+    for k in range(1, len(seqs)):
+        assert_true(_gap_runs(rows[0], rows[k]) <= 1)
+    # The same sequence twice, the same row.
+    assert_true(rows[1] == rows[7])
+    # The copies inserted at one place take no more columns than the longest insertion there.
+    var extra = len(rows[0]) - len(reference)
+    assert_true(extra <= 6 * 23)
 
 
 def main() raises:

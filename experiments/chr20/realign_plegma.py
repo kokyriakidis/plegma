@@ -5,7 +5,7 @@ usage: python3 -I experiments/chr20/realign_plegma.py <plegma> <karan> <packages
            [--jobs n] [--timeout s] [--flags "..."] [--max-refined n] [--resume]
 
 Every package whose status is `ok` and whose alleles are not all one (pgrealign's `--select any`) is aligned:
-- its distinct alleles by `plegma <flags> -r 1` (`-L -I 20,64,1` by default: longest first, then the sum-of-pairs
+- its distinct alleles, the reference allele (CHM13's, else the heaviest) first, by `plegma <flags> -r 1` (`-L -I 20,64,1` by default: longest first, then the sum-of-pairs
   refinement with gap opening, whose anchors come from each allele's nearest 24 partners past that many); past
   `--max-refined` distinct alleles (100,000 by default, so none), by `-L` alone;
 - each fragment, a partial walk at the region's edge or inside it, into the row of an allele holding it exactly where
@@ -149,7 +149,11 @@ def realign(package):
     record = {"id": package["id"], "method": "plegma"}
     try:
         alleles = package["alleles"]
-        distinct = list(dict.fromkeys(a["seq"].upper() for a in alleles))
+        # The reference allele (CHM13's) first, else the heaviest: plegma -A -Q anchors the MSA on the first sequence.
+        first = next((a for a in alleles if a["id"] == package.get("ref")), None)
+        if first is None and alleles:
+            first = max(alleles, key=lambda a: a["weight"])
+        distinct = list(dict.fromkeys(([first["seq"].upper()] if first else []) + [a["seq"].upper() for a in alleles]))
         if len(distinct) == 0:
             record.update(status="no_alleles", message="no allele")
             return record

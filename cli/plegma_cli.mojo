@@ -17,7 +17,7 @@ from plegma.order import guide_order
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, Topology, Workspace
 from plegma.poa import SINK, SOURCE, WindowScratch, window_nodes
 from plegma.polish import polish
-from plegma.progressive import progressive
+from plegma.progressive import on_reference, progressive
 from plegma.refine import refine
 
 
@@ -69,6 +69,12 @@ Options:
                 one clear tandem array, a second start with the arrays aligned copy by copy; each refined (-I, 20
                 passes by default, with -G's group moves, at -W's prices) and the lower sum of pairs kept; the graph
                 is the MSA's
+    -Q          with -A, the MSA anchored on the first sequence (the reference): every other aligned to it exactly
+                (pgrealign's scores as costs, gaps left-normalized), its letters in the reference's columns and its
+                insertions between them; each sequence's alignment with the reference is then its own optimal one, as a
+                caller reporting variants against the reference needs; with -I, then refined on the sum of pairs (-W,
+                -I's prices) with the reference weighing 4 times the rows' number, so the others choose among the
+                placements as good against it the one that suits each other
     -U          with -A, no copy-level start
     -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
                 2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
@@ -375,6 +381,7 @@ struct Options(Copyable, Movable):
     var strand: Bool
     var seeding: Bool
     var split_seeds: Bool
+    var on_reference: Bool
     var agree_seeds: Bool
     var window: Int
     var trim: Int
@@ -427,6 +434,7 @@ struct Options(Copyable, Movable):
         self.strand = False
         self.seeding = False
         self.split_seeds = False
+        self.on_reference = False
         self.agree_seeds = False
         self.window = 500
         self.trim = 10
@@ -645,7 +653,42 @@ def _poa(input: String, options: Options) raises -> String:
     var graph = Graph()
     # -A: the MSA by anchored progressive placement; its graph is built from it, and its rows are the output's.
     var anchored_rows = List[String]()
-    if options.anchored:
+    if options.anchored and options.on_reference:
+        # -Q: anchored on the first sequence, pgrealign's scores as costs (abPOA's 8, 16, 16+8k, 96+k halved:
+        # a mismatch 24, a gap of k letters min(16 + 12k, 96 + 5k)).
+        var reference_costs = Costs.two_piece(24, 16, 12, 96, 5)
+        var bytes = on_reference(seqs, reference_costs)
+        if options.sp_set and options.sp_passes > 0:
+            # With -I, refined on the sum of pairs with the reference's row weighing 4 times the rows' number: the
+            # other rows move only among the placements that keep their alignment with the reference as good, the
+            # one that suits the others best (in a tandem repeat, which copy a deletion takes).
+            var weights = List[Int](length=len(seqs), fill=1)
+            weights[0] = 4 * len(seqs)
+            bytes = refine(
+                bytes,
+                options.sp_passes,
+                options.sp_band,
+                options.sp_max_band,
+                True,
+                # The bands' centres come from pairwise alignments at -A's vote costs (vntr-eval's affine): under the
+                # reference's two-piece costs karan may refuse a divergent pair at its default memory.
+                Costs.affine(4, 6, 2),
+                options.sp_gap_open,
+                False,
+                options.group_band if options.group_set else 256,
+                0,
+                weights,
+                1000,
+                options.mismatch if options.prices_set else 2,
+                options.gap if options.prices_set else 2,
+            )
+        var names = List[String]()
+        for r in range(len(seqs)):
+            names.append(records.names[r])
+            anchored_rows.append(String(unsafe_from_utf8=bytes[r].copy()))
+        graph = Graph.from_msa(names, anchored_rows)
+        order.clear()
+    elif options.anchored:
         var bytes = progressive(
             seqs,
             options.sp_passes if options.sp_set else 20,
@@ -914,6 +957,8 @@ def main() raises:
             options.split_seeds = True
         elif a == "-Y":
             options.agree_seeds = True
+        elif a == "-Q":
+            options.on_reference = True
         elif a == "-n":
             options.window = Int(_value(args, i))
             i += 1

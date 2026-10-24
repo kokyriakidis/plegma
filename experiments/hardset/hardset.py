@@ -150,7 +150,9 @@ def one(task):
                 rows = {a[0]: r for a, r in zip(alleles, rows)}
         else:
             start_msa = os.path.join(work, "msa", start_label, rid + ".fa") if start_label else None
-            rows, seconds = plegma_msa(plegma, flags, alleles, timeout, start_msa)
+            # CHM13's allele first (plegma -A -Q anchors the MSA on the first sequence).
+            ordered = sorted(alleles, key=lambda a: a[0] != region.get("ref_allele"))
+            rows, seconds = plegma_msa(plegma, flags, ordered, timeout, start_msa)
     except subprocess.TimeoutExpired:
         return rid, {"status": "timeout"}
     except Exception as error:  # noqa: BLE001
@@ -252,6 +254,9 @@ def main():
         picked = sorted(every, key=lambda r: int(r["alleles"]) * int(r["longest"]) ** 2)[:pick]
     found = packages(package_path, {r["id"] for r in picked})
     picked = [r for r in picked if r["id"] in found]
+    # CHM13's allele is the package's (qc draws its pairs from the package); the hard set's table names it by
+    # vntr-eval's own extract's ids.
+    picked = [dict(r, ref_allele=found[r["id"]].get("ref")) for r in picked]
     alleles = {r["id"]: alleles_of(found[r["id"]]) for r in picked}
     os.makedirs(os.path.join(work, "optima"), exist_ok=True)
     labels = [label] + (["star"] if with_star else [])

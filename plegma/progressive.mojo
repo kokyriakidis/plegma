@@ -409,8 +409,24 @@ def _placed(
             var keep = order[t]
             order[t] = order[u]
             order[u] = keep
-    if nearest and n > 2:
-        # Prim's order from the longest: each next sequence the one nearest any placed one.
+    # PLEGMA_ORDER (an experiment): `heavy` places the heaviest first (most copies, then longest); `heavy_prim` starts
+    # from the heaviest and then takes each time the sequence nearest one already placed.
+    var order_text = getenv("PLEGMA_ORDER")
+    if order_text == "heavy" or order_text == "heavy_prim":
+        var by_weight = List[UInt64]()
+        for k in range(n):
+            by_weight.append(
+                (UInt64((1 << 20) - min(weights[k], (1 << 20) - 1)) << 40)
+                | (UInt64((1 << 20) - min(len(seqs[k]), (1 << 20) - 1)) << 20)
+                | UInt64(k)
+            )
+        sort(by_weight)
+        order.clear()
+        for key in by_weight:
+            order.append(Int(key & 0xFFFFF))
+    var prim_needed = nearest or order_text == "heavy_prim"
+    if prim_needed and n > 2:
+        # Prim's order from the first: each next sequence the one nearest any placed one.
         var dist_aligner = Aligner()
         var near = List[Int](length=n, fill=Int.MAX)
         var done = List[Bool](length=n, fill=False)
@@ -432,6 +448,17 @@ def _placed(
                 break
             at = next
         order = prim^
+    # PLEGMA_CENTRE=<k> (an experiment): sequence k placed first and the only voter of every other, a star around it.
+    var centre_text = getenv("PLEGMA_CENTRE")
+    var centred = centre_text != "" and Int(centre_text) < n
+    if centred:
+        var centre = Int(centre_text)
+        var rest = List[Int]()
+        rest.append(centre)
+        for k in order:
+            if k != centre:
+                rest.append(k)
+        order = rest^
     var cascade = _cascade(one_indel)
     var aligner = Aligner()
     var auditing = getenv("PLEGMA_AUDIT") == "1"
@@ -475,7 +502,10 @@ def _placed(
         if cap_text != "":
             voter_cap = Int(cap_text)
         var voters = List[Bool](length=len(placed), fill=True)
-        if len(placed) > voter_cap:
+        if centred:
+            for r in range(1, len(placed)):
+                voters[r] = False
+        elif len(placed) > voter_cap:
             var keys = List[UInt64]()
             for r in range(len(placed)):
                 var d = aligner.distance(Span(placed[r]), Span(q)) if len(placed[r]) > 0 else Int(UInt32.MAX)
@@ -836,6 +866,156 @@ def _tree_rows(seqs: List[List[UInt8]], mut aligner: Aligner) raises -> List[Lis
         rows[k] = both[1][0].copy()
         joined.append(k)
     return rows^
+
+
+comptime REFERENCE_MEMORY = 2 << 30
+"""`on_reference`'s memory cap per pair (karan's default, 80 MB, refuses some divergent pairs of a few kb)."""
+
+
+def on_reference(seqs: List[List[UInt8]], costs: Costs) raises -> List[List[UInt8]]:
+    """The MSA of `seqs` anchored on the first, the reference: every other distinct sequence aligned to it exactly
+    (karan, `costs`, gaps shifted left through repeats as variant callers normalize them) and its letters put in the
+    reference letters' columns, the letters it inserts in the columns between them (the runs different sequences
+    insert at one place aligned to each other the same way, on the longest). So the alignment of the reference with every sequence
+    is that pair's own optimal one: what a caller reports against the reference path keeps each event whole, where a
+    placement by many partners' votes can split a copy-number change into copy-sized pieces. Rows in `seqs`' order."""
+    var n = len(seqs)
+    if n == 0:
+        return List[List[UInt8]]()
+    ref c = seqs[0]
+    var width = len(c)
+    # The distinct sequences, the reference's first.
+    var distinct = List[Int]()
+    var of = List[Int](length=n, fill=-1)
+    for k in range(n):
+        for d in range(len(distinct)):
+            if seqs[distinct[d]] == seqs[k]:
+                of[k] = d
+                break
+        if of[k] < 0:
+            of[k] = len(distinct)
+            distinct.append(k)
+    # Each distinct sequence's letters: the reference letter each takes (-1: inserted), and for an inserted one the
+    # slot (after reference letter i, -1 for before the first) and its place in that slot's run.
+    var partner = List[List[Int]]()
+    var slot = List[List[Int]]()
+    var place_in = List[List[Int]]()
+    for _ in range(len(distinct)):
+        partner.append(List[Int]())
+        slot.append(List[Int]())
+        place_in.append(List[Int]())
+    var slot_width = List[Int](length=width + 1, fill=0)
+    var aligner = Aligner()
+    for d in range(len(distinct)):
+        ref q = seqs[distinct[d]]
+        if d == 0:
+            for i in range(len(q)):
+                partner[0].append(i)
+                slot[0].append(-2)
+                place_in[0].append(0)
+            continue
+        # A divergent pair under these costs may need more than karan's default memory for its fronts.
+        var found = aligner.align(Span(c), Span(q), costs, Mode.GLOBAL, ties=Ties.LEFT, max_memory=REFERENCE_MEMORY)
+        var runs = cigar_runs(found.cigar)
+        var i = 0
+        var run = 0
+        for x in range(len(runs.ops)):
+            var op = runs.ops[x]
+            for _ in range(runs.counts[x]):
+                if op == DELETION:
+                    i += 1
+                    run = 0
+                elif op == INSERTION:
+                    partner[d].append(-1)
+                    slot[d].append(i - 1)
+                    place_in[d].append(run)
+                    run += 1
+                    slot_width[i] = max(slot_width[i], run)
+                else:
+                    partner[d].append(i)
+                    slot[d].append(-2)
+                    place_in[d].append(0)
+                    i += 1
+                    run = 0
+    # Where several sequences insert different letters at one place, those runs aligned to each other the same way
+    # (on the longest of them), so their copies share columns rather than stand left-justified side by side.
+    var start_of = List[Dict[Int, Int]]()
+    for d in range(len(distinct)):
+        var starts = Dict[Int, Int]()
+        for j in range(len(partner[d])):
+            if partner[d][j] < 0 and (j == 0 or partner[d][j - 1] >= 0 or slot[d][j - 1] != slot[d][j]):
+                starts[slot[d][j] + 1] = j
+        start_of.append(starts^)
+    for place in range(width + 1):
+        if slot_width[place] < 2:
+            continue
+        var members = List[Int]()
+        var pieces = List[List[UInt8]]()
+        for d in range(len(distinct)):
+            var j0 = start_of[d].get(place)
+            if not j0:
+                continue
+            var j = j0.value()
+            var piece = List[UInt8]()
+            while j < len(partner[d]) and partner[d][j] < 0 and slot[d][j] + 1 == place:
+                piece.append(seqs[distinct[d]][j])
+                j += 1
+            members.append(d)
+            pieces.append(piece^)
+        var differ = False
+        for k in range(1, len(pieces)):
+            if pieces[k] != pieces[0]:
+                differ = True
+                break
+        if not differ:
+            continue
+        # The longest piece first: the anchor of this place's own alignment.
+        var longest = 0
+        for k in range(1, len(pieces)):
+            if len(pieces[k]) > len(pieces[longest]):
+                longest = k
+        var ordered = List[List[UInt8]]()
+        var at = List[Int]()
+        ordered.append(pieces[longest].copy())
+        at.append(longest)
+        for k in range(len(pieces)):
+            if k != longest:
+                ordered.append(pieces[k].copy())
+                at.append(k)
+        var sub = on_reference(ordered, costs)
+        slot_width[place] = len(sub[0])
+        for t in range(len(at)):
+            var d = members[at[t]]
+            var j = start_of[d][place]
+            for c in range(len(sub[t])):
+                if sub[t][c] != GAP:
+                    place_in[d][j] = c
+                    j += 1
+    # Columns: slot before the first reference letter, then each reference letter followed by its slot.
+    var column_of_letter = List[Int](length=width, fill=0)
+    var slot_start = List[Int](length=width + 1, fill=0)
+    var col = 0
+    slot_start[0] = 0
+    col += slot_width[0]
+    for i in range(width):
+        column_of_letter[i] = col
+        col += 1
+        slot_start[i + 1] = col
+        col += slot_width[i + 1]
+    var rows_of = List[List[UInt8]]()
+    for d in range(len(distinct)):
+        ref q = seqs[distinct[d]]
+        var row = List[UInt8](length=col, fill=GAP)
+        for j in range(len(q)):
+            if partner[d][j] >= 0:
+                row[column_of_letter[partner[d][j]]] = q[j]
+            else:
+                row[slot_start[slot[d][j] + 1] + place_in[d][j]] = q[j]
+        rows_of.append(row^)
+    var out = List[List[UInt8]]()
+    for k in range(n):
+        out.append(rows_of[of[k]].copy())
+    return out^
 
 
 def progressive(
