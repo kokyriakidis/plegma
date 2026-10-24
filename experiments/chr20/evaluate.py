@@ -9,10 +9,12 @@ genotype the whole chromosome, to compare MSAs in minutes and see why each errs.
       regions hold (extra_reads.py, in place); then the prep's checks (prep_check.py: windows, mates, truth inside the
       scored interior, read depth, starved interiors).
   run     <prep dir> <packages.jsonl.gz> <out dir> <label>=<msas.jsonl.gz | plegma flags>[@ENV=v;ENV=v] ...
-          [--regions file] [--jobs n]
+          [--regions file] [--jobs n] [--minimal]
       each label's calls (batch_call.py: its MSA, the graph, vg haplotypes sampling on the region's own reads, giraffe,
       vg call, the scores), with the environment switches after `@`; calls cached by the rows, so an unchanged MSA costs
-      nothing. Writes <out dir>/<label>/qc.tsv (every step's numbers per region) and batch_calls.tsv.
+      nothing. Writes <out dir>/<label>/qc.tsv (every step's numbers per region) and batch_calls.tsv. With --minimal,
+      each graph only CHM13's row and the rows nearest HG002's truth (a diagnostic: do the reads and vg call get the
+      truth when nothing else is there?).
   report  <prep dir> <packages.jsonl.gz> <out dir> <label> ... [--regions file]
       per region and label: structural TP/FN/FP, the MSA's width over its longest allele, its scattered changes (one
       change of one length at several places), the called haplotypes' edit distance to HG002's truth against the least
@@ -63,6 +65,8 @@ def prep(args):
 
 
 def run(args):
+    minimal = "--minimal" in args
+    args = [a for a in args if a != "--minimal"]
     regions = option(args, "--regions", "")
     jobs = option(args, "--jobs", "8")
     prep_dir, packages, out_dir = args[:3]
@@ -74,7 +78,8 @@ def run(args):
             k, v = pair.split("=", 1)
             env[k] = v
         cmd = ["python3", "-I", os.path.join(HERE, "batch_call.py"), prep_dir, packages, out_dir, "%s=%s" % (label, flags),
-               "--jobs", jobs, "--vg-haplotypes", "region"] + (["--regions", regions] if regions else [])
+               "--jobs", jobs, "--vg-haplotypes", "region"] + (["--regions", regions] if regions else []) + (
+                   ["--minimal"] if minimal else [])
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
         lines = [x for x in proc.stdout.splitlines() if x.startswith(label) or x.startswith("   ")]
         print("\n".join(x[:240] for x in lines) if lines else "%s failed: %s" % (label, proc.stderr[-400:]), flush=True)

@@ -10,7 +10,8 @@ Prep is local_call.py prep's (each region's flanks, reads, CHM13 slice and truth
 1. each region's MSA (in parallel; as local_call.py makes it; plegma's cached by the binary, the flags and the alleles,
    and with `--seed-rows` taken from a previous run's <out dir>/<label>.<region>/rows.json when not cached yet),
    restricted (`--sample`, 32; 0 keeps all; `--vg-haplotypes <kff | region>`: vg haplotypes itself samples, by those
-   counts or the region's own reads', see call_region)
+   counts or the region's own reads', see call_region; `--minimal`: CHM13's row and the two rows nearest HG002's
+   truth, a diagnostic)
    to CHM13's row and the alleles the region's reads support best, as the
    production pipeline's vg haplotypes samples 32 haplotypes by the sample's k-mers before mapping (a graph of every
    allele, hundreds of haplotypes, takes minutes to index and map and genotypes a harder graph than production's), flanked by CHM13's flanks and induced into a graph
@@ -164,6 +165,28 @@ def sampled(rows, pkg, prep_dir, count):
     return {a: "".join(r[c] for c in cols) for a, r in kept.items()}
 
 
+MINIMAL = -2
+"""`graph_of`'s sample for a diagnostic graph of CHM13's row and the rows nearest HG002's two truth haplotypes."""
+
+
+def minimal(rows, pkg, prep_dir, meta):
+    """The MSA restricted to CHM13's row and the two rows nearest HG002's truth haplotypes (haps.py), the columns no
+    kept row uses dropped: whether the reads and the genotyper call the truth when the graph holds nothing else. A
+    diagnostic: it knows the truth."""
+    import haps
+
+    _, _, truth = haps.region(None, prep_dir, pkg, pkg["id"])
+    pool = {}
+    for a, r in rows.items():
+        pool.setdefault(meta["left"] + r.replace("-", "") + meta["right"], []).append(a)
+    weight = {a["id"]: a["weight"] for a in pkg["alleles"]}
+    keep = {pkg.get("ref")} | {haps.nearest(t, pool, weight)[1] for t in truth}
+    kept = {a: r for a, r in rows.items() if a in keep}
+    width = len(next(iter(kept.values())))
+    cols = [c for c in range(width) if any(r[c] != "-" for r in kept.values())]
+    return {a: "".join(r[c] for c in cols) for a, r in kept.items()}
+
+
 def graph_of(task):
     """A region's MSA rows (cached by msa_key when plegma makes them; with `seed`, a previous run's rows.json of the
     label taken as the MSA when the cache has none), its flanked graph and the rows' key."""
@@ -193,6 +216,8 @@ def graph_of(task):
         return rid, None, "no MSA"
     if sample > 0:
         rows = sampled(rows, pkg, prep_dir, sample)
+    elif sample == MINIMAL:
+        rows = minimal(rows, pkg, prep_dir, meta)
     flanked = {a: meta["left"] + r + meta["right"] for a, r in rows.items()}
     g = induce.induce(flanked)
     # The steps' invariants, checked here and reported (qc.tsv): every row spells its allele, every walk its flanked
@@ -207,7 +232,7 @@ def graph_of(task):
           "chm13_window": int(ref in rows and (meta["left"] + alleles[ref] + meta["right"]).upper() == window),
           "nodes": len(g.seq), "edges": len(g.edges), "columns": len(next(iter(rows.values())))}
     # vg haplotypes samples in call_region: the key says so (the rows are then all of them).
-    key = hashlib.sha1(json.dumps([rid, sorted(rows.items())] + (["vg haplotypes"] if sample < 0 else []))
+    key = hashlib.sha1(json.dumps([rid, sorted(rows.items())] + (["vg haplotypes"] if sample == -1 else []))
                        .encode()).hexdigest()[:20]
     weight = {a["id"]: a["weight"] for a in pkg["alleles"]}
     return rid, {"key": key, "rows": rows, "seq": g.seq, "edges": sorted(g.edges), "walks": g.walks,
@@ -554,6 +579,10 @@ def main(argv=None):
         kff = kff if kff == "region" else os.path.abspath(kff)
         del args[args.index("--vg-haplotypes") : args.index("--vg-haplotypes") + 2]
         sample = -1
+    if "--minimal" in args:
+        args.remove("--minimal")
+        sample = MINIMAL
+        kff = None
     seed_rows = "--seed-rows" in args
     args = [a for a in args if a != "--seed-rows"]
     chosen = None
