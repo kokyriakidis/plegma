@@ -8,8 +8,8 @@ sampled ones, and the flanks are CHM13's).
   run:   python3 -I experiments/chr20/local_call.py run <prep dir> <packages.jsonl.gz> <out dir>
              <label>=<msas.jsonl.gz | plegma flags> [...] [--jobs n] [--regions a,b|file]
 
-`prep`, once for a set of regions: the reads that the chr20 arms (`arm_<arm>`) align into each region (its nodes, as
-region_reads.py finds them), both mates, written per region from the arms' FASTQs; CHM13's sequence over the region
+`prep`, once for a set of regions: the reads that the chr20 arms (`arm_<arm>`) align into each region or its flanks
+(its nodes and CHM13's within FLANK letters of them, as region_reads.py finds them), both mates, written per region from the arms' FASTQs; CHM13's sequence over the region
 and FLANK letters each side; and the truth over that interval (the T2T-Q100 small and structural VCFs and benchmark
 beds that score_calls.py sliced into <work dir>/calls/truth), shifted to the interval's coordinates.
 
@@ -121,11 +121,13 @@ def prep(args):
                  for a in arms]
         intervals = region_reads.region_intervals(packages, walks[0], walks)
         wanted_ids = set(pkgs)
+        # The reads the arms map within FLANK letters of a region, as well as into it: the local graph has those flanks.
+        flanks = region_reads.flank_nodes(packages, walks[0], walks, FLANK, wanted_ids)
         for a, arm in enumerate(arms):
             mine = [x for x in intervals[a] if x[2] in wanted_ids]
-            for read, rid in region_reads.read_regions(os.path.join(work, "arm_%s" % arm, "short.gaf.gz"),
-                                                       mine).items():
-                reads[read.rsplit("/", 1)[0]].add(rid)
+            for read, rids in region_reads.read_regions(os.path.join(work, "arm_%s" % arm, "short.gaf.gz"), mine,
+                                                        every=True, extra=flanks[a]).items():
+                reads[read.rsplit("/", 1)[0]].update(rids)
         with open(saved, "w") as f:
             json.dump({r: sorted(x) for r, x in reads.items()}, f)
     print("reads in the %d regions: %d" % (len(pkgs), len(reads)), flush=True)

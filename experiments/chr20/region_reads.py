@@ -87,9 +87,31 @@ def region_intervals(packages_path, walk_first, walks):
     return out
 
 
-def read_regions(gaf, intervals):
+def flank_nodes(packages_path, walk_first, walks, flank, wanted):
+    """{arm index: {node id: set of regions}}: the nodes of CHM13's walk within `flank` letters before each wanted
+    region's left anchor and after its right one, in each arm (node ids follow CHM13's order in no graph for sure, so
+    the nodes themselves, not a range of ids)."""
+    offset_of = {nid: off for nid, off in walk_first}
+    out = [collections.defaultdict(set) for _ in walks]
+    offsets = [[off for _, off in walk] for walk in walks]
+    with gzip.open(packages_path, "rt") as f:
+        for line in f:
+            p = json.loads(line)
+            L, R = p.get("L"), p.get("R")
+            if p["id"] not in wanted or L not in offset_of or R not in offset_of:
+                continue
+            lo, hi = offset_of[L], offset_of[R]
+            for a, walk in enumerate(walks):
+                for start, end in ((lo - flank, lo), (hi, hi + flank)):
+                    for k in range(bisect.bisect_left(offsets[a], start), bisect.bisect_right(offsets[a], end)):
+                        out[a][walk[k][0]].add(p["id"])
+    return out
+
+
+def read_regions(gaf, intervals, every=False, extra=None):
     """{read: region} for the reads whose alignment visits a region's nodes (the read keyed as compare_reads.sh
-    keys it: name/mate)."""
+    keys it: name/mate); with `every`, {read: set of regions}, every region whose nodes, or `extra` nodes ({node id:
+    regions}), it visits."""
     starts = [x[0] for x in intervals]
     out = {}
     with gzip.open(gaf, "rt") as f:
@@ -100,18 +122,20 @@ def read_regions(gaf, intervals):
             tag = "1" if "\tfn:Z:" in line else "2" if "\tfp:Z:" in line else "s"
             path = w[5]
             k = 0
-            hit = None
-            while k < len(path) and hit is None:
+            hits = set()
+            while k < len(path) and (every or not hits):
                 j = k + 1
                 while j < len(path) and path[j] not in "<>":
                     j += 1
                 nid = int(path[k + 1 : j])
                 i = bisect.bisect_right(starts, nid) - 1
                 if i >= 0 and nid <= intervals[i][1]:
-                    hit = intervals[i][2]
+                    hits.add(intervals[i][2])
+                if extra is not None and nid in extra:
+                    hits.update(extra[nid])
                 k = j
-            if hit is not None:
-                out[w[0] + "/" + tag] = hit
+            if hits:
+                out[w[0] + "/" + tag] = hits if every else next(iter(hits))
     return out
 
 

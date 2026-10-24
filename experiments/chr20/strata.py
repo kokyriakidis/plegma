@@ -95,7 +95,9 @@ def stratify(task):
             panel.setdefault(meta["left"] + a["seq"].upper() + meta["right"], []).append(a["id"])
         calls, sampled, called, pair = haps.called(out_dir, rid, label, meta, contig, truth)
         rows = json.load(open(os.path.join(out_dir, "%s.%s" % (label, rid), "rows.json")))
-        key = hashlib.sha1(json.dumps([rid, sorted(rows.items())]).encode()).hexdigest()[:20]
+        key_path = os.path.join(out_dir, "%s.%s" % (label, rid), "key.txt")
+        key = (open(key_path).read().strip() if os.path.exists(key_path) else
+               hashlib.sha1(json.dumps([rid, sorted(rows.items())]).encode()).hexdigest()[:20])
         gq = min_gq(os.path.join(out_dir, "cache", key + ".vcf"))
         other_right = [False, False]
         for o in others:

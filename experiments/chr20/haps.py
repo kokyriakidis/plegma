@@ -85,13 +85,18 @@ def region(out_dir, prep_dir, pkg, rid):
     for kind in ("smvar", "stvar"):
         with gzip.open(os.path.join(prep_dir, rid, "truth.chr20.%s.vcf.gz" % kind), "rt") as f:
             truth += records(f)
+    # Only the truth inside the flanks: they are CHM13's in every graph, so HG002's variants there are no graph's.
+    lo, hi = len(meta["left"]), len(contig) - len(meta["right"])
+    truth = [r for r in truth if lo <= r[0] - 1 and r[0] - 1 + len(r[1]) <= hi]
     return meta, contig, [apply(contig, truth, h) for h in (0, 1)]
 
 
 def called(out_dir, rid, label, meta, contig, true_haps):
     """A label's called haplotypes paired with the truth's: (rows, haplotypes, the truth's index for each)."""
     rows = json.load(open(os.path.join(out_dir, "%s.%s" % (label, rid), "rows.json")))
-    key = hashlib.sha1(json.dumps([rid, sorted(rows.items())]).encode()).hexdigest()[:20]
+    key_path = os.path.join(out_dir, "%s.%s" % (label, rid), "key.txt")
+    key = (open(key_path).read().strip() if os.path.exists(key_path) else
+           hashlib.sha1(json.dumps([rid, sorted(rows.items())]).encode()).hexdigest()[:20])
     calls = records(open(os.path.join(out_dir, "cache", key + ".vcf")))
     haps = [apply(contig, calls, h) for h in (0, 1)]
     straight = distance(haps[0], true_haps[0]) + distance(haps[1], true_haps[1])

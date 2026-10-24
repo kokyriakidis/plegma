@@ -9,7 +9,9 @@ usage: python3 -I experiments/chr20/batch_call.py <prep dir> <packages.jsonl.gz>
 Prep is local_call.py prep's (each region's flanks, reads, CHM13 slice and truth). Per label:
 1. each region's MSA (in parallel; as local_call.py makes it; plegma's cached by the binary, the flags and the alleles,
    and with `--seed-rows` taken from a previous run's <out dir>/<label>.<region>/rows.json when not cached yet),
-   restricted (`--sample`, 32; 0 keeps all) to CHM13's row and the alleles the region's reads support best, as the
+   restricted (`--sample`, 32; 0 keeps all; `--vg-haplotypes <kff | region>`: vg haplotypes itself samples, by those
+   counts or the region's own reads', see call_region)
+   to CHM13's row and the alleles the region's reads support best, as the
    production pipeline's vg haplotypes samples 32 haplotypes by the sample's k-mers before mapping (a graph of every
    allele, hundreds of haplotypes, takes minutes to index and map and genotypes a harder graph than production's), flanked by CHM13's flanks and induced into a graph
    (pgrealign's induce.py), and a key: the hash of its rows;
@@ -60,10 +62,10 @@ def msa_key(source, pkg):
 K = 29
 
 
-def read_kmers(prep_dir, rid):
-    """The 29-mers of a region's reads, both strands."""
+def read_kmer_counts(prep_dir, rid):
+    """The 29-mers of a region's reads, both strands, with their counts."""
     comp = str.maketrans("ACGT", "TGCA")
-    out = set()
+    out = collections.Counter()
     for name in ("R1", "R2", "single"):
         path = os.path.join(prep_dir, rid, name + ".fq")
         with open(path) as f:
@@ -73,27 +75,59 @@ def read_kmers(prep_dir, rid):
                 seq = line.strip().upper()
                 for s in (seq, seq.translate(comp)[::-1]):
                     for i in range(len(s) - K + 1):
-                        out.add(s[i : i + K])
+                        out[s[i : i + K]] += 1
     return out
 
 
+PRESENT_DISCOUNT = 0.9
+HET_ADJUSTMENT = 0.05
+ABSENT_SCORE = 0.8
+
+
 def sampled(rows, pkg, prep_dir, count):
-    """The MSA restricted to CHM13's row and the `count` alleles the region's reads support best (an allele's distinct
-    29-mers the reads hold less those they do not, then its haplotypes: an allele the reads fit whole outranks a
-    shorter one whose fewer k-mers they also hold), as vg haplotypes samples the haplotypes the production graph keeps
-    by the sample's k-mers; the columns no kept row uses dropped."""
-    kmers = read_kmers(prep_dir, pkg["id"])
+    """The MSA restricted to CHM13's row and `count` alleles chosen as vg haplotypes chooses the haplotypes the
+    production graph keeps: each allele's distinct 29-mers classed by the reads' counts against one haplotype's depth
+    (the median count of the K-mers every allele holds, halved) as absent, heterozygous or homozygous; greedily, the
+    allele whose K-mers score most (present +1, absent -ABSENT_SCORE) joins, and the K-mers it holds then count less
+    (a homozygous one PRESENT_DISCOUNT times, a heterozygous one HET_ADJUSTMENT: the second haplotype is the one that
+    holds what the first does not). So the two alleles the reads support come first, and an allele whose only mark is
+    a deletion's junction is not crowded out by near copies of the reference. The columns no kept row uses dropped."""
+    import numpy
+
+    counts = read_kmer_counts(prep_dir, pkg["id"])
     weight = {a["id"]: a["weight"] for a in pkg["alleles"]}
-    score = {}
-    for a, r in rows.items():
-        seq = r.replace("-", "")
-        mine = {seq[i : i + K] for i in range(len(seq) - K + 1)}
-        held = len(mine & kmers)
-        score[a] = (held - (len(mine) - held), weight.get(a, 0))
     by_seq = {}
-    for a in sorted(rows, key=lambda a: score[a], reverse=True):
+    for a in sorted(rows, key=lambda a: -weight.get(a, 0)):
         by_seq.setdefault(rows[a].replace("-", ""), a)
-    keep = set(list(by_seq.values())[:count]) | {pkg.get("ref")}
+    seqs = list(by_seq)
+    index = {}
+    holds = []
+    for seq in seqs:
+        mine = {seq[i : i + K] for i in range(len(seq) - K + 1)}
+        holds.append([index.setdefault(km, len(index)) for km in mine])
+    m = numpy.zeros((len(seqs), len(index)), dtype=numpy.float32)
+    for i, cols in enumerate(holds):
+        m[i, cols] = 1.0
+    observed = numpy.zeros(len(index))
+    for km, j in index.items():
+        observed[j] = counts.get(km, 0)
+    shared = m.min(axis=0) > 0
+    pool = observed[shared] if shared.any() else observed[observed > 0]
+    haploid = max(1.0, float(numpy.median(pool)) / 2) if len(pool) else 1.0
+    absent = observed < 0.3 * haploid
+    het = ~absent & (observed < 1.5 * haploid)
+    score = numpy.where(absent, -ABSENT_SCORE, 1.0)
+    chosen = []
+    left = list(range(len(seqs)))
+    while left and len(chosen) < count:
+        totals = m[left] @ score
+        best = left[int(numpy.argmax(totals))]
+        chosen.append(best)
+        left.remove(best)
+        mine = m[best] > 0
+        score = numpy.where(mine & ~absent & ~het, score * PRESENT_DISCOUNT, score)
+        score = numpy.where(mine & het, numpy.minimum(score, HET_ADJUSTMENT), score)
+    keep = {by_seq[seqs[i]] for i in chosen} | {pkg.get("ref")}
     kept = {a: r for a, r in rows.items() if a in keep}
     width = len(next(iter(kept.values())))
     cols = [c for c in range(width) if any(r[c] != "-" for r in kept.values())]
@@ -131,7 +165,9 @@ def graph_of(task):
         rows = sampled(rows, pkg, prep_dir, sample)
     flanked = {a: meta["left"] + r + meta["right"] for a, r in rows.items()}
     g = induce.induce(flanked)
-    key = hashlib.sha1(json.dumps([rid, sorted(rows.items())]).encode()).hexdigest()[:20]
+    # vg haplotypes samples in call_region: the key says so (the rows are then all of them).
+    key = hashlib.sha1(json.dumps([rid, sorted(rows.items())] + (["vg haplotypes"] if sample < 0 else []))
+                       .encode()).hexdigest()[:20]
     weight = {a["id"]: a["weight"] for a in pkg["alleles"]}
     return rid, {"key": key, "rows": rows, "seq": g.seq, "edges": sorted(g.edges), "walks": g.walks,
                  "ref": pkg.get("ref"), "weight": weight}, None
@@ -146,8 +182,13 @@ def run(cmd, out=None, log=None):
 
 def call_region(task):
     """One region's graph indexed, its reads mapped and its CHM13 path called, on a graph of its own (a call over a
-    graph of many regions loads and decomposes all of them, however few it calls): (region, VCF header, records)."""
-    rid, g, prep_dir, d = task
+    graph of many regions loads and decomposes all of them, however few it calls): (region, VCF header, records, the
+    alleles vg haplotypes kept or None). With `kff`, every allele a haplotype walk once per haplotype spelling it, as
+    the panel holds them, and the graph mapped to is vg haplotypes' sample of 32 by the K-mer counts, as the chr20
+    arms make theirs (test_arm.sh: autoindex -w sampling, then --include-reference --set-reference CHM13)."""
+    rid, g, prep_dir, d, kff = task
+    if kff == "region":
+        kff = region_kff(prep_dir, rid)
     os.makedirs(d, exist_ok=True)
     gfa = os.path.join(d, "local.gfa")
     with open(gfa, "w") as f:
@@ -163,14 +204,27 @@ def call_region(task):
             length = sum(len(g["seq"][n]) for n in walk)
             if a == g["ref"]:
                 f.write("W\tCHM13\t0\t%s\t0\t%d\t%s\n" % (rid, length, steps))
-            for h in range(min(g["weight"].get(a, 1), MAX_COPIES)):
+            copies = g["weight"].get(a, 1) if kff else min(g["weight"].get(a, 1), MAX_COPIES)
+            for h in range(copies):
                 f.write("W\t%s\t%d\t%s\t0\t%d\t%s\n" % (a, h + 1, rid, length, steps))
     src = os.path.join(prep_dir, rid)
     vg = os.environ["VG"]
     prefix = os.path.join(d, "map")
+    kept = None
     try:
-        run([vg, "autoindex", "-w", "sr-giraffe", "-g", gfa, "-p", prefix, "-t", "1", "-T", d])
-        gbz = prefix + ".giraffe.gbz"
+        if kff:
+            full = os.path.join(d, "full")
+            run([vg, "autoindex", "-n", "-w", "sampling", "-g", gfa, "-p", full, "-t", "1", "-T", d])
+            sampled_gbz = os.path.join(d, "sampled.gbz")
+            run([vg, "haplotypes", "-t", "1", "-i", full + ".hapl", "-k", kff, "--include-reference", "--set-reference",
+                 "CHM13", "--num-haplotypes", "32", "-g", sampled_gbz, full + ".gbz"])
+            kept = sampled_alleles(vg, sampled_gbz, g)
+            # From a GBZ, autoindex writes the indexes only: the graph is sampled.gbz itself.
+            run([vg, "autoindex", "-w", "sr-giraffe", "-G", sampled_gbz, "-p", prefix, "-t", "1", "-T", d])
+            gbz = sampled_gbz
+        else:
+            run([vg, "autoindex", "-w", "sr-giraffe", "-g", gfa, "-p", prefix, "-t", "1", "-T", d])
+            gbz = prefix + ".giraffe.gbz"
         idx = ["-Z", gbz, "-d", prefix + ".dist", "-m", prefix + ".shortread.withzip.min", "-z",
                prefix + ".shortread.zipcodes", "-o", "gaf", "-t", "1"]
         gaf = os.path.join(d, "reads.gaf")
@@ -191,7 +245,7 @@ def call_region(task):
         run([vg, "call", gbz, "-p", "CHM13#0#%s" % rid, "-d", "2", "-t", "1", "-s", "HG002", "--mismap-max", "0.95",
              "--read-likelihood", "--phased", "--gaf-base", db, "--gbz-base", gbz], vcf)
     except RuntimeError as error:
-        return rid, None, str(error)
+        return rid, None, str(error), None
     header, body = [], []
     for line in open(vcf):
         if line.startswith("#"):
@@ -200,7 +254,61 @@ def call_region(task):
         else:
             body.append(line)
     shutil.rmtree(d, ignore_errors=True)
-    return rid, header, body
+    return rid, header, body, kept
+
+
+def region_kff(prep_dir, rid):
+    """The region's reads' 29-mer counts as KFF (jellyfish, then jf2kff, as kmers.sh makes chr20's), made once: vg
+    haplotypes counts only the K-mers unique in its graph, and in a region's own graph a K-mer found elsewhere on chr20
+    looks unique, so chr20's counts would inflate it."""
+    out = os.path.join(prep_dir, rid, "reads.kff")
+    if os.path.exists(out):
+        return out
+    jf = os.environ.get("JELLYFISH", os.path.expanduser("~/micromamba/envs/jellyfish/bin/jellyfish"))
+    j2k = os.environ.get("JF2KFF", os.path.expanduser("~/.local/bin/jf2kff"))
+    db = out + ".jf"
+    reads = [os.path.join(prep_dir, rid, n + ".fq") for n in ("R1", "R2", "single")]
+    run([jf, "count", "-m", "29", "-C", "-s", "10M", "-t", "1", "-o", db] + reads)
+    dump = subprocess.Popen([jf, "dump", "-c", "-L", "2", db], stdout=subprocess.PIPE)
+    subprocess.run([j2k, out + ".part", "29"], stdin=dump.stdout, check=True)
+    dump.wait()
+    os.replace(out + ".part", out)
+    os.remove(db)
+    return out
+
+
+def sampled_alleles(vg, gbz, g):
+    """The alleles whose walks vg haplotypes kept in `gbz` (its haplotypes' sequences matched to the alleles'; a walk
+    stored in reverse read back forward), the reference's first."""
+    comp = str.maketrans("ACGT", "TGCA")
+    proc = subprocess.run([vg, "convert", "-f", gbz], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    seq, walks = {}, []
+    for line in proc.stdout.splitlines():
+        w = line.split("\t")
+        if w[0] == "S":
+            seq[w[1]] = w[2]
+        elif w[0] == "W" and w[1] != "CHM13":
+            walks.append(w[6])
+    allele_of = {}
+    for a, walk in g["walks"].items():
+        allele_of.setdefault("".join(g["seq"][n] for n in walk).upper(), a)
+    kept = [g["ref"]]
+    for steps in walks:
+        text, k = [], 0
+        while k < len(steps):
+            j = k + 1
+            while j < len(steps) and steps[j] not in "<>":
+                j += 1
+            s = seq[steps[k + 1 : j]]
+            text.append(s if steps[k] == ">" else s.translate(comp)[::-1])
+            k = j
+        hap = "".join(text).upper()
+        if steps.startswith("<"):
+            hap = hap.translate(comp)[::-1]
+        a = allele_of.get(hap)
+        if a is not None and a not in kept:
+            kept.append(a)
+    return kept
 
 
 def score(order, calls, header, prep_dir, d, jobs, truvari):
@@ -258,8 +366,15 @@ def score(order, calls, header, prep_dir, d, jobs, truvari):
         run(["tabix", "-f", "-p", "vcf", path + ".gz"])
         with open(os.path.join(c, "truth.batch.%s.bed" % kind), "w") as out:
             for rid in order:
+                # The benchmark only where the MSA aligns: the flanks are CHM13's in every graph, so HG002's
+                # variants there are no graph's to call.
+                meta = json.load(open(os.path.join(prep_dir, rid, "region.json")))
+                lo, hi = len(meta["left"]), lengths[rid] - len(meta["right"])
                 for line in open(os.path.join(prep_dir, rid, "truth.chr20.%s.bed" % kind)):
-                    out.write(rid + "\t" + line.split("\t", 1)[1])
+                    w = line.rstrip("\n").split("\t")
+                    a, b = max(int(w[1]), lo), min(int(w[2]), hi)
+                    if a < b:
+                        out.write("%s\t%d\t%d\n" % (rid, a, b))
     r = bench_wgs.score_contig(Path(d), "batch", "HG002", jobs, truvari)
     small = bm.aardvark_counts(bench_wgs.pick(r.get("aardvark"), "GT", "ALL"))
     sv = bm.truvari_counts(r.get("truvari"))
@@ -288,6 +403,12 @@ def main():
     if "--sample" in args:
         sample = int(args[args.index("--sample") + 1])
         del args[args.index("--sample") : args.index("--sample") + 2]
+    kff = None
+    if "--vg-haplotypes" in args:
+        kff = args[args.index("--vg-haplotypes") + 1]
+        kff = kff if kff == "region" else os.path.abspath(kff)
+        del args[args.index("--vg-haplotypes") : args.index("--vg-haplotypes") + 2]
+        sample = -1
     seed_rows = "--seed-rows" in args
     args = [a for a in args if a != "--seed-rows"]
     chosen = None
@@ -335,9 +456,9 @@ def main():
         header_path = os.path.join(cache, "header.vcf")
         if todo:
             t = time.time()
-            tasks = [(rid, g, prep_dir, os.path.join(d, "work", rid)) for rid, g in todo.items()]
+            tasks = [(rid, g, prep_dir, os.path.join(d, "work", rid), kff) for rid, g in todo.items()]
             with Pool(jobs) as pool:
-                for rid, header, body in pool.imap_unordered(call_region, tasks):
+                for rid, header, body, kept in pool.imap_unordered(call_region, tasks):
                     if header is None:
                         failed[rid] = body
                         continue
@@ -346,6 +467,32 @@ def main():
                             f.writelines(header)
                     with open(os.path.join(cache, todo[rid]["key"] + ".vcf"), "w") as f:
                         f.writelines(body)
+                    if kept is not None:
+                        with open(os.path.join(cache, todo[rid]["key"] + ".kept.json"), "w") as f:
+                            json.dump(kept, f)
+            # Where vg haplotypes refuses a region's graph (its partitioner can call a small graph's one top-level
+            # chain a loop), that region sampled by `sampled` instead, and counted.
+            refused = [rid for rid, e in failed.items() if kff and "haplotype sampling cannot be used" in str(e)]
+            if refused:
+                again = {}
+                tasks = [(label, source, pkgs[i], {i: msas[i]} if i in msas else {}, prep_dir, cache, None, 32)
+                         for i in refused]
+                with Pool(jobs) as pool:
+                    for rid, g, error in pool.imap_unordered(graph_of, tasks):
+                        if g is not None:
+                            again[rid] = g
+                            graphs[rid] = g
+                tasks = [(rid, g, prep_dir, os.path.join(d, "work", rid), None) for rid, g in again.items()
+                         if not os.path.exists(os.path.join(cache, g["key"] + ".vcf"))]
+                with Pool(jobs) as pool:
+                    for rid, header, body, kept in pool.imap_unordered(call_region, tasks):
+                        if header is not None:
+                            with open(os.path.join(cache, again[rid]["key"] + ".vcf"), "w") as f:
+                                f.writelines(body)
+                for rid in again:
+                    if os.path.exists(os.path.join(cache, again[rid]["key"] + ".vcf")):
+                        failed.pop(rid, None)
+                print("   vg haplotypes refused %d regions, sampled by the K-mer greedy instead" % len(refused))
             times["map and call"] = time.time() - t
         order_ok = [rid for rid in ids if rid in graphs and rid not in failed]
         # Score every region together: one multi-contig reference, truth and calls.
@@ -361,8 +508,19 @@ def main():
             rd = os.path.join(out_dir, "%s.%s" % (label, rid))
             sd = os.path.join(rd, "score", "chr20.truvari")
             os.makedirs(sd, exist_ok=True)
+            rows = graphs[rid]["rows"]
+            kept_path = os.path.join(cache, graphs[rid]["key"] + ".kept.json")
+            if os.path.exists(kept_path):
+                # The rows vg haplotypes kept: the graph vg call had.
+                kept = set(json.load(open(kept_path)))
+                rows = {a: r for a, r in rows.items() if a in kept}
+                width = len(next(iter(rows.values())))
+                cols = [c for c in range(width) if any(r[c] != "-" for r in rows.values())]
+                rows = {a: "".join(r[c] for c in cols) for a, r in rows.items()}
             with open(os.path.join(rd, "rows.json"), "w") as f:
-                json.dump(graphs[rid]["rows"], f)
+                json.dump(rows, f)
+            with open(os.path.join(rd, "key.txt"), "w") as f:
+                f.write(graphs[rid]["key"] + "\n")
             for part in ("fn", "fp"):
                 with gzip.open(os.path.join(sd, part + ".vcf.gz"), "wt") as f:
                     f.writelines(split[rid][part])
