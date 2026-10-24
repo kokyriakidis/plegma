@@ -447,6 +447,7 @@ def _column_mg(
     var gh = g_how_buf.unsafe_ptr()
     var ub = unit_buf.unsafe_ptr()
     var k = m_lo
+    var m_end = m_lo
     while k <= m_hi:
         var at = prv + k + shift - 1
         var fm = cp.unsafe_offset(at).unsafe_load[width=LANES]()
@@ -466,14 +467,17 @@ def _column_mg(
         best = better.select(cand, best)
         how = better.select(H(2), how)
         best = best.lt(big).select(best + ub.unsafe_offset(k).unsafe_load[width=LANES](), best)
-        # Lanes past m_hi stay as they were: the buffers hold LANES spare cells, and the lanes there are rewritten below.
         mb.unsafe_offset(k).unsafe_store(best)
         mh.unsafe_offset(k).unsafe_store(how)
         k += LANES
-    for t in range(m_hi + 1, min(m_hi + LANES + 1, width + LANES)):
+        m_end = k
+    # The last group's lanes past m_hi hold what was beyond the band: back to BIG. Only lanes a group wrote: m_hi
+    # is negative where the band lies past the sequence's end, and nothing was written.
+    for t in range(max(m_hi + 1, m_lo), m_end):
         m_buf[t] = BIG
         m_how_buf[t] = 0
     k = g_lo
+    var g_end = g_lo
     while k <= g_hi:
         var at = prv + k + shift
         var fm = cp.unsafe_offset(at).unsafe_load[width=LANES]()
@@ -496,7 +500,8 @@ def _column_mg(
         gb.unsafe_offset(k).unsafe_store(best)
         gh.unsafe_offset(k).unsafe_store(how)
         k += LANES
-    for t in range(g_hi + 1, min(g_hi + LANES + 1, width + LANES)):
+        g_end = k
+    for t in range(max(g_hi + 1, g_lo), g_end):
         g_buf[t] = BIG
         g_how_buf[t] = 0
 
