@@ -872,13 +872,19 @@ comptime REFERENCE_MEMORY = 2 << 30
 """`on_reference`'s memory cap per pair (karan's default, 80 MB, refuses some divergent pairs of a few kb)."""
 
 
-def on_reference(seqs: List[List[UInt8]], costs: Costs) raises -> List[List[UInt8]]:
+def on_reference(seqs: List[List[UInt8]], costs: Costs, snap: Bool = False) raises -> List[List[UInt8]]:
     """The MSA of `seqs` anchored on the first, the reference: every other distinct sequence aligned to it exactly
     (karan, `costs`, gaps shifted left through repeats as variant callers normalize them) and its letters put in the
     reference letters' columns, the letters it inserts in the columns between them (the runs different sequences
     insert at one place aligned to each other the same way, on the longest). So the alignment of the reference with every sequence
     is that pair's own optimal one: what a caller reports against the reference path keeps each event whole, where a
-    placement by many partners' votes can split a copy-number change into copy-sized pieces. Rows in `seqs`' order."""
+    placement by many partners' votes can split a copy-number change into copy-sized pieces. Rows in `seqs`' order.
+
+    With `snap`, each insertion or deletion of `SNAP_LENGTH` letters or more then moves, whole, to a place a sequence
+    before it (the heavier, as the input repeats them, then the earlier) put an event of its kind and length (within
+    a tenth) within `_snap_window` of it, where that costs no more than `_snap_tolerance` mismatches: inside a tandem array the sequences' own optima put
+    one copy-number change at places a few copies apart, by their copies' few differences, and the graph then holds
+    it as several bubbles whose reads split between them."""
     var n = len(seqs)
     if n == 0:
         return List[List[UInt8]]()
@@ -893,11 +899,189 @@ def on_reference(seqs: List[List[UInt8]], costs: Costs) raises -> List[List[UInt
             partner.append(identity^)
         else:
             partner.append(_onto(aligner, seqs[distinct[0]], seqs[distinct[d]], costs))
+    if snap:
+        _snap(seqs, distinct, partner)
     var rows_of = _on_reference_columns(seqs, distinct, partner, costs)
     var out = List[List[UInt8]]()
     for k in range(n):
         out.append(rows_of[_index_of(seqs, distinct, k)].copy())
     return out^
+
+
+comptime SNAP_LENGTH = 10
+"""The shortest insertion or deletion `on_reference`'s snapping moves."""
+
+
+def _snap_window(length: Int) -> Int:
+    """How far an event of `length` letters may move."""
+    return max(2 * length, 100)
+
+
+def _snap_tolerance(length: Int) -> Int:
+    """The mismatches an event of `length` letters may gain by moving (PLEGMA_SNAP_SLACK=a,b: a + length // b, an
+    experiment; 0 by default: only to a place as good for the sequence, so its alignment with the reference stays an
+    optimal one and its calls are written as the truth's are)."""
+    var slack = getenv("PLEGMA_SNAP_SLACK")
+    if slack == "":
+        return 0
+    var parts = slack.split(",")
+    try:
+        return Int(String(parts[0])) + length // Int(String(parts[1]))
+    except:
+        return 0
+
+
+def _snap(seqs: List[List[UInt8]], distinct: List[Int], mut partner: List[List[Int]]):
+    """Each distinct sequence's insertions and deletions (`partner`: each letter's reference letter, -1 inserted)
+    moved, whole, to a place an earlier-processed sequence's event of the same kind holds nearby, when the letters
+    they pass then pair at no more than the tolerance's extra mismatches; the heavier sequences first."""
+    ref c = seqs[distinct[0]]
+    var weight = List[Int](length=len(distinct), fill=0)
+    for k in range(len(seqs)):
+        weight[_index_of(seqs, distinct, k)] += 1
+    var order = List[Int]()
+    for d in range(1, len(distinct)):
+        order.append(d)
+    # Heaviest first, the input's order among equals (an insertion sort: a few hundred sequences at most).
+    for x in range(1, len(order)):
+        var y = x
+        while y > 0 and weight[order[y]] > weight[order[y - 1]]:
+            var t = order[y]
+            order[y] = order[y - 1]
+            order[y - 1] = t
+            y -= 1
+    # The places events were put: an insertion's slot (after reference letter s), a deletion's first letter.
+    var insert_slots = List[Int]()
+    var insert_lengths = List[Int]()
+    var delete_starts = List[Int]()
+    var delete_lengths = List[Int]()
+    for d in order:
+        ref q = seqs[distinct[d]]
+        ref p = partner[d]
+        # Insertion runs [j0, j1) between reference letters s and s + 1.
+        var j = 0
+        while j < len(q):
+            if p[j] >= 0 or j == 0:
+                j += 1
+                continue
+            var j0 = j
+            while j < len(q) and p[j] < 0:
+                j += 1
+            var j1 = j
+            var length = j1 - j0
+            var s = p[j0 - 1]
+            if s < 0 or j1 >= len(q) or p[j1] != s + 1 or length < SNAP_LENGTH:
+                continue
+            var best = -1
+            var best_delta = _snap_tolerance(length) + 1
+            for e in range(len(insert_slots)):
+                var slot = insert_slots[e]
+                if slot == s or abs(slot - s) > _snap_window(length) or not _same_length(insert_lengths[e], length):
+                    continue
+                var delta = 0
+                var ok = True
+                if slot < s:
+                    var m = s - slot
+                    if j0 - m < 0:
+                        continue
+                    for i in range(m):
+                        if p[j0 - m + i] != slot + 1 + i:
+                            ok = False
+                            break
+                        delta += Int(q[j0 - m + length + i] != c[slot + 1 + i]) - Int(q[j0 - m + i] != c[slot + 1 + i])
+                else:
+                    var m = slot - s
+                    if j1 + m > len(q):
+                        continue
+                    for i in range(m):
+                        if p[j1 + i] != s + 1 + i:
+                            ok = False
+                            break
+                        delta += Int(q[j0 + i] != c[s + 1 + i]) - Int(q[j1 + i] != c[s + 1 + i])
+                if ok and delta < best_delta:
+                    best_delta = delta
+                    best = slot
+            if best >= 0:
+                if best < s:
+                    var m = s - best
+                    for i in range(length):
+                        p[j0 - m + i] = -1
+                    for i in range(m):
+                        p[j0 - m + length + i] = best + 1 + i
+                else:
+                    var m = best - s
+                    for i in range(m):
+                        p[j0 + i] = s + 1 + i
+                    for i in range(length):
+                        p[j0 + m + i] = -1
+                    # Past the moved run: it is not moved twice.
+                    j = j0 + m + length
+        # Deletion runs: reference letters [a, a + length) between letters j - 1 and j of the sequence.
+        var moved_to = 0
+        for k in range(1, len(q)):
+            if k <= moved_to or p[k] < 0 or p[k - 1] < 0 or p[k] - p[k - 1] - 1 < SNAP_LENGTH:
+                continue
+            var a = p[k - 1] + 1
+            var length = p[k] - a
+            var best = -1
+            var best_delta = _snap_tolerance(length) + 1
+            for e in range(len(delete_starts)):
+                var start = delete_starts[e]
+                if start == a or abs(start - a) > _snap_window(length) or not _same_length(delete_lengths[e], length):
+                    continue
+                var delta = 0
+                var ok = True
+                if start < a:
+                    var m = a - start
+                    if k - m < 0:
+                        continue
+                    for i in range(m):
+                        if p[k - m + i] != start + i:
+                            ok = False
+                            break
+                        delta += Int(q[k - m + i] != c[start + length + i]) - Int(q[k - m + i] != c[start + i])
+                else:
+                    var m = start - a
+                    if k + m > len(q) or start + length > len(c):
+                        continue
+                    for i in range(m):
+                        if p[k + i] != a + length + i:
+                            ok = False
+                            break
+                        delta += Int(q[k + i] != c[a + i]) - Int(q[k + i] != c[a + length + i])
+                if ok and delta < best_delta:
+                    best_delta = delta
+                    best = start
+            if best >= 0:
+                if best < a:
+                    var m = a - best
+                    for i in range(m):
+                        p[k - m + i] = best + length + i
+                else:
+                    var m = best - a
+                    for i in range(m):
+                        p[k + i] = a + i
+                    moved_to = k + m
+        # This sequence's events, as they now stand, are places for the lighter ones.
+        var x = 1
+        while x < len(q):
+            if p[x] < 0 and p[x - 1] >= 0:
+                var y = x
+                while y < len(q) and p[y] < 0:
+                    y += 1
+                insert_slots.append(p[x - 1])
+                insert_lengths.append(y - x)
+                x = y
+                continue
+            if p[x] >= 0 and p[x - 1] >= 0 and p[x] - p[x - 1] - 1 >= SNAP_LENGTH:
+                delete_starts.append(p[x - 1] + 1)
+                delete_lengths.append(p[x] - p[x - 1] - 1)
+            x += 1
+
+
+def _same_length(a: Int, b: Int) -> Bool:
+    """Two events' lengths within a tenth (5 letters at least): one change, not two changes at one place."""
+    return abs(a - b) <= max(5, max(a, b) // 10)
 
 
 def _distinct(seqs: List[List[UInt8]]) -> List[Int]:

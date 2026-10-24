@@ -676,7 +676,9 @@ def _poa(input: String, options: Options) raises -> String:
         # PLEGMA_TREE=<share> (an experiment): along a tree from the reference through the sequences at least that
         # share of the input spells.
         var tree = getenv("PLEGMA_TREE")
-        var bytes = on_tree(seqs, reference_costs, Float64(tree)) if tree != "" else on_reference(seqs, reference_costs)
+        var bytes = on_tree(seqs, reference_costs, Float64(tree)) if tree != "" else on_reference(
+            seqs, reference_costs, getenv("PLEGMA_SNAP") == "1"
+        )
         if options.sp_set and options.sp_passes > 0:
             # With -I, refined on the sum of pairs with the reference's row weighing 4 times the rows' number: the
             # other rows move only among the placements that keep their alignment with the reference as good, the

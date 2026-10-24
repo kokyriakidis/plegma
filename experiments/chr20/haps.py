@@ -61,9 +61,11 @@ def records(lines):
 
 
 def apply(contig, recs, h):
-    """Haplotype `h` of the contig under the phased records (a record overlapping one applied before skipped)."""
+    """Haplotype `h` of the contig under the phased records (a record overlapping one applied before skipped). At one
+    position the longest reference span first: vg call --nested writes a site and the sites nested in it, and the
+    site's alleles spell its children's."""
     out, at = [], 0
-    for pos, ref, alts, gt in sorted(recs):
+    for pos, ref, alts, gt in sorted(recs, key=lambda r: (r[0], -len(r[1]))):
         if h >= len(gt) or gt[h] in (".", "0"):
             continue
         start = pos - 1
@@ -101,7 +103,17 @@ def called(out_dir, rid, label, meta, contig, true_haps):
 
 
 def nearest(seq, pool, weight):
-    return min((distance(seq, s), ids[0], sum(weight.get(i, 0) for i in ids)) for s, ids in pool.items())
+    """(distance, id, haplotypes) of the pool's sequence nearest `seq`; the pool by length difference, a lower bound
+    on the distance, so the search stops once that passes the best."""
+    best = None
+    for s in sorted(pool, key=lambda s: abs(len(s) - len(seq))):
+        if best is not None and abs(len(s) - len(seq)) >= best[0]:
+            break
+        ids = pool[s]
+        found = (distance(seq, s), ids[0], sum(weight.get(i, 0) for i in ids))
+        if best is None or found < best:
+            best = found
+    return best
 
 
 def table_row(task):

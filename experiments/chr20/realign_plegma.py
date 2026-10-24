@@ -16,7 +16,8 @@ Every package whose status is `ok` and whose alleles are not all one (pgrealign'
 Each record holds `id`, `method` ("plegma"), `status`, `seconds` and, when `ok`, `rows` ({member id: row}) and
 `columns`, every row checked to spell its member; replace reads `id`, `status` and `rows`. A region past `--timeout`
 seconds (900) is `timeout`, one plegma fails on `aligner_failed`; replace leaves both as they are. With `--resume`,
-the records an interrupted run left in `<out>.part` (read up to where it was cut) are kept and their regions skipped.
+the `ok` records an interrupted run left in `<out>.part` (read up to where it was cut) are kept and their regions
+skipped; the others are tried again.
 """
 import gzip
 import json
@@ -35,8 +36,18 @@ MAX_REFINED = 100000
 
 
 def unrefined(flags):
-    """`flags` without -I's refinement."""
-    return [x for x in flags if x != "-I" and not re.match(r"^\d+(,\d+)*$", x)]
+    """`flags` without -I's refinement: -I and its value, the other flags' values kept."""
+    out, skip = [], False
+    for x in flags:
+        if skip:
+            skip = False
+            if re.match(r"^\d+(,\d+)*$", x):
+                continue
+        if x == "-I":
+            skip = True
+            continue
+        out.append(x)
+    return out
 
 
 def plegma_rows(seqs, timeout, copies=None, flags=None):
@@ -261,7 +272,8 @@ def main():
     args = [a for a in args if a != "--resume"]
     plegma, karan, packages, out = args
     counts = {}
-    kept = kept_records(out + ".part") if resume else []
+    # The regions done right are kept; a timeout or a failure is tried again.
+    kept = [r for r in kept_records(out + ".part") if r.get("status") == "ok"] if resume else []
     if kept:
         os.replace(out + ".part", out + ".kept")
     done = frozenset(r["id"] for r in kept)
