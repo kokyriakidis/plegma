@@ -10,7 +10,8 @@ sampled rows) and the label's two called haplotypes (haps.py); a haplotype withi
 counts as the same. Each truth haplotype, paired with the called one nearer it, is measured against the best the
 graph allows (its row nearest the truth) and falls in the first stratum it meets:
 
-  right       the call is as near the truth as the graph allows, and the truth is in the panel: the error is how
+  right       the call is as near the truth as the graph allows, the graph holds the panel's nearest allele, and the
+              truth is in the panel: the error is how
               the records split a copy-number change (one insertion of two copies against the truth's two of one),
               which truvari matches record by record: the haplotype is right
   best        the same, the truth in no panel allele: nothing an MSA of these alleles can call
@@ -125,9 +126,10 @@ def stratify(task):
             d_row, a_row, _ = haps.nearest(C, sampled, weight)
             # Against the best the graph allows (its row nearest the truth): at it, the call is all the MSA's
             # alleles can give; past it, why.
-            if d_called <= d_graph + tol(T):
+            if d_called <= d_graph + tol(T) and d_graph <= d_panel + tol(T):
                 s = "right" if d_panel <= tol(T) else "best"
             elif d_graph > d_panel + tol(T):
+                # The graph lacks an allele the panel holds nearer the truth: whatever the call, the sampling's.
                 s = "sampled"
             elif d_row > tol(C):
                 s = "mosaic"
