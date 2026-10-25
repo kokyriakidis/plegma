@@ -15,6 +15,7 @@ karan at -A's costs (asm5's scores made costs), ties left; the ends too (minimap
 """
 import bisect
 import math
+import struct
 import os
 import re
 import subprocess
@@ -186,8 +187,18 @@ def span(a):
     return (a[1] >> 32) & 0xFF
 
 
+def f32(x):
+    """`x` rounded to a C float."""
+    return struct.unpack("f", struct.pack("f", x))[0]
+
+
 def mg_log2(x):
-    return math.log2(x)
+    """minimap2's mg_log2: log2 from the float's exponent and a polynomial in its mantissa (not exact), in floats."""
+    i = struct.unpack("I", struct.pack("f", float(x)))[0]
+    log_2 = f32(((i >> 23) & 255) - 128)
+    i = (i & ~(255 << 23) & 0xFFFFFFFF) + (127 << 23)
+    z = struct.unpack("f", struct.pack("I", i))[0]
+    return f32(log_2 + f32(f32(f32(f32(-0.34484843 * z) + 2.02466578) * z) - 0.67487759))
 
 
 def comput_sc_simple(ai, aj, pen_gap, pen_skip):
@@ -199,9 +210,10 @@ def comput_sc_simple(ai, aj, pen_gap, pen_skip):
     sc = min(q_span, dg)
     exact = dd == 0 and dg <= q_span
     if dd or dq > q_span:
-        lin = pen_gap * dd + pen_skip * dg
+        # In C floats: lin_pen = chn_pen_gap * dd + chn_pen_skip * dg; sc -= (int)(lin_pen + .5f * log_pen).
+        lin = f32(f32(f32(pen_gap) * f32(dd)) + f32(f32(pen_skip) * f32(dg)))
         log_pen = mg_log2(dd + 1) if dd >= 1 else 0.0
-        sc -= int(lin + 0.5 * log_pen)
+        sc -= int(f32(lin + f32(0.5 * log_pen)))
     return sc, exact, dd
 
 

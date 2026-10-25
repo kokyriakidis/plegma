@@ -23,10 +23,12 @@ third, placed and refined with every distinct sequence weighing one before a wei
 refined objective is lowest is kept.
 """
 
+from std.atomic import Atomic
 from std.os import getenv
 from std.sys import stderr
 
 from karan import Aligner, Costs, Mode, Ties, alignments
+from karan.common import spread, thread_count
 
 from .backbone import Level, MUMS, SMEMS, backbone, split_anchors
 from .chain import ChainCosts
@@ -889,12 +891,12 @@ def on_reference(
     is that pair's own optimal one: what a caller reports against the reference path keeps each event whole, where a
     placement by many partners' votes can split a copy-number change into copy-sized pieces. Rows in `seqs`' order.
 
-    With `threads` above one, the alignments to the reference run over that many threads (karan's batch).
+    With `threads` above one, the alignments to the reference run over that many threads (karan's batch; pinned, an
+    aligner a thread).
 
     With `flanks`, the reference's left and right flanks, each alignment to the reference is pinned as minimap2
     pins it (`pinned_pairing`: its seeds and chain over flank + sequence + flank, exact between the pins), so its
-    differences are written as minimap2, and the truth sets dipcall makes with it, write them; one thread, and no
-    `fallback` (a stretch minimap2 deletes and inserts again is its writing too).
+    differences are written as minimap2, and the truth sets dipcall makes with it, write them; no `fallback` (a stretch minimap2 deletes and inserts again is its writing too).
 
     With `fallback`, where at least `REPLACED_SEQUENCES` of the sequences' alignments at `costs` replace a stretch of
     the reference (`_replaces`: a deletion and an insertion of `REPLACEMENT` letters or more side by side) and those
@@ -924,9 +926,40 @@ def on_reference(
         identity.append(i)
     partner.append(identity^)
     if len(flanks) == 2:
+        # The alignments are independent: each worker, its own aligner, takes the next, the longest first.
+        var pinned = List[List[Int]](length=len(distinct), fill=List[Int]())
+        var order = List[UInt64]()
+        for d in range(1, len(distinct)):
+            order.append((UInt64(len(seqs[distinct[d]])) << 32) | UInt64(d))
+        sort(order)
+        order.reverse()
+        var out = pinned.unsafe_ptr()
+        var failed = List[Bool](length=len(distinct), fill=False)
+        var flags = failed.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+        var workers = thread_count(threads, len(order))
+
+        def pin(slot: Int) {mut taken, imm order, imm seqs, imm distinct, imm flanks, imm costs, imm out, imm flags}:
+            var aligner = Aligner()
+            while True:
+                var k = Int(taken.fetch_add(1))
+                if k >= len(order):
+                    return
+                var d = Int(order[k] & 0xFFFFFFFF)
+                try:
+                    out[unsafe_offset=d] = pinned_pairing(
+                        aligner, seqs[distinct[0]], seqs[distinct[d]], flanks[0], flanks[1], costs
+                    )
+                except:
+                    flags[unsafe_offset=d] = True
+
+        spread(pin, workers, workers)
+        # One that raised raises here, as one thread would have.
         var aligner = Aligner()
         for d in range(1, len(distinct)):
-            partner.append(pinned_pairing(aligner, seqs[distinct[0]], seqs[distinct[d]], flanks[0], flanks[1], costs))
+            if failed[d]:
+                pinned[d] = pinned_pairing(aligner, seqs[distinct[0]], seqs[distinct[d]], flanks[0], flanks[1], costs)
+            partner.append(pinned[d].copy())
     elif threads > 1 and len(distinct) > 2:
         # The alignments are independent: karan's batch spreads them over `threads`, the longest first.
         var references = List[String]()

@@ -16,7 +16,7 @@ The flanks, CHM13's around the region, are context for the seeds and the chain o
 are kept and the stretches between them aligned exactly (karan), so the rows spell the sequences whatever the flanks.
 """
 
-from std.math import log2
+from std.memory import bitcast
 from std.os import getenv
 from std.sys import stderr
 
@@ -208,7 +208,7 @@ def _sorted(seeds: List[Seed]) -> List[Seed]:
     var keys = List[UInt64](capacity=len(seeds))
     for a in seeds:
         keys.append(_key(a))
-    sort(keys)
+    _radix_sort(keys)
     var out = List[Seed](capacity=len(keys))
     for key in keys:
         out.append(_seed_of(key))
@@ -251,7 +251,7 @@ def _seed_select(mut seeds: List[_Hits], qlen: Int, max_occ: Int):
                     var order = List[UInt64]()
                     for j in range(st, en):
                         order.append((UInt64(len(seeds[j].hits)) << 32) | UInt64(j))
-                    sort(order)
+                    _radix_sort(order)
                     for m in range(min(min(max_high, 128), len(order))):
                         seeds[Int(order[m] & 0xFFFFFFFF)].flt = True
                 for j in range(st, en):
@@ -320,90 +320,233 @@ def _anchors(reference: List[UInt8], query: List[UInt8]) -> List[Seed]:
     return _sorted(out)
 
 
+@fieldwise_init
+struct _Leaf(ImplicitlyCopyable, TrivialRegisterPassable):
+    """An anchor as `_chains`'s inner loop reads it, by leaf: its seed, score and predecessor's leaf, minimap2's
+    skip mark t[], and the inner window's present leaf before it."""
+
+    var x: Int32
+    var q: Int32
+    var span: Int32
+    var f: Int32
+    var j: Int32
+    var p: Int32
+    var t: Int32
+    var before: Int32
+
+
+@fieldwise_init
+struct _Top(ImplicitlyCopyable, TrivialRegisterPassable):
+    """A `_MaxTree` node: the greatest (priority, leaf) under it; an absent leaf is the lowest priority and leaf -1."""
+
+    var pri: Float64
+    var leaf: Int
+
+    @inline(.always)
+    def __ge__(self, other: Self) -> Bool:
+        return self.pri > other.pri or (self.pri == other.pri and self.leaf >= other.leaf)
+
+
+comptime _ABSENT = _Top(pri=-1e300, leaf=-1)
+
+
 struct _MaxTree(Movable):
-    """A segment tree over the anchors in (query end, index) order holding each present anchor's RMQ priority:
-    the greatest (priority, query end, index) of a range."""
+    """A segment tree over the leaves (the anchors in (query end, index) order) holding each present leaf's RMQ
+    priority: a node keeps the greatest (priority, leaf), i.e. ties to the greater (query end, index)."""
 
     var size: Int
-    var pri: List[Float64]
-    var q: List[Int]
-    var j: List[Int]
+    var top: List[_Top]
 
     def __init__(out self, n: Int):
         self.size = 1
         while self.size < n:
             self.size <<= 1
-        self.pri = List[Float64](length=2 * self.size, fill=-1e300)
-        self.q = List[Int](length=2 * self.size, fill=-1)
-        self.j = List[Int](length=2 * self.size, fill=-1)
+        self.top = List[_Top](length=2 * self.size, fill=_ABSENT)
 
-    def _ge(self, a: Int, b: Int) -> Bool:
-        if self.pri[a] != self.pri[b]:
-            return self.pri[a] > self.pri[b]
-        if self.q[a] != self.q[b]:
-            return self.q[a] > self.q[b]
-        return self.j[a] >= self.j[b]
-
-    def _take(mut self, m: Int, from_: Int):
-        self.pri[m] = self.pri[from_]
-        self.q[m] = self.q[from_]
-        self.j[m] = self.j[from_]
-
-    def set(mut self, leaf: Int, pri: Float64, q: Int, j: Int):
+    def set(mut self, leaf: Int, top: _Top):
+        var p = self.top.unsafe_ptr()
         var m = leaf + self.size
-        self.pri[m] = pri
-        self.q[m] = q
-        self.j[m] = j
+        p[unsafe_offset=m] = top
         m >>= 1
         while m > 0:
-            self._take(m, 2 * m if self._ge(2 * m, 2 * m + 1) else 2 * m + 1)
+            var l = p[unsafe_offset=2 * m]
+            var r = p[unsafe_offset=2 * m + 1]
+            var top = l if l >= r else r
+            # Unchanged here, unchanged above.
+            if top.leaf == p[unsafe_offset=m].leaf and top.pri == p[unsafe_offset=m].pri:
+                return
+            p[unsafe_offset=m] = top
             m >>= 1
 
     def best(self, lo: Int, hi: Int) -> Int:
-        """The index of the greatest present anchor of leaves [lo, hi), -1 for none."""
-        var best = -1
+        """The greatest present leaf of leaves [lo, hi), -1 for none."""
+        var p = self.top.unsafe_ptr()
+        var best = _ABSENT
         var a = lo + self.size
         var b = hi + self.size
         while a < b:
             if a & 1:
-                if self.j[a] >= 0 and (best < 0 or self._ge(a, best)):
-                    best = a
+                if p[unsafe_offset=a] >= best:
+                    best = p[unsafe_offset=a]
                 a += 1
             if b & 1:
                 b -= 1
-                if self.j[b] >= 0 and (best < 0 or self._ge(b, best)):
-                    best = b
+                if p[unsafe_offset=b] >= best:
+                    best = p[unsafe_offset=b]
             a >>= 1
             b >>= 1
-        return self.j[best] if best >= 0 else -1
+        return best.leaf
 
 
-def _bisect_left(keys: List[UInt64], target: UInt64) -> Int:
-    var lo = 0
-    var hi = len(keys)
-    while lo < hi:
-        var mid = (lo + hi) // 2
-        if keys[mid] < target:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
+struct _Present(Movable):
+    """Which leaves (the anchors in (query end, index) order) are present: a tree of counts, for the present leaf at
+    or before a leaf without walking the absent ones between."""
+
+    var size: Int
+    var count: List[Int32]
+
+    def __init__(out self, n: Int):
+        self.size = 1
+        while self.size < n:
+            self.size <<= 1
+        self.count = List[Int32](length=2 * self.size, fill=0)
+
+    def set(mut self, leaf: Int, present: Bool):
+        var m = leaf + self.size
+        var change = Int32(1) if present else Int32(-1)
+        if (self.count[m] > 0) == present:
+            return
+        while m > 0:
+            self.count[m] += change
+            m >>= 1
+
+    def at_or_after(self, leaf: Int) -> Int:
+        """The first present leaf at or after `leaf`, -1 for none."""
+        if leaf >= self.size:
+            return -1
+        var v = leaf + self.size
+        if self.count[v] > 0:
+            return leaf
+        while v > 1:
+            if not (v & 1) and self.count[v + 1] > 0:
+                v += 1
+                while v < self.size:
+                    v = 2 * v if self.count[2 * v] > 0 else 2 * v + 1
+                return v - self.size
+            v >>= 1
+        return -1
+
+    def at_or_before(self, leaf: Int) -> Int:
+        """The last present leaf at or before `leaf`, -1 for none."""
+        if leaf < 0:
+            return -1
+        var v = leaf + self.size
+        if self.count[v] > 0:
+            return leaf
+        while v > 1:
+            if v & 1 and self.count[v - 1] > 0:
+                v -= 1
+                while v < self.size:
+                    v = 2 * v + 1 if self.count[2 * v + 1] > 0 else 2 * v
+                return v - self.size
+            v >>= 1
+        return -1
 
 
-def _bisect_right(keys: List[UInt64], target: UInt64) -> Int:
-    var lo = 0
-    var hi = len(keys)
-    while lo < hi:
-        var mid = (lo + hi) // 2
-        if keys[mid] <= target:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
+def _radix_sort(mut keys: List[UInt64]):
+    """`keys` sorted (all keys distinct here, so any sort gives this order)."""
+    var scratch = List[UInt64](unsafe_uninit_length=len(keys))
+    _radix_sort(keys.unsafe_ptr(), scratch.unsafe_ptr(), len(keys))
 
 
-def _score(ai: Seed, aj: Seed, pen_gap: Float64, mut exact: Bool, mut width: Int) -> Int:
-    """comput_sc_simple (no skip penalty)."""
+comptime _DIGIT_BITS = 11
+comptime _INSERTION = 32
+"""Fewer keys than this are insertion sorted."""
+
+
+def _radix_sort(keys: MutPointer[UInt64, _], scratch: MutPointer[UInt64, _], n: Int):
+    """LSD radix sort of `keys[0:n]` (sporos's); `scratch` holds `n` keys.
+    Digits every key shares are skipped."""
+    if n <= 1:
+        return
+    if n <= _INSERTION:
+        for i in range(1, n):
+            var k = keys[unsafe_offset=i]
+            var at = i
+            while at > 0 and keys[unsafe_offset=at - 1] > k:
+                keys[unsafe_offset=at] = keys[unsafe_offset=at - 1]
+                at -= 1
+            keys[unsafe_offset=at] = k
+        return
+    # The bits that differ between keys: digits without any are skipped uncounted.
+    var differ = UInt64(0)
+    for i in range(1, n):
+        differ |= keys[unsafe_offset=i] ^ keys[unsafe_offset=0]
+    comptime digits = 1 << _DIGIT_BITS
+    var counts = List[Int](length=digits, fill=0)
+    var src = keys.unsafe_origin_cast[MutUntrackedOrigin]()
+    var dst = scratch.unsafe_origin_cast[MutUntrackedOrigin]()
+    var in_scratch = False
+    for shift in range(0, 64, _DIGIT_BITS):
+        var bits = min(_DIGIT_BITS, 64 - shift)
+        var mask = UInt64((1 << bits) - 1)
+        if (differ >> UInt64(shift)) & mask == 0:
+            continue
+        for d in range(1 << bits):
+            counts[d] = 0
+        for i in range(n):
+            counts[Int((src[unsafe_offset=i] >> UInt64(shift)) & mask)] += 1
+        var at = 0
+        for d in range(1 << bits):
+            var c = counts[d]
+            counts[d] = at
+            at += c
+        for i in range(n):
+            var k = src[unsafe_offset=i]
+            var d = Int((k >> UInt64(shift)) & mask)
+            dst[unsafe_offset=counts[d]] = k
+            counts[d] += 1
+        var t = src
+        src = dst
+        dst = t
+        in_scratch = not in_scratch
+    if in_scratch:
+        for i in range(n):
+            dst[unsafe_offset=i] = src[unsafe_offset=i]
+
+
+@inline(.always)
+def _mg_log2(x: Float32) -> Float32:
+    """minimap2's mg_log2: log2 from the float's exponent and a polynomial in its mantissa (not exact; x >= 2)."""
+    var i = bitcast[DType.uint32](x)
+    var log_2 = Float32(Int((i >> 23) & 255) - 128)
+    i &= ~(UInt32(255) << 23)
+    i += UInt32(127) << 23
+    var z = bitcast[DType.float32](i)
+    return log_2 + (Float32(-0.34484843) * z + Float32(2.02466578)) * z - Float32(0.67487759)
+
+
+comptime PENALTIES = 4096
+"""The gap penalties `_chains` tabulates: every dd the inner window's anchors make, which stays within it."""
+
+
+@inline(.always)
+def _penalty(dd: Int, pen_gap: Float32) -> Int:
+    """comput_sc_simple's penalty for a gap difference `dd` (0 for none)."""
+    if dd == 0:
+        return 0
+    return Int(pen_gap * Float32(dd) + Float32(0.5) * _mg_log2(Float32(dd + 1)))
+
+
+@inline(.never)
+def _penalty_far(dd: Int, pen_gap: Float32) -> Int:
+    """`_penalty` past the table, out of line so the inner loop's branch stays a table read."""
+    return _penalty(dd, pen_gap)
+
+
+@inline(.always)
+def _score(ai: Seed, aj: Seed, pen_gap: Float32, mut exact: Bool, mut width: Int) -> Int:
+    """comput_sc_simple (no skip penalty), in floats as minimap2 computes it."""
     var dq = ai.q - aj.q
     var dr = ai.x - aj.x
     var dd = dr - dq if dr > dq else dq - dr
@@ -412,9 +555,59 @@ def _score(ai: Seed, aj: Seed, pen_gap: Float64, mut exact: Bool, mut width: Int
     var sc = min(aj.span, dg)
     exact = dd == 0 and dg <= aj.span
     if dd != 0 or dq > aj.span:
-        var log_pen = log2(Float64(dd + 1)) if dd >= 1 else 0.0
-        sc -= Int(pen_gap * Float64(dd) + 0.5 * log_pen)
+        sc -= _penalty(dd, pen_gap)
     return sc
+
+
+@inline(.never)
+def _walk(
+    leaves: MutPointer[_Leaf, _],
+    penalty: ImmPointer[Int32, _],
+    start: Int,
+    i: Int,
+    xi: Int,
+    yi: Int,
+    bw: Int,
+    max_dist_inner: Int,
+    pen_gap: Float32,
+    var max_f: Int,
+    var max_j: Int,
+) -> Tuple[Int, Int]:
+    """mg_lchain_rmq's inner loop for anchor `i`: the inner window's anchors from leaf `start`, query end descending
+    (minimap2's inner tree, walked back), each scored by `_score` with its penalty read from the table; the best
+    score and predecessor, as given if none beats them. Out of line, the loop keeps its values in registers."""
+    var n_skip = 0
+    var floor = yi - max_dist_inner
+    var m = start
+    while m >= 0:
+        ref here = leaves[unsafe_offset=m]
+        m = Int(here.before)
+        var yj = Int(here.q)
+        if yj < floor:
+            break
+        var dq = yi - yj
+        var dr = xi - Int(here.x)
+        var dd = dr - dq if dr > dq else dq - dr
+        if dd > bw:
+            continue
+        var s = Int(here.f) + min(Int(here.span), min(dr, dq))
+        if dd < PENALTIES:
+            s -= Int(penalty[unsafe_offset=dd])
+        else:
+            s -= _penalty_far(dd, pen_gap)
+        if s > max_f:
+            max_f = s
+            max_j = Int(here.j)
+            if n_skip > 0:
+                n_skip -= 1
+        elif Int(here.t) == i:
+            n_skip += 1
+            if n_skip > MAX_CHAIN_SKIP:
+                break
+        var prior = Int(here.p)
+        if prior >= 0:
+            leaves[unsafe_offset=prior].t = Int32(i)
+    return (max_f, max_j)
 
 
 def _chains(a: List[Seed], bw: Int) -> List[List[Seed]]:
@@ -423,43 +616,89 @@ def _chains(a: List[Seed], bw: Int) -> List[List[Seed]]:
     var chains = List[List[Seed]]()
     if n == 0:
         return chains^
-    var pen_gap = CHAIN_GAP_SCALE * 0.01 * Float64(K)
+    # chn_pen_gap = chain_gap_scale * 0.01 * k, kept in a float.
+    var pen_gap = Float32(CHAIN_GAP_SCALE * 0.01 * Float64(K))
     var max_dist = max(MAX_GAP, bw)
     var max_dist_inner = min(RMQ_INNER_DIST, max_dist)
+    var penalty = List[Int32](capacity=PENALTIES)
+    for dd in range(PENALTIES):
+        penalty.append(Int32(_penalty(dd, pen_gap)))
     var f = List[Int](length=n, fill=0)
     var p = List[Int](length=n, fill=-1)
     var t = List[Int](length=n, fill=0)
     var keys = List[UInt64](capacity=n)
     for j in range(n):
         keys.append((UInt64(a[j].q) << 32) | UInt64(j))
-    sort(keys)
+    _radix_sort(keys)
     var leaf = List[Int](length=n, fill=0)
+    # The anchors in leaf (query end) order, one record each: the inner loop reads one place per anchor.
+    var leaves = List[_Leaf](capacity=n)
+    # Per leaf, the first leaf of its query end and the first within max_dist of it: the outer and inner ranges.
+    var first = List[Int](length=n, fill=0)
+    var near = List[Int](length=n, fill=0)
+    var run = 0
+    var lo = 0
     for m in range(n):
-        leaf[Int(keys[m] & 0xFFFFFFFF)] = m
+        var j = Int(keys[m] & 0xFFFFFFFF)
+        leaf[j] = m
+        leaves.append(
+            _Leaf(x=Int32(a[j].x), q=Int32(a[j].q), span=Int32(a[j].span), f=0, j=Int32(j), p=-1, t=0, before=-1)
+        )
+        if a[j].q != Int(keys[run] >> 32):
+            run = m
+        while Int(keys[lo] >> 32) <= a[j].q - max_dist:
+            lo += 1
+        first[m] = run
+        near[m] = lo
     var outer = _MaxTree(n)
-    var inner = List[Bool](length=n, fill=False)
+    var inner = _Present(n)
+    # The inner window's anchors also linked in leaf order, each to the present one before and after it: the walk
+    # steps without searching the tree.
+    var after = List[Int](length=n, fill=-1)
     var i0 = 0
     var st = 0
     var st_inner = 0
+    # Taken once: neither is resized below.
+    var leaves_p = leaves.unsafe_ptr()
+    var penalty_p = penalty.unsafe_ptr()
     for i in range(n):
         var max_j = -1
         var max_f = a[i].span
         if i0 < i and a[i0].x != a[i].x:
             for j in range(i0, i):
-                outer.set(leaf[j], Float64(f[j]) + 0.5 * pen_gap * Float64(a[j].x + a[j].q), a[j].q, j)
-                inner[j] = True
+                var m = leaf[j]
+                outer.set(m, _Top(pri=Float64(f[j]) + 0.5 * Float64(pen_gap) * Float64(a[j].x + a[j].q), leaf=m))
+                var prior = inner.at_or_before(m - 1)
+                var next = after[prior] if prior >= 0 else inner.at_or_after(m + 1)
+                leaves_p[unsafe_offset=m].before = Int32(prior)
+                after[m] = next
+                if prior >= 0:
+                    after[prior] = m
+                if next >= 0:
+                    leaves_p[unsafe_offset=next].before = Int32(m)
+                inner.set(m, True)
             i0 = i
         while st < i and a[i].x > a[st].x + max_dist:
             if st < i0:
-                outer.set(leaf[st], -1e300, -1, -1)
+                outer.set(leaf[st], _ABSENT)
             st += 1
         while st_inner < i and a[i].x > a[st_inner].x + max_dist_inner:
-            inner[st_inner] = False
+            var m = leaf[st_inner]
+            var prior = Int(leaves_p[unsafe_offset=m].before)
+            var next = after[m]
+            if prior >= 0:
+                after[prior] = next
+            if next >= 0:
+                leaves_p[unsafe_offset=next].before = Int32(prior)
+            leaves_p[unsafe_offset=m].before = -1
+            after[m] = -1
+            inner.set(m, False)
             st_inner += 1
         var yi = a[i].q
-        var lo = 0 if yi - max_dist < 0 else _bisect_right(keys, (UInt64(yi - max_dist) << 32) | UInt64(n))
-        var j = outer.best(lo, _bisect_left(keys, UInt64(yi) << 32))
-        if j >= 0:
+        var mi = leaf[i]
+        var best = outer.best(near[mi], first[mi])
+        if best >= 0:
+            var j = Int(leaves_p[unsafe_offset=best].j)
             var exact = False
             var width = 0
             var sc = f[j] + _score(a[i], a[j], pen_gap, exact, width)
@@ -467,38 +706,31 @@ def _chains(a: List[Seed], bw: Int) -> List[List[Seed]]:
                 max_f = sc
                 max_j = j
             if not exact and yi > 0:
-                var n_skip = 0
-                var m = _bisect_right(keys, (UInt64(yi - 1) << 32) | UInt64(n)) - 1
-                while m >= 0:
-                    var k = Int(keys[m] & 0xFFFFFFFF)
-                    m -= 1
-                    if a[k].q < yi - max_dist_inner:
-                        break
-                    if not inner[k]:
-                        continue
-                    var unused = False
-                    var w = 0
-                    var s = f[k] + _score(a[i], a[k], pen_gap, unused, w)
-                    if w <= bw:
-                        if s > max_f:
-                            max_f = s
-                            max_j = k
-                            if n_skip > 0:
-                                n_skip -= 1
-                        elif t[k] == i:
-                            n_skip += 1
-                            if n_skip > MAX_CHAIN_SKIP:
-                                break
-                        if p[k] >= 0:
-                            t[p[k]] = i
+                var walked = _walk(
+                    leaves_p,
+                    penalty_p,
+                    inner.at_or_before(first[mi] - 1),
+                    i,
+                    a[i].x,
+                    yi,
+                    bw,
+                    max_dist_inner,
+                    pen_gap,
+                    max_f,
+                    max_j,
+                )
+                max_f = walked[0]
+                max_j = walked[1]
         f[i] = max_f
         p[i] = max_j
+        leaves_p[unsafe_offset=mi].f = Int32(max_f)
+        leaves_p[unsafe_offset=mi].p = Int32(leaf[max_j]) if max_j >= 0 else -1
     # mg_chain_backtrack, max_drop = bw.
     var z = List[UInt64]()
     for i in range(n):
         if f[i] >= MIN_CHAIN_SCORE:
             z.append((UInt64(f[i]) << 32) | UInt64(i))
-    sort(z)
+    _radix_sort(z)
     for i in range(n):
         t[i] = 0
     var scores = List[Int]()
