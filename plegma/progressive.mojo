@@ -1813,7 +1813,12 @@ def on_tree(seqs: List[List[UInt8]], costs: Costs, share: Float64 = 0.0) raises 
     composed alignment costs at most a slack over the sequence's own optimum against the reference) changes little:
     0 keeps every reference pair optimal but finds an equally good inherited alignment in few regions (co-optimal pair
     F1 0.937 against 0.936, none of the worst regions changed), 40 and 200 lose on both (0.937 / 0.998 and
-    0.933 / 0.986): a near relative's own alignment to the reference splits a shared expansion its own way."""
+    0.933 / 0.986): a near relative's own alignment to the reference splits a shared expansion its own way.
+    Families instead of a tree (each round the sequence with the most near relatives, by k-mer similarity, a centre
+    aligned to the reference, its relatives aligned to it and placed through it) lose on both at every threshold
+    (similarity 0.9: pair F1 0.932, reference 0.971; 0.5: 0.929 and 0.927): a member's alignment to the reference,
+    composed through its centre's, cuts its changes into pieces (long gap runs 6,570 to 10,286 against the optimal
+    alignments' 5,654), and qc's random pairs mostly span families."""
     var n = len(seqs)
     if n == 0:
         return List[List[UInt8]]()
