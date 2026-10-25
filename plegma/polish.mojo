@@ -406,10 +406,13 @@ def polish(
             var columns = e - s + 1
             var c_last = columns - 1
             for k in range(count):
-                # A read anchored at one end votes only in the segments its alignment spans whole: past its end
-                # every consensus letter would cost it, and it would vote them deleted.
-                if paths.span_start[k] > s or paths.span_end[k] < e:
+                # A read anchored at one end votes on the letters of the segment its alignment spans: the consensus
+                # before its start (after its end) costs it nothing, so it neither votes those letters deleted nor
+                # leaves the segment, a tandem array its reads end inside, without votes.
+                if paths.span_end[k] <= s or paths.span_start[k] >= e:
                     continue
+                var free_start = paths.span_start[k] > s
+                var free_end = paths.span_end[k] < e
                 ref seq = sequences[members[k]]
                 var kb = k * paths.stride
                 var first = Int(paths.enter[kb + s])
@@ -430,6 +433,8 @@ def polish(
                             if j - 1 >= lo:
                                 v = min(v, forward[at + j - 1 - lo] + 1)
                         forward[at + j - lo] = v
+                    if free_start and first >= lo and first <= bands.high[c + 1]:
+                        forward[at + first - lo] = 0
                 # Backward: column c at read offset j, the distance of consensus s + c ..< e to read j ..< last.
                 backward.resize(bands.start[columns], INF)
                 for j in range(bands.low[c_last], bands.high[c_last] + 1):
@@ -446,6 +451,8 @@ def polish(
                                 v = min(v, backward[at + j + 1 - lo] + 1)
                             v = min(v, bands.at(backward, c + 1, j + 1) + Int32(1 if seq[j] != letter else 0))
                         backward[at + j - lo] = v
+                        if free_end and j == last:
+                            backward[at + j - lo] = 0
                 var base = backward[bands.start[0]]
                 for c in range(columns):
                     var i = s + c

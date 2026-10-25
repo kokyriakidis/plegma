@@ -35,7 +35,7 @@ from .kernel import (
     Workspace,
 )
 from .order import guide_order
-from .pinned import WindowScratch, align_pinned
+from .pinned import WindowScratch, align_pinned, unique_pins
 from .pins import pins
 
 
@@ -46,8 +46,13 @@ comptime LONGEST_FIRST = 2
 comptime JOIN_ENDS = 2000
 """Without pins between the two sides' consensus sequences, their last and first this many letters are aligned for an
 overlap."""
-comptime JOIN_LEAST = 30
-"""The fewest letters such an overlap aligns."""
+comptime JOIN_LEAST = 200
+"""The fewest letters an overlap joining the two sides spans: shorter ones are as often two sides' tandem copies alike
+as the same sequence."""
+comptime JOIN_IDENTITY = 0.75
+"""The least share of an overlap's letters a karan overlap matches."""
+comptime JOIN_EDIT = 19
+"""What an edit costs in that overlap, a match earning 1."""
 
 
 struct PoaOptions(Copyable, Movable):
@@ -218,6 +223,15 @@ def poa(
     if len(parts) == 1:
         _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
         _add_anchored(graph, names, seqs, _longest_first(seqs, right), options, SUFFIX, path_of, aligner)
+        # The consensus again from the graph every read voted in, between the assembled sequence's ends (its path one
+        # vote among the reads'): the reads mend what joining or one side's graph got wrong.
+        var backbone: List[Int] = [0]
+        parts[0] = _letters(graph, graph.heaviest_path_spanning(Topology(graph).order, backbone))
+        # One side alone: the reads going on past the cut carry the walk past it again.
+        if len(right) == 0:
+            _trim(parts[0], seqs, left, options.min_cover, True)
+        elif len(left) == 0:
+            _trim(parts[0], seqs, right, options.min_cover, False)
     else:
         # Not joined: the left reads on the left side's sequence; the right reads beside it, on their own.
         _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
@@ -321,18 +335,30 @@ def _trim(mut consensus: List[UInt8], seqs: List[List[UInt8]], reads: List[Int],
 
 
 def _join(left: List[UInt8], right: List[UInt8]) raises -> List[UInt8]:
-    """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end:
-    at the middle pin of minimap2's chain between them, or else by an overlap karan finds between `left`'s last
-    and `right`'s first `JOIN_ENDS` letters; empty when they do not overlap."""
+    """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end: at
+    the middle of the pins of minimap2's chain between them whose 19-mer is unique in both (a tandem array's copies
+    may chain to the wrong copy), when they place `right` starting inside `left` and reaching past its end by an
+    overlap of `JOIN_LEAST` letters or more; else at an overlap karan finds between `left`'s last and `right`'s first
+    `JOIN_ENDS` letters, as long and `JOIN_IDENTITY` alike; empty when they do not overlap."""
     var found = pins(left, right)
-    if len(found.r) > 0:
-        var m = len(found.r) // 2
-        var out = List[UInt8](capacity=found.r[m] + len(right) - found.q[m])
-        for i in range(found.r[m]):
-            out.append(left[i])
-        for j in range(found.q[m], len(right)):
-            out.append(right[j])
-        return out^
+    var unique = unique_pins(left, right, found)
+    var kept = List[Int]()
+    for m in range(len(found.r)):
+        if unique[m]:
+            kept.append(m)
+    if len(kept) > 0:
+        var m = kept[len(kept) // 2]
+        var r = found.r[m]
+        var q = found.q[m]
+        # Right starts inside left (q letters before the pin, r of left's) and ends past it.
+        var overlap = len(left) - (r - q)
+        if r >= q and len(right) - q > len(left) - r and overlap >= JOIN_LEAST:
+            var out = List[UInt8](capacity=r + len(right) - q)
+            for i in range(r):
+                out.append(left[i])
+            for j in range(q, len(right)):
+                out.append(right[j])
+            return out^
     var a_start = max(0, len(left) - JOIN_ENDS)
     var a = List[UInt8](capacity=len(left) - a_start)
     for i in range(a_start, len(left)):
@@ -342,8 +368,13 @@ def _join(left: List[UInt8], right: List[UInt8]) raises -> List[UInt8]:
         b.append(right[j])
     var mode = Mode.ends_free(reference_start=len(a), query_end=len(b)).with_match_score(1)
     var aligner = Aligner()
-    var got = aligner.align(Span(a), Span(b), Costs.edit(), mode)
-    if got.reference_end != len(a) or got.query_start != 0 or got.query_end < JOIN_LEAST or got.score < JOIN_LEAST // 2:
+    # Edits far dearer than a match earns (minimap2's 19 to 1): a longer overlap shifted by tandem copies, its letters
+    # a few percent apart, loses to the true one, its letters as alike as the two consensus sequences.
+    var got = aligner.align(Span(a), Span(b), Costs.linear(JOIN_EDIT, JOIN_EDIT), mode)
+    var spans = got.query_end - got.query_start
+    if got.reference_end != len(a) or got.query_start != 0 or spans < JOIN_LEAST:
+        return List[UInt8]()
+    if Float64(got.cost) > Float64(JOIN_EDIT) * (1.0 - JOIN_IDENTITY) * Float64(spans):
         return List[UInt8]()
     var out = List[UInt8](capacity=len(left) + len(right) - got.query_end)
     for i in range(len(left)):

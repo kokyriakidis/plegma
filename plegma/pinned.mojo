@@ -116,7 +116,7 @@ def _count(seq: List[UInt8], mut wanted: Dict[UInt64, Int]):
                 wanted[code] = seen.value() + 1
 
 
-def _unique_pins(reference: List[UInt8], query: List[UInt8], found: Pins) -> List[Bool]:
+def unique_pins(reference: List[UInt8], query: List[UInt8], found: Pins) -> List[Bool]:
     """For each pin, whether the `UNIQUE_K`-mer centred on it occurs once in `reference` and once in `query`: in a
     tandem array of near-identical copies the chain may pair a seed with the wrong copy, and a pin there would force
     the alignment to; there the k-mers recur, so the array is left to the DP whole."""
@@ -168,7 +168,7 @@ def align_pinned(
     for node in path:
         letters.append(graph.bases[node])
     var found = pins(letters, query)
-    var unique = _unique_pins(letters, query, found)
+    var unique = unique_pins(letters, query, found)
     # One-letter anchors, each past the last on both: the windows then meet at path nodes, so the alignment's path
     # runs forward through the graph (two windows meeting between nodes could join nodes into a cycle).
     var anchor_r = List[Int]()
