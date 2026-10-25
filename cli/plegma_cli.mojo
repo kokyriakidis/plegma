@@ -63,7 +63,7 @@ Options:
     -G INT      the -I refinement's group moves: every split of a UPGMA tree over the rows realigned as two
                 profiles within INT columns of their present merge, each pass [0; 256 with -A -N]; 0 off
     -A          the MSA instead of the graph, anchored on the first sequence (the reference): every other
-                aligned to it exactly (pgrealign's scores as costs, gaps left-normalized), its letters in the
+                aligned to it exactly (minimap2's asm5 scores as costs, gaps left-normalized), its letters in the
                 reference's columns and the runs inserted at one place aligned to each other on the longest; each
                 sequence's alignment with the reference is then its own optimal one, as a caller reporting variants
                 against the reference needs; with -I, then refined on the sum of pairs (-W, -I's prices) with the
@@ -659,9 +659,11 @@ def _poa(input: String, options: Options) raises -> String:
     # -A: the MSA by anchored progressive placement; its graph is built from it, and its rows are the output's.
     var anchored_rows = List[String]()
     if options.anchored and not options.voted:
-        # -Q: anchored on the first sequence, pgrealign's scores as costs (abPOA's 8, 16, 16+8k, 96+k halved:
-        # a mismatch 24, a gap of k letters min(16 + 12k, 96 + 5k)).
-        var reference_costs = Costs.two_piece(24, 16, 12, 96, 5)
+        # Anchored on the first sequence, minimap2's asm5 scores as costs (match 1, mismatch 19, gap opens 39 and 81,
+        # extensions 3 and 1, made costs: a mismatch 40, a gap of k letters min(78 + 7k, 162 + 3k)). The truth's
+        # convention: on chr20 they genotype better than pgrealign's scores (two-piece 24, 16, 12, 96, 5; structural
+        # F1 0.709 against 0.658, small 0.9715 against 0.9704).
+        var reference_costs = Costs.two_piece(40, 78, 7, 162, 3)
         # PLEGMA_QCOSTS=x,o,e or x,o1,e1,o2,e2 (an experiment): other costs for the alignments to the reference.
         var q_costs = getenv("PLEGMA_QCOSTS")
         if q_costs != "":

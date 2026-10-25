@@ -180,7 +180,7 @@ def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
     # Sequences with copies deleted, and some with copies added: against the reference one deletion each.
     for copies in [14, 9, 20, 26, 24, 11, 14]:
         seqs.append(_array(left, unit, copies, right, 0.0))
-    var rows = on_reference(seqs, Costs.two_piece(24, 16, 12, 96, 5))
+    var rows = on_reference(seqs, Costs.two_piece(40, 78, 7, 162, 3))
     for k in range(len(seqs)):
         assert_true(_ungapped(rows[k]) == seqs[k])
         assert_equal(len(rows[k]), len(rows[0]))
@@ -198,12 +198,13 @@ def test_on_reference_consolidates_copy_number_changes_inside_an_array() raises:
     var left = _random(80)
     var right = _random(80)
     var unit = _random(23)
-    # Copies a few percent apart: each sequence's own optimum puts its copy-number change at a place of its own.
+    # Copies a percent apart: each sequence's own optimum puts its copy-number change at a place of its own, where
+    # moving it to one place costs a mismatch or two (copies further apart refuse the move at -A's costs).
     var seqs = List[List[UInt8]]()
-    seqs.append(_array(left, unit, 20, right, 0.04))
+    seqs.append(_array(left, unit, 20, right, 0.01))
     for copies in [14, 9, 26, 24, 11, 17, 23]:
-        seqs.append(_array(left, unit, copies, right, 0.04))
-    var costs = Costs.two_piece(24, 16, 12, 96, 5)
+        seqs.append(_array(left, unit, copies, right, 0.01))
+    var costs = Costs.two_piece(40, 78, 7, 162, 3)
     var plain = on_reference(seqs, costs)
     var rows = on_reference(seqs, costs, consolidate=True)
     for k in range(len(seqs)):
@@ -236,7 +237,7 @@ def test_on_tree_keeps_each_allele_as_simple_against_the_reference() raises:
     for _ in range(3):
         seqs.append(family.copy())
     for share in [0.0, 0.5]:
-        var rows = on_tree(seqs, Costs.two_piece(24, 16, 12, 96, 5), share)
+        var rows = on_tree(seqs, Costs.two_piece(40, 78, 7, 162, 3), share)
         for k in range(len(seqs)):
             assert_true(_ungapped(rows[k]) == seqs[k])
             assert_equal(len(rows[k]), len(rows[0]))

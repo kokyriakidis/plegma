@@ -16,11 +16,12 @@ sequences' likelihood under a pair HMM, which mends most of the errors a POA con
 runs. `-I` refines the MSA (and the graph built from it) on its sum of pairs: each sequence realigned in turn, exactly,
 to the others' columns, anchored by the sequences' optimal pairwise alignments; on vntr-eval's 149 regions it beats
 abPOA in every stratum on both its unit and affine scores. `-A` builds the MSA without the graph, anchored on the first
-sequence (the reference, CHM13's allele in a pangenome region): every other aligned to it exactly at pgrealign's scores,
-gaps left-normalized, and the runs different sequences insert at one place aligned to each other, so each sequence's
-alignment with the reference is its own optimal one and a copy-number change stays one event; spliced into chr20 of the
-HPRC graph by pgrealign, its graphs genotype HG002 better than pgrealign's own (structural F1 0.658 against 0.614, 0.606
-against 0.556 in repeats; small 0.9704 against 0.9691; `experiments/chr20`). `-A -N` instead places each distinct
+sequence (the reference, CHM13's allele in a pangenome region): every other aligned to it exactly at minimap2's asm5
+scores, gaps left-normalized, and the runs different sequences insert at one place aligned to each other, so each
+sequence's alignment with the reference is its own optimal one and a copy-number change stays one event; spliced into
+chr20 of the HPRC graph by pgrealign, its graphs genotype HG002 better than pgrealign's own (structural F1 0.709 against
+0.614, 0.669 against 0.556 in repeats, 0.359 against 0.347 on the hard set; small 0.9715 against 0.9691;
+`experiments/chr20`). `-A -N` instead places each distinct
 sequence, longest first, exactly into the MSA so far in a band centred on the columns the placed sequences' optimal
 alignments to it (at vntr-eval's affine costs) vote for (an anchor audit, `experiments/anchors`, showed seeds inside
 repeats pair letters no optimal alignment pairs), and, where every sequence holds one clear tandem array, a second start
