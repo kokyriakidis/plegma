@@ -1,7 +1,7 @@
 """The `plegma` command line: two subcommands over one FASTA/FASTQ file.
 
-- `plegma poa`: a partial order alignment as abPOA runs one (its flags, defaults and output modes): each sequence
-  aligned to the graph so far and fused into it.
+- `plegma poa`: a partial order alignment as abPOA runs one (its flags and output modes): each sequence, in abPOA's
+  guide order, pinned to the graph's consensus so far, aligned to the graph between the pins and fused into it.
 - `plegma ref`: the MSA anchored on the file's first sequence, the reference (`plegma.on_reference`): every other
   aligned to it alone, at minimap2's asm5 costs, pinned as minimap2 pins it given the reference's flanks (`-F`).
 
@@ -40,11 +40,14 @@ poa options:
                 a g-long gap costs min{O1+g*E1, O2+g*E2} (convex); O2 0: O1+g*E1 (affine); O1 0: g*E1 (linear)
     -b INT      adaptive band: extra band b [10]; < 0 disables the band
     -f FLOAT    adaptive band: extra band f [0.01]: b+f*L letters either side, L the sequence's length
-    -L          align the sequences longest first
-    -p          progressive: abPOA's guide order, most similar minimizer multisets first
-    -s          ambiguous strand: a sequence scoring poorly is tried reverse-complemented, the better kept
+    -p          progressive: abPOA's guide order, most similar minimizer multisets first [the default]
+    -L          the sequences longest first instead
+    -n          the sequences in input order instead
     -S          seeded (global mode): each sequence pinned to the consensus path as minimap2 pins an alignment
-                (asm5's seeds and chain), the DP only between the pins
+                (asm5's seeds and chain; pins only on 19-mers unique in both), the DP only between the pins
+                [the default]
+    -N          not seeded: each sequence aligned to the whole graph
+    -s          ambiguous strand: a sequence scoring poorly is tried reverse-complemented, the better kept
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
 
 ref options:
@@ -98,9 +101,11 @@ struct Options(Copyable, Movable):
         self.band_b = 10
         self.band_f = 0.01
         self.longest_first = False
-        self.progressive = False
+        # The guide order and the pins by default: on the read sets the same consensus as the input order unpinned,
+        # on chr20's allele sets better MSAs, on its largest VNTRs several times faster.
+        self.progressive = True
         self.strand = False
-        self.seeded = False
+        self.seeded = True
         self.start_msa = String()
         self.flanks = String()
         self.threads = 1
@@ -527,12 +532,19 @@ def main() raises:
             i += 1
         elif a == "-L" and not reference:
             options.longest_first = True
+            options.progressive = False
+        elif a == "-n" and not reference:
+            options.longest_first = False
+            options.progressive = False
         elif a == "-p" and not reference:
             options.progressive = True
+            options.longest_first = False
         elif a == "-s" and not reference:
             options.strand = True
         elif a == "-S" and not reference:
             options.seeded = True
+        elif a == "-N" and not reference:
+            options.seeded = False
         elif a == "-i" and not reference:
             options.start_msa = _value(args, i)
             i += 1

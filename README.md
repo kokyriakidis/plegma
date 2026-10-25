@@ -17,10 +17,11 @@ the graph as GFA (`-r`):
   mode the consensus is then polished (`-P`): one-letter and whole-repeat-unit edits are kept while they lower the
   sequences' summed edit distance to it, then while they raise the sequences' likelihood under a pair HMM, which mends
   most of the errors a POA consensus makes in tandem repeats and short runs (13 errors on 180 real VNTR read sets,
-  abPOA 357; 55 on simulated sets, abPOA 458). With `-S` each sequence is pinned to the consensus so far as
-  minimap2 pins an alignment (its seeds and chain; pins only on k-mers unique in both) and the DP runs only between
-  the pins: the same consensus with `-p` (13 and 58 errors), better allele MSAs (pgrealign qc pair F1 0.878 against
-  0.864 on 377 chr20 regions), 1.4 to 7 times faster on the largest chr20 VNTRs.
+  abPOA 357; 58 on simulated sets, abPOA 458). By default the sequences join in abPOA's guide order (`-p`) and
+  each is pinned to the consensus so far as minimap2 pins an alignment (`-S`: its seeds and chain, pins only on
+  k-mers unique in both), the DP running only between the pins: the same consensus as aligning each in input order
+  to the whole graph (`-n -N`), better allele MSAs (pgrealign qc pair F1 0.872 against 0.864 on 377 chr20 regions),
+  up to 7 times faster and in a sixth of the memory on the largest chr20 VNTRs.
 - **`plegma ref`**: the MSA anchored on the first sequence, the reference (CHM13's allele in a pangenome region): every
   other aligned to it alone at minimap2's asm5 scores, gaps left-normalized, its letters in the reference's columns
   and the runs inserted at one place aligned to each other on the longest, so each sequence's alignment with the

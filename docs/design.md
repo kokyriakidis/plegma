@@ -4,8 +4,8 @@ Two commands share one library. This file maps the code to them, for whoever cha
 
 ## `plegma poa`: the general POA
 
-`cli/plegma_cli.mojo` `_poa` adds the sequences one at a time, in input order, longest first (`-L`) or abPOA's guide
-order (`-p`, `plegma/order.mojo`).
+`cli/plegma_cli.mojo` `_poa` adds the sequences one at a time, in abPOA's guide order (`-p`, the default,
+`plegma/order.mojo`), input order (`-n`) or longest first (`-L`).
 
 - **Alignment to the graph** (`plegma/kernel.mojo`): banded DP over the nodes in topological order, abPOA's scoring
   (match score, mismatch, convex two-piece gaps) and adaptive band (`b + f*L` either side of the predecessors' best
@@ -13,11 +13,11 @@ order (`-p`, `plegma/order.mojo`).
   last successor is done, and the traceback keeps one byte per cell (three more at nodes with several predecessors).
   `Workspace.align` aligns between any two nodes (`SOURCE` and `SINK` for the ends), so a sequence can also be aligned
   window by window between anchors.
-- **Seeded** (`-S`, `plegma/pinned.mojo` `align_pinned`): minimap2's pins (`pins.pins`) between the sequence and
-  the consensus path, kept only where the 19-mer centred on a pin is unique in both (in near-identical tandem
-  copies the chain may pair the wrong copy), each pin a one-letter anchor on its path node; the kernel then aligns
-  each stretch between anchors to the subgraph between their nodes (`window_nodes`), in the band the whole sequence
-  would get. Where no pin survives, the one window is the whole graph.
+- **Seeded** (`-S`, the default; `-N` aligns to the whole graph; `plegma/pinned.mojo` `align_pinned`): minimap2's
+  pins (`pins.pins`) between the sequence and the consensus path, kept only where the 19-mer centred on a pin is
+  unique in both (in near-identical tandem copies the chain may pair the wrong copy), each pin a one-letter anchor on
+  its path node; the kernel then aligns each stretch between anchors to the subgraph between their nodes
+  (`window_nodes`), in the band the whole sequence would get. Where no pin survives, the one window is the whole graph.
 - **The graph** (`plegma/graph.mojo`): flat arrays of nodes, columns and edges. A sequence joins along its aligned
   nodes (`fuse_nodes`); an MSA's rows make a graph directly (`from_msa`); `msa` writes the rows back.
 - **Consensus**: abPOA's heaviest bundle (`Graph.heaviest_path` over the member paths), then polished in global mode
