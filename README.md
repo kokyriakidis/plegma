@@ -21,7 +21,11 @@ scores, gaps left-normalized, and the runs different sequences insert at one pla
 sequence's alignment with the reference is its own optimal one and a copy-number change stays one event; spliced into
 chr20 of the HPRC graph by pgrealign, its graphs genotype HG002 better than pgrealign's own (structural F1 0.709 against
 0.614, 0.669 against 0.556 in repeats, 0.359 against 0.347 on the hard set; small 0.9715 against 0.9691;
-`experiments/chr20`). `-A -N` instead places each distinct
+`experiments/chr20`). With `-F` (the reference's flanks) each alignment to the reference is instead pinned as minimap2
+pins it (`plegma/pins.mojo`, a port of its seeds, chain and pins at dipcall's settings, exact between the pins), so
+differences are written as the dipcall-made truth sets write them: on 387 local chr20 regions structural F1 0.679
+against 0.639 without it, and 0.705 against 0.669 under truvari refine, which scores haplotypes however their records
+are split (`experiments/chr20/refined.py`). `-A -N` instead places each distinct
 sequence, longest first, exactly into the MSA so far in a band centred on the columns the placed sequences' optimal
 alignments to it (at vntr-eval's affine costs) vote for (an anchor audit, `experiments/anchors`, showed seeds inside
 repeats pair letters no optimal alignment pairs), and, where every sequence holds one clear tandem array, a second start

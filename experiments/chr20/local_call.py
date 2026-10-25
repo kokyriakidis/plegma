@@ -155,8 +155,9 @@ def prep(args):
     print("prepared %d regions in %s" % (len(pkgs), out))
 
 
-def msa_rows(source, pkg, msas):
-    """{allele id: row} of the region's alleles, from a msas.jsonl.gz record or plegma's run on the distinct alleles."""
+def msa_rows(source, pkg, msas, flanks=None):
+    """{allele id: row} of the region's alleles, from a msas.jsonl.gz record or plegma's run on the distinct alleles.
+    A bare `-F` among plegma's flags takes `flanks` (CHM13's left and right of the region) as its file."""
     alleles = pkg["alleles"]
     if source.endswith(".jsonl.gz"):
         rec = msas.get(pkg["id"])
@@ -176,12 +177,18 @@ def msa_rows(source, pkg, msas):
         else:
             with tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, "in.fa")
+                flags = source.split()
+                if "-F" in flags:
+                    flanks_path = os.path.join(tmp, "flanks.fa")
+                    with open(flanks_path, "w") as f:
+                        f.write(">left\n%s\n>right\n%s\n" % flanks)
+                    flags.insert(flags.index("-F") + 1, flanks_path)
                 with open(path, "w") as f:
                     for k, s in enumerate(distinct):
                         f.write(">s%d\n%s\n" % (k, s))
                         for c in range(copies[s] - 1):
                             f.write(">s%d_%d\n%s\n" % (k, c, s))
-                text = subprocess.run([os.environ["PLEGMA"]] + source.split() + ["-r", "1", path], capture_output=True,
+                text = subprocess.run([os.environ["PLEGMA"]] + flags + ["-r", "1", path], capture_output=True,
                                       text=True, check=True).stdout
             got, name = {}, None
             for line in text.splitlines():

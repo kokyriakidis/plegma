@@ -31,6 +31,7 @@ from karan import Aligner, Costs, Mode, Ties, alignments
 from .backbone import Level, MUMS, SMEMS, backbone, split_anchors
 from .chain import ChainCosts
 from .graph import DELETION, INSERTION, cigar_runs
+from .pins import pinned_pairing
 from .refine import objective, place, refine, row_cost
 from .units import Layout, tandem_layout, tandem_repeat
 
@@ -879,6 +880,7 @@ def on_reference(
     threads: Int = 1,
     consolidate: Bool = False,
     fallback: Optional[Costs] = None,
+    flanks: List[List[UInt8]] = List[List[UInt8]](),
 ) raises -> List[List[UInt8]]:
     """The MSA of `seqs` anchored on the first, the reference: every other distinct sequence aligned to it exactly
     (karan, `costs`, gaps shifted left through repeats as variant callers normalize them) and its letters put in the
@@ -888,6 +890,11 @@ def on_reference(
     placement by many partners' votes can split a copy-number change into copy-sized pieces. Rows in `seqs`' order.
 
     With `threads` above one, the alignments to the reference run over that many threads (karan's batch).
+
+    With `flanks`, the reference's left and right flanks, each alignment to the reference is pinned as minimap2
+    pins it (`pinned_pairing`: its seeds and chain over flank + sequence + flank, exact between the pins), so its
+    differences are written as minimap2, and the truth sets dipcall makes with it, write them; one thread, and no
+    `fallback` (a stretch minimap2 deletes and inserts again is its writing too).
 
     With `fallback`, where at least `REPLACED_SEQUENCES` of the sequences' alignments at `costs` replace a stretch of
     the reference (`_replaces`: a deletion and an insertion of `REPLACEMENT` letters or more side by side) and those
@@ -916,7 +923,11 @@ def on_reference(
     for i in range(len(seqs[distinct[0]])):
         identity.append(i)
     partner.append(identity^)
-    if threads > 1 and len(distinct) > 2:
+    if len(flanks) == 2:
+        var aligner = Aligner()
+        for d in range(1, len(distinct)):
+            partner.append(pinned_pairing(aligner, seqs[distinct[0]], seqs[distinct[d]], flanks[0], flanks[1], costs))
+    elif threads > 1 and len(distinct) > 2:
         # The alignments are independent: karan's batch spreads them over `threads`, the longest first.
         var references = List[String]()
         var queries = List[String]()
@@ -932,7 +943,8 @@ def on_reference(
         var aligner = Aligner()
         for d in range(1, len(distinct)):
             partner.append(_onto(aligner, seqs[distinct[0]], seqs[distinct[d]], costs))
-    if fallback:
+    # Pinned alignments keep minimap2's writing, a stretch deleted and inserted again included: no fallback.
+    if fallback and len(flanks) != 2:
         # Reads of one sequence, not alleles: most of them replace stretches, and the stretches are much of their
         # letters (alleles past asm5's divergence replace one stretch of a few of them; their records are written so).
         var replaced = List[Int]()

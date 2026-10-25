@@ -68,6 +68,10 @@ def apply(contig, recs, h):
     for pos, ref, alts, gt in sorted(recs, key=lambda r: (r[0], -len(r[1]))):
         if h >= len(gt) or gt[h] in (".", "0"):
             continue
+        # `*`: the letters lie in another record's deletion (the truth's small-variant sites inside a structural
+        # one), which spells them, or is past the interior and left out; never letters of the haplotype.
+        if alts[int(gt[h]) - 1] == "*":
+            continue
         start = pos - 1
         if start < at:
             continue

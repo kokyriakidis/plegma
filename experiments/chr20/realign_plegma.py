@@ -2,7 +2,7 @@
 """pgrealign's realign stage done by plegma: an msas.jsonl.gz for pgrealign replace, from extract's packages.
 
 usage: python3 -I experiments/chr20/realign_plegma.py <plegma> <karan> <packages.jsonl.gz> <out msas.jsonl.gz>
-           [--jobs n] [--timeout s] [--flags "..."] [--max-refined n] [--resume]
+           [--jobs n] [--timeout s] [--flags "..."] [--max-refined n] [--resume] [--reference fasta]
 
 Every package whose status is `ok` and whose alleles are not all one (pgrealign's `--select any`) is aligned:
 - its distinct alleles, the reference allele (CHM13's, else the heaviest) first, by `plegma <flags> -r 1` (`-L -I
@@ -13,6 +13,9 @@ Every package whose status is `ok` and whose alleles are not all one (pgrealign'
   its side says (a prefix for `left`, a suffix for `right`, anywhere for `internal`), the allele's letters outside it
   gapped; else aligned (karan, unit costs) to the heaviest allele as a prefix, a suffix or an infix of it and threaded
   into the MSA, its extra letters in columns of their own.
+A bare `-F` among the flags (-A's pinned alignment, which seeds with the reference's flanks) takes, per package,
+FLANK letters of `--reference` each side of its span (`contig`, `ref_start`, `ref_end`); a package without them is
+aligned without -F.
 Each record holds `id`, `method` ("plegma"), `status`, `seconds` and, when `ok`, `rows` ({member id: row}) and
 `columns`, every row checked to spell its member; replace reads `id`, `status` and `rows`. A region past `--timeout`
 seconds (900) is `timeout`, one plegma fails on `aligner_failed`; replace leaves both as they are. With `--resume`,
@@ -31,6 +34,8 @@ import time
 from multiprocessing import Pool
 
 PLEGMA = KARAN = None
+REFERENCE = {}
+FLANK = 1500
 FLAGS = ["-L", "-I", "20,64,1"]
 TIMEOUT = 900
 MAX_REFINED = 100000
@@ -51,9 +56,10 @@ def unrefined(flags):
     return out
 
 
-def plegma_rows(seqs, timeout, copies=None, flags=None):
+def plegma_rows(seqs, timeout, copies=None, flags=None, flanks=None):
     """plegma's MSA of the distinct sequences `seqs` (a list), as rows in the same order; with `copies`, each written
-    as many times as it says (so plegma weighs a sequence by the haplotypes spelling it); `flags` for FLAGS."""
+    as many times as it says (so plegma weighs a sequence by the haplotypes spelling it); `flags` for FLAGS; `flanks`
+    (left, right) the file of a bare -F, which is dropped without them."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "in.fa")
         with open(path, "w") as f:
@@ -61,7 +67,16 @@ def plegma_rows(seqs, timeout, copies=None, flags=None):
                 f.write(">s%d\n%s\n" % (k, s))
                 for c in range((copies or {}).get(s, 1) - 1):
                     f.write(">s%d_%d\n%s\n" % (k, c, s))
-        flags = flags if flags is not None else FLAGS if len(seqs) <= MAX_REFINED else unrefined(FLAGS)
+        flags = list(flags if flags is not None else FLAGS if len(seqs) <= MAX_REFINED else unrefined(FLAGS))
+        if "-F" in flags:
+            at = flags.index("-F")
+            if flanks:
+                flanks_path = os.path.join(tmp, "flanks.fa")
+                with open(flanks_path, "w") as f:
+                    f.write(">left\n%s\n>right\n%s\n" % flanks)
+                flags.insert(at + 1, flanks_path)
+            else:
+                del flags[at]
         out = subprocess.run([PLEGMA] + flags + ["-r", "1", path], capture_output=True, text=True, timeout=timeout)
         if out.returncode != 0:
             raise RuntimeError("plegma exited %d: %s" % (out.returncode, out.stderr.strip()[-200:]))
@@ -193,14 +208,19 @@ def realign(package):
                 copies = {}
                 for a in alleles:
                     copies[a["seq"].upper()] = copies.get(a["seq"].upper(), 0) + a["weight"]
+            flanks = None
+            contig = REFERENCE.get(package.get("contig"))
+            if contig is not None and package.get("ref_end"):
+                s0, e0 = int(package["ref_start"]), int(package["ref_end"])
+                flanks = (contig[max(0, s0 - FLANK) : s0].upper(), contig[e0 : e0 + FLANK].upper())
             try:
-                msa = plegma_rows(distinct, TIMEOUT, copies)
+                msa = plegma_rows(distinct, TIMEOUT, copies, flanks=flanks)
             except subprocess.TimeoutExpired:
                 # Past the time limit refined, the unrefined MSA (three times the limit): the region keeps a plegma
                 # MSA rather than its original alignment.
                 if unrefined(FLAGS) == FLAGS:
                     raise
-                msa = plegma_rows(distinct, 3 * TIMEOUT, copies, unrefined(FLAGS))
+                msa = plegma_rows(distinct, 3 * TIMEOUT, copies, unrefined(FLAGS), flanks)
                 record["refined"] = False
         row_of = dict(zip(distinct, msa))
         order = [a["id"] for a in alleles]
@@ -255,9 +275,21 @@ def kept_records(path):
     return out
 
 
-def init(plegma, karan, flags, timeout, max_refined):
-    global PLEGMA, KARAN, FLAGS, TIMEOUT, MAX_REFINED
+def init(plegma, karan, flags, timeout, max_refined, reference):
+    global PLEGMA, KARAN, FLAGS, TIMEOUT, MAX_REFINED, REFERENCE
     PLEGMA, KARAN, FLAGS, TIMEOUT, MAX_REFINED = plegma, karan, flags, timeout, max_refined
+    REFERENCE = {}
+    if reference and "-F" in flags:
+        name, parts = None, []
+        for line in open(reference):
+            if line.startswith(">"):
+                if name is not None:
+                    REFERENCE[name] = "".join(parts)
+                name, parts = line[1:].split()[0], []
+            else:
+                parts.append(line.strip())
+        if name is not None:
+            REFERENCE[name] = "".join(parts)
 
 
 def main():
@@ -275,6 +307,7 @@ def main():
     timeout = int(option("--timeout", "900"))
     flags = option("--flags", "-L -I 20,64,1").split()
     max_refined = int(option("--max-refined", "100000"))
+    reference = option("--reference", "")
     resume = "--resume" in args
     args = [a for a in args if a != "--resume"]
     plegma, karan, packages, out = args
@@ -285,7 +318,7 @@ def main():
         os.replace(out + ".part", out + ".kept")
     done = frozenset(r["id"] for r in kept)
     print("resuming: %d records kept" % len(kept), file=sys.stderr, flush=True)
-    with Pool(jobs, initializer=init, initargs=(plegma, karan, flags, timeout, max_refined)) as pool, \
+    with Pool(jobs, initializer=init, initargs=(plegma, karan, flags, timeout, max_refined, reference)) as pool, \
             gzip.open(out + ".part", "wt") as f:
         for record in kept:
             f.write(json.dumps(record) + "\n")

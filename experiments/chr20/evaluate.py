@@ -19,7 +19,9 @@ genotype the whole chromosome, to compare MSAs in minutes and see why each errs.
       per region and label: the MSA's own properties, which need no truth (its width over its longest allele, its
       scattered changes: one change of one length at several places, its indels per allele against CHM13); the called
       haplotypes' edit distance to HG002's truth against the least the graph's rows allow (right when within 1%,
-      however the records split them); the records' structural TP/FN/FP; the sampling and mapping numbers; totals.
+      however the records split them); the records' structural TP/FN/FP; the sampling and mapping numbers; totals,
+      with each label's structural F1 after truvari refine as well (refined.py: no representation changes it; over
+      the label's last run, so with --regions only when that run had the same regions).
   strata  <out dir> <prep dir> <packages.jsonl.gz> <label> [--others a,b] [--regions file] [--jobs n] [--out tsv]
       each structural error put in a class: on the MSA's side or not (strata.py).
   check   <out dir> <prep dir> <packages.jsonl.gz> <label> ... [--regions file] [--jobs n] [--out dir]
@@ -159,8 +161,25 @@ def report(args):
     for label, (tp, fn, fp, excess, scat, n, right, width, per_allele) in totals.items():
         p, r = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
         print("  %-6s width %.2f scattered %d indels/allele %.2f | haplotypes right %d/%d, excess %d | records: structural "
-              "TP %d FN %d FP %d F1 %.3f" % (label, width / max(n, 1), scat, per_allele / max(n, 1), right, n, excess,
-                                             tp, fn, fp, 2 * p * r / max(p + r, 1e-9)))
+              "TP %d FN %d FP %d F1 %.3f%s" % (label, width / max(n, 1), scat, per_allele / max(n, 1), right, n, excess,
+                                               tp, fn, fp, 2 * p * r / max(p + r, 1e-9), refined_f1(out_dir, label)))
+
+
+def refined_f1(out_dir, label):
+    """`, refined F1 x` of a label's pooled truvari bench (cached beside it), or nothing."""
+    import refined
+
+    bench = os.path.join(out_dir, label, "batch_score", "score", "batch.truvari")
+    if not os.path.exists(os.path.join(bench, "summary.json")):
+        return ""
+    cache = bench + ".refined.json"
+    if not os.path.exists(cache) or os.path.getmtime(cache) < os.path.getmtime(os.path.join(bench, "summary.json")):
+        try:
+            json.dump(refined.refined(bench), open(cache, "w"))
+        except (OSError, subprocess.CalledProcessError) as error:
+            return ", refined failed: %s" % error
+    tp, fn, fp, f1 = json.load(open(cache))["refined"]
+    return ", refined F1 %.3f (TP %d FN %d FP %d)" % (f1, tp, fn, fp)
 
 
 def main():

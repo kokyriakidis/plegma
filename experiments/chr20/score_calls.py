@@ -5,13 +5,15 @@ truth's benchmark regions, and the same restricted to the tandem-repeat regions 
 45 hard-set regions.
 
 usage: python3 -I experiments/chr20/score_calls.py <work dir> <truth dir> <vg-call-eval> <packages.jsonl.gz>
-           <hard set chr20.tsv> <arm> [<arm> ...]
+           <hard set chr20.tsv> <arm> [<arm> ...] [--refined]
 
 Reuses vg-call-eval's scripts/wgs/bench_wgs.score_contig on a layout of its own per (arm, set):
 <work dir>/calls/<arm>.<set>/chr20/{chr20.vcf.gz (the arm's short.vcf.gz), chr20.fa, truth.chr20.{smvar,stvar}.vcf.gz,
 truth.chr20.{smvar,stvar}.bed (the benchmark bed, intersected with the set's regions)}. Needs bcftools, aardvark and
-truvari (BCFTOOLS_DIR, AARDVARK_DIR on PATH; TRUVARI) and REF, CHM13's chr20 FASTA (indexed). Prints per set and arm the small-variant F1 with its true and
-false counts and the structural F1.
+truvari (BCFTOOLS_DIR, AARDVARK_DIR on PATH; TRUVARI) and REF, CHM13's chr20 FASTA (indexed). Prints per set and arm
+the small-variant F1 with its true and false counts and the structural F1; with --refined, the structural F1 again
+after truvari refine (refined.py: the truth's and the calls' haplotypes written alike where they disagree), which no
+representation changes.
 """
 import csv
 import gzip
@@ -65,12 +67,16 @@ def write_bed(path, intervals):
 
 
 def main():
-    work, truth, vce, packages, hardset = (Path(x) for x in sys.argv[1:6])
-    arms = sys.argv[6:]
+    args = sys.argv[1:]
+    refine = "--refined" in args
+    args = [a for a in args if a != "--refined"]
+    work, truth, vce, packages, hardset = (Path(x) for x in args[:5])
+    arms = args[5:]
     sys.path.insert(0, str(vce / "scripts" / "wgs"))
     sys.path.insert(0, str(vce / "scripts" / "tier2"))
     sys.path.insert(0, str(vce / "scripts"))
     sys.path.insert(0, str(vce / "src"))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     os.environ["PATH"] = os.pathsep.join(
         x for x in (os.environ.get("BCFTOOLS_DIR"), os.environ.get("AARDVARK_DIR"), os.environ["PATH"]) if x)
     import bench_wgs  # noqa: E402
@@ -140,6 +146,12 @@ def main():
                 "%.4f" % sv.f1 if sv else "-", counts(sv),
                 "; ".join("%s: %s" % (k, r[k]) for k in ("error", "aardvark_error", "truvari_error") if k in r)),
                 flush=True)
+            if refine and sv:
+                import refined  # noqa: E402
+
+                tp, fn, fp, f1 = refined.refined(str(d / "score" / "chr20.truvari"))["refined"]
+                print("%-8s %-9s refined structural F1 %.4f (TP %d FN %d FP %d)" % (name, arm, f1, tp, fn, fp),
+                      flush=True)
 
 
 if __name__ == "__main__":

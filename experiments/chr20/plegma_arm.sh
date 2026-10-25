@@ -26,7 +26,7 @@ step() { echo "[$(date +%T)] $*"; }
 step "realign (plegma $FLAGS)"
 if [ ! -s $P/msas.jsonl.gz ]; then
   /usr/bin/time -v python3 -I "$HERE/realign_plegma.py" "$PLEGMA" "$KARAN" $S/extract/packages.jsonl.gz $P/msas.jsonl.gz \
-    --jobs 8 --timeout 600 --flags "$FLAGS" --resume > $P/realign.log 2>> $P/realign.err || { echo REALIGN_FAILED; exit 1; }
+    --jobs 8 --timeout 600 --flags "$FLAGS" --reference "$W/calls/chr20.fa" --resume > $P/realign.log 2>> $P/realign.err || { echo REALIGN_FAILED; exit 1; }
 fi
 grep -E "^done|Elapsed|Maximum resident" $P/realign.err
 step replace

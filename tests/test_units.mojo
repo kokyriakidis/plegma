@@ -2,8 +2,9 @@ from std.collections import Set
 from std.random import random_ui64, seed
 from std.testing import assert_equal, assert_true, TestSuite
 
-from karan import Costs
+from karan import Aligner, Costs
 
+from plegma.pins import pinned_pairing, pins_in_context
 from plegma.progressive import on_reference, on_tree, progressive
 from plegma.refine import gap_opens, sum_of_pairs
 from plegma.units import tandem_layout, tandem_repeat
@@ -249,6 +250,39 @@ def test_on_reference_aligns_distant_sequences_at_the_fallback_costs() raises:
     assert_true(_long_change_places(kept, 50) > 0)
     for k in range(len(alleles)):
         assert_true(with_fallback[k] == kept[k])
+
+
+def test_pinned_alignment_spells_and_pins_identical_sequences_on_the_diagonal() raises:
+    seed(73)
+    var left = _random(1500)
+    var right = _random(1500)
+    var unit = _random(37)
+    var reference = _array(_random(300), unit, 30, _random(300), 0.02)
+    var found = pins_in_context(reference, reference, left, right)
+    assert_true(len(found.r) > 0)
+    for m in range(len(found.r)):
+        assert_equal(found.r[m], found.q[m])
+    # Copies added and removed: each pairing runs forward through both, every sequence spelled by its row.
+    var seqs = List[List[UInt8]]()
+    seqs.append(reference.copy())
+    for copies in [22, 41, 30, 35]:
+        seqs.append(_array(_random(300), unit, copies, _random(300), 0.02))
+    var flanks = List[List[UInt8]]()
+    flanks.append(left.copy())
+    flanks.append(right.copy())
+    var aligner = Aligner()
+    for k in range(1, len(seqs)):
+        var pairing = pinned_pairing(aligner, seqs[0], seqs[k], left, right, Costs.two_piece(40, 78, 7, 162, 3))
+        assert_equal(len(pairing), len(seqs[k]))
+        var last = -1
+        for j in range(len(pairing)):
+            if pairing[j] >= 0:
+                assert_true(pairing[j] > last)
+                last = pairing[j]
+    var rows = on_reference(seqs, Costs.two_piece(40, 78, 7, 162, 3), flanks=flanks)
+    for k in range(len(seqs)):
+        assert_true(_ungapped(rows[k]) == seqs[k])
+        assert_equal(len(rows[k]), len(rows[0]))
 
 
 def test_on_tree_keeps_each_allele_as_simple_against_the_reference() raises:

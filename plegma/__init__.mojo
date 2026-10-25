@@ -42,6 +42,9 @@ is implementation and may change.
   its votes' costs `UNIT_VOTES`, `PRICED_VOTES`, `AFFINE_VOTES`, `TWO_PIECE_VOTES`; `on_reference`, the MSA
   anchored on its first sequence (each other aligned to it exactly), for calling variants against that reference;
   `on_tree`, the same along a tree from the reference through the heaviest sequences (an experiment).
+- minimap2's pinned alignment (2.31, -x asm5 as dipcall runs it): `pins` -> `Pins` (the points its alignment of a
+  sequence to the reference passes through), `pins_in_context` (the same with flanks as the seeds' context),
+  `pinned_pairing` (the alignment exact between them), so `on_reference` writes differences as dipcall does.
 - Tandem arrays: `tandem_repeat` -> `Repeat` (a sequence's array and period),
   `tandem_layout` -> `Layout` (a region's arrays cut into copies phased by one
   unit, the copies aligned as symbols on their sum of pairs, then as letters).
@@ -82,6 +85,7 @@ from .kernel import (
 )
 from .order import guide_order
 from .poa import GapAffine, SINK, SOURCE, WindowAlignment, align_window
+from .pins import Pins, pinned_pairing, pins, pins_in_context
 from .polish import polish
 from .progressive import AFFINE_VOTES, PRICED_VOTES, TWO_PIECE_VOTES, UNIT_VOTES, on_reference, on_tree, progressive
 from .refine import gap_opens, objective, refine, sum_of_pairs

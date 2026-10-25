@@ -78,6 +78,9 @@ Options:
                 kept (lowest on vntr-eval's costs; on chr20 its graphs genotype worse, splitting copy-number changes)
     -Q          with -A, the default (kept for older command lines)
     -t INT      threads for -A's alignments to the reference [1]
+    -F FILE     with -A, the reference's flanks (FASTA: left, then right): each alignment to the reference pinned
+                as minimap2 pins it (-x asm5 as dipcall runs it; its seeds and chain over flank + sequence + flank),
+                exact between the pins, so differences are written as dipcall's truth sets write them
     -U          with -A -N, no copy-level start
     -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
                 2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
@@ -393,6 +396,7 @@ struct Options(Copyable, Movable):
     var repeat_k: Int
     var repeat_distance: Int
     var start_msa: String
+    var flanks: String
     var result: Int
     var consensus_rule: Int
     var max_consensus: Int
@@ -447,6 +451,7 @@ struct Options(Copyable, Movable):
         self.repeat_k = 12
         self.repeat_distance = 500
         self.start_msa = String()
+        self.flanks = String()
         self.result = 0
         self.consensus_rule = 0
         self.max_consensus = 1
@@ -681,6 +686,17 @@ def _poa(input: String, options: Options) raises -> String:
         # PLEGMA_TREE=<share> (an experiment): along a tree from the reference through the sequences at least that
         # share of the input spells.
         var tree = getenv("PLEGMA_TREE")
+        var flanks = List[List[UInt8]]()
+        if options.flanks != "":
+            var records = read_fasta(options.flanks)
+            if len(records) != 2:
+                raise Error("-F takes a FASTA of two sequences, the reference's left and right flanks")
+            for r in range(2):
+                var letters = List[UInt8](records.seq(r))
+                for k in range(len(letters)):
+                    if letters[k] >= UInt8(ord("a")) and letters[k] <= UInt8(ord("z")):
+                        letters[k] -= 32
+                flanks.append(letters^)
         var bytes = on_tree(seqs, reference_costs, Float64(tree)) if tree != "" else on_reference(
             seqs,
             reference_costs,
@@ -691,6 +707,7 @@ def _poa(input: String, options: Options) raises -> String:
             # (abPOA's 8, 16, 16+8k, 96+k halved: a mismatch 24, a gap of k letters min(16 + 12k, 96 + 5k)), whose
             # long gaps cost more.
             Costs.two_piece(24, 16, 12, 96, 5),
+            flanks,
         )
         if options.sp_set and options.sp_passes > 0:
             # With -I, refined on the sum of pairs with the reference's row weighing 4 times the rows' number: the
@@ -1020,6 +1037,9 @@ def main() raises:
             listed = True
         elif a == "-i":
             options.start_msa = _value(args, i)
+            i += 1
+        elif a == "-F":
+            options.flanks = _value(args, i)
             i += 1
         elif a == "-o":
             output = _value(args, i)

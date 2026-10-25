@@ -206,7 +206,7 @@ def graph_of(task):
             rows = json.load(open(seed))
     try:
         if rows is None:
-            rows = local_call.msa_rows(source, pkg, msas)
+            rows = local_call.msa_rows(source, pkg, msas, (meta["left"], meta["right"]))
     except subprocess.CalledProcessError as error:
         return rid, None, "plegma failed: %s" % (error.stderr or "")[-120:]
     if cached and rows is not None and not os.path.exists(cached):
