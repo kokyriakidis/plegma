@@ -340,7 +340,9 @@ def chain(ref, query):
     a = anchors(ref, query)
     chains = lchain_rmq(a, BW)
     if len(chains) > 1:
-        first = chains[0][1]
+        # map.c tests the chain compact_a puts first: chains sorted by their first anchor's reference position (not
+        # by score; "u[] may not be sorted by score here").
+        first = min(chains, key=lambda c: c[1][0][0])[1]
         st, en = qpos(first[0]), qpos(first[-1])
         if len(query) - (en - st) > RMQ_RESCUE_SIZE or en - st > len(query) * RMQ_RESCUE_RATIO:
             pooled = sorted(x for _, c in chains for x in c)

@@ -556,8 +556,14 @@ def _chain(reference: List[UInt8], query: List[UInt8]) -> List[Seed]:
     var a = _anchors(reference, query)
     var chains = _chains(a, BW)
     if len(chains) > 1:
-        var st = chains[0][0].q
-        var en = chains[0][len(chains[0]) - 1].q
+        # map.c tests the chain compact_a puts first: the chains sorted by their first anchor's reference position,
+        # not by score ("u[] may not be sorted by score here").
+        var first = 0
+        for c in range(1, len(chains)):
+            if chains[c][0].x < chains[first][0].x:
+                first = c
+        var st = chains[first][0].q
+        var en = chains[first][len(chains[first]) - 1].q
         if len(query) - (en - st) > RMQ_RESCUE_SIZE or Float64(en - st) > Float64(len(query)) * RMQ_RESCUE_RATIO:
             var pooled = List[Seed]()
             for c in chains:
