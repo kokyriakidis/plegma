@@ -1803,7 +1803,13 @@ def on_tree(seqs: List[List[UInt8]], costs: Costs, share: Float64 = 0.0) raises 
     family's change split in pieces. A sequence joins through its centre only where that leaves it fewer insertions
     and deletions against the reference than its own alignment to the reference does (parsimony): where the centre is
     itself a patchwork of copy differences, a member would inherit them and add copies back beside them. Rows in
-    `seqs`' order."""
+    `seqs`' order.
+
+    In practice the parsimony test sends every sequence straight to the reference (its own alignment there is the
+    optimum, so a parent's rarely leaves fewer events), and the MSA is `on_reference`'s, byte for byte; with the test
+    off, every sequence through its parent, pgrealign qc scores it below `on_reference` on both its allele pairs and
+    its reference pairs (asm5, 377 chr20 regions: pair F1 0.917 against 0.931, reference F1 0.928 against 0.999), the
+    small differences of each edge adding up along the tree."""
     var n = len(seqs)
     if n == 0:
         return List[List[UInt8]]()
