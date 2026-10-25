@@ -3,6 +3,7 @@
 pairs otherwise than the pair's optimum, put in a class by where the MSA holds it, summed over a qc_loop subset.
 
 usage: python3 -I experiments/chr20/pair_trace.py <qc_loop out dir> <label> [--jobs n] [--top n] [--region id]
+           [--coopt]
 
 For each region of <out dir>/<label>.msas.jsonl.gz and each of qc's random allele pairs (CHM13's allele excluded,
 as qc draws them), each letter of either allele whose partner in the MSA's induced alignment (a letter of the other
@@ -15,6 +16,11 @@ put by its MSA column:
                        runs inserted at one place aligned to each other otherwise than the pair's optimum
   insertion, elsewhere in a column CHM13 gaps, the other allele inserting nothing at that slot: the same inserted
                        copies placed at another slot (or another place altogether) by the other allele
+With --coopt (qc_loop's cached co-optimal sets, from a qc_loop --coopt run of the label), a letter pair the MSA aligns
+is wrong only when no optimal alignment aligns it (ties counted right), counted from the first allele's letters; the
+`ref, both letters` class is then split by whether the two alleles change CHM13 alike within WINDOW letters of the
+column (`same changes`: the shift cannot come from a change placed differently) or not.
+
 Prints the classes' shares, the regions with the most wrong letters and, with --region, that region's worst pairs
 spelled out by class and slot.
 """
@@ -32,7 +38,9 @@ from pgrealign import qc  # noqa: E402
 from pgrealign.star import Abpoa  # noqa: E402
 
 GAP = "-"
+WINDOW = 200
 MAX_CELLS = 450_000_000
+COOPT = False
 CLASSES = ("ref, other deletes", "ref, both letters", "insertion, same slot", "insertion, elsewhere")
 
 
@@ -88,14 +96,82 @@ def classify(rows, ref, a, b, opt, slot_of, inserted_slots):
     return counts, where
 
 
+def changes_near(rows, ref, x, c, slot_of):
+    """The changes (insertions and deletions, as (kind, slot, length)) row x makes against CHM13 within WINDOW
+    CHM13 letters of column c."""
+    lo, hi = slot_of[c] - WINDOW, slot_of[c] + WINDOW
+    out = []
+    k = 0
+    r, q = rows[ref], rows[x]
+    while k < len(r):
+        if not (lo <= slot_of[k] <= hi) or (r[k] == GAP and q[k] == GAP) or (r[k] != GAP and q[k] != GAP):
+            k += 1
+            continue
+        kind = "ins" if r[k] == GAP else "del"
+        start = k
+        n = 0
+        while k < len(r) and ((kind == "ins" and r[k] == GAP) or (kind == "del" and r[k] != GAP and q[k] == GAP)
+                              or (r[k] == GAP and q[k] == GAP)):
+            n += (q[k] != GAP) if kind == "ins" else (r[k] != GAP)
+            k += 1
+        if n:
+            out.append((kind, slot_of[start], n))
+    return out
+
+
+def classify_coopt(rows, ref, a, b, sets, slot_of, inserted_slots):
+    """The letters of a the MSA pairs with a letter of b no optimal alignment pairs it with, by class."""
+    import numpy as np
+
+    lo, hi, extra = sets
+    ra, rb = rows[a], rows[b]
+    counts = collections.Counter()
+    where = collections.Counter()
+    ia = jb = -1
+    for c, (x, y) in enumerate(zip(ra, rb)):
+        if x != GAP:
+            ia += 1
+        if y != GAP:
+            jb += 1
+        if x == GAP or y == GAP:
+            continue
+        if lo[ia] <= jb <= hi[ia] or any(p <= jb <= q for p, q in extra.get(ia, ())):
+            continue
+        if rows[ref][c] != GAP:
+            kind = CLASSES[1]
+            if changes_near(rows, ref, a, c, slot_of) == changes_near(rows, ref, b, c, slot_of):
+                kind = "ref, both letters, same changes"
+        else:
+            kind = CLASSES[2]
+        counts[kind] += 1
+        where[(kind, slot_of[c])] += 1
+    return counts, where
+
+
 def region(task):
-    pkg, rows, abpoa = task
+    pkg, rows, abpoa, coopt_dir = task
     seqs = {x["id"]: x["seq"].upper() for x in pkg["alleles"]}
     ref = pkg["ref"]
     slot_of = slots(rows[ref])
     inserted_slots = {k: {slot_of[c] for c, x in enumerate(r) if x != GAP and rows[ref][c] == GAP} for k, r in rows.items()}
     total = collections.Counter()
     pairs = []
+    if coopt_dir:
+        import hashlib
+
+        for kind, a, b in qc.compared_pairs(pkg, rows, 20, 20):
+            if kind != "pair":
+                continue
+            key = hashlib.sha1(("%s|%s|%s" % (qc_loop.TWO_PIECE["asm5"], seqs[a], seqs[b])).encode()).hexdigest()
+            path = os.path.join(coopt_dir, key[:2], key + ".txt")
+            if not os.path.exists(path):
+                continue
+            counts, where = classify_coopt(rows, ref, a, b, qc_loop.parse_coopt(open(path).read()), slot_of,
+                                           inserted_slots)
+            total.update(counts)
+            pairs.append((sum(counts.values()), a, b, dict(counts), where.most_common(4)))
+        pairs.sort(reverse=True)
+        return pkg["id"], total, pairs
     with Abpoa(abpoa, qc_loop.SCORES["asm5"]) as align:
         for kind, a, b in qc.compared_pairs(pkg, rows, 20, 20):
             if kind != "pair":
@@ -114,6 +190,9 @@ def main():
     jobs = int(qc_loop.option(args, "--jobs", "8"))
     top = int(qc_loop.option(args, "--top", "15"))
     only = qc_loop.option(args, "--region", "")
+    global COOPT
+    COOPT = "--coopt" in args
+    args = [a for a in args if a != "--coopt"]
     out, label = args[:2]
     os.environ["QC_OPTIMA_CACHE"] = qc_loop.CACHE = os.path.abspath(os.path.join(out, "optima"))
     msas = {}
@@ -129,7 +208,7 @@ def main():
         for line in f:
             p = json.loads(line)
             if p["id"] in msas and len(p["alleles"]) > 1 and p.get("ref") in msas[p["id"]]:
-                tasks.append((p, msas[p["id"]], abpoa))
+                tasks.append((p, msas[p["id"]], abpoa, os.path.join(os.path.abspath(out), "coopt") if COOPT else ""))
     with Pool(jobs) as pool:
         results = pool.map(region, tasks)
     grand = collections.Counter()
@@ -137,12 +216,12 @@ def main():
         grand.update(total)
     n = sum(grand.values())
     print("%s: %d regions, %d wrong letters in allele pairs" % (label, len(results), n))
-    for k in CLASSES:
-        print("  %-22s %8d  %5.1f%%" % (k, grand[k], 100 * grand[k] / max(n, 1)))
+    for k in list(CLASSES) + ["ref, both letters, same changes"]:
+        if grand[k] or k in CLASSES:
+            print("  %-32s %8d  %5.1f%%" % (k, grand[k], 100 * grand[k] / max(n, 1)))
     print("regions with the most wrong letters:")
     for rid, total, pairs in sorted(results, key=lambda r: -sum(r[1].values()))[:top]:
-        print("  %-20s %7d  %s" % (rid, sum(total.values()), ", ".join("%s %d" % (k, total[k]) for k in CLASSES
-                                                                         if total[k])))
+        print("  %-20s %7d  %s" % (rid, sum(total.values()), ", ".join("%s %d" % (k, v) for k, v in total.items())))
     if only:
         for rid, total, pairs in results:
             for wrong, a, b, counts, where in pairs[:6]:

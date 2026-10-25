@@ -1809,7 +1809,11 @@ def on_tree(seqs: List[List[UInt8]], costs: Costs, share: Float64 = 0.0) raises 
     optimum, so a parent's rarely leaves fewer events), and the MSA is `on_reference`'s, byte for byte; with the test
     off, every sequence through its parent, pgrealign qc scores it below `on_reference` on both its allele pairs and
     its reference pairs (asm5, 377 chr20 regions: pair F1 0.917 against 0.931, reference F1 0.928 against 0.999), the
-    small differences of each edge adding up along the tree."""
+    small differences of each edge adding up along the tree. A guard by cost instead (through the parent where the
+    composed alignment costs at most a slack over the sequence's own optimum against the reference) changes little:
+    0 keeps every reference pair optimal but finds an equally good inherited alignment in few regions (co-optimal pair
+    F1 0.937 against 0.936, none of the worst regions changed), 40 and 200 lose on both (0.937 / 0.998 and
+    0.933 / 0.986): a near relative's own alignment to the reference splits a shared expansion its own way."""
     var n = len(seqs)
     if n == 0:
         return List[List[UInt8]]()
