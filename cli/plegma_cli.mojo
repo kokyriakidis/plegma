@@ -83,8 +83,9 @@ Options:
                 exact between the pins, so differences are written as dipcall's truth sets write them
     -U          with -A -N, no copy-level start
     -W INT,INT  the sum-of-pairs prices of a column of two different letters and of a letter against a gap [1,1;
-                2,2 with -A] (-I's third number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no
-                opening, its affine cost 4,2 with 6
+                2,2 with -A -N; 40,3 with -A, opening 162: asm5's long-gap piece, as -A aligns] (-I's third
+                number prices a gap opening, 1): vntr-eval's unit cost is 1,1 with no opening, its affine cost 4,2
+                with 6
     -V INT[,INT...] with -A -N, the seeds' confidence [-2,3,0,0,0]: -2 no seeds (the optimal alignments
                 to the placed sequences vote, the staged seeds where a pair is too long to align); -4 the staged
                 seeds first (MUMs outside tandem repeats pin the flanks, then MUMs of 1,000, 600 and 400 letters),
@@ -429,6 +430,7 @@ struct Options(Copyable, Movable):
     var tree_start: Bool
     var confidence_set: Bool
     var prices_set: Bool
+    var sp_open_set: Bool
     var min_freq: Float64
     var verbose: Bool
 
@@ -484,6 +486,7 @@ struct Options(Copyable, Movable):
         self.tree_start = False
         self.confidence_set = False
         self.prices_set = False
+        self.sp_open_set = False
         self.min_freq = 0.25
         self.verbose = False
 
@@ -725,7 +728,11 @@ def _poa(input: String, options: Options) raises -> String:
                 # The bands' centres come from pairwise alignments at -A's vote costs (vntr-eval's affine): under the
                 # reference's two-piece costs karan may refuse a divergent pair at its default memory.
                 Costs.affine(4, 6, 2),
-                options.sp_gap_open,
+                # The sum of pairs priced as -A aligns, asm5's long-gap piece (a mismatch 40, a gap of k letters
+                # 162 + 3k: most of these indels are long), unless -W and -I's third number say otherwise; at 2, 2
+                # and 1 it traded mismatches for gaps asm5 prices far higher and moved both the sequences' pairs and
+                # their reference pairs off their optima.
+                options.sp_gap_open if options.sp_open_set else 162,
                 False,
                 # No group moves by default: on -A's MSAs they left the objective as it was (or within 0.03%) at a tenth
                 # to a half of the refinement's time.
@@ -733,8 +740,8 @@ def _poa(input: String, options: Options) raises -> String:
                 0,
                 weights,
                 1000,
-                options.mismatch if options.prices_set else 2,
-                options.gap if options.prices_set else 2,
+                options.mismatch if options.prices_set else 40,
+                options.gap if options.prices_set else 3,
             )
         var names = List[String]()
         for r in range(len(seqs)):
@@ -1060,6 +1067,7 @@ def main() raises:
                 options.sp_band = Int(parts[1])
             if len(parts) > 2:
                 options.sp_gap_open = Int(parts[2])
+                options.sp_open_set = True
             if len(parts) > 3:
                 options.sp_seeded = Int(parts[3]) != 0
             if len(parts) > 4:
