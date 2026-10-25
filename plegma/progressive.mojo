@@ -873,7 +873,12 @@ comptime REFERENCE_MEMORY = 2 << 30
 
 
 def on_reference(
-    seqs: List[List[UInt8]], costs: Costs, snap: Bool = False, threads: Int = 1, consolidate: Bool = False
+    seqs: List[List[UInt8]],
+    costs: Costs,
+    snap: Bool = False,
+    threads: Int = 1,
+    consolidate: Bool = False,
+    fallback: Optional[Costs] = None,
 ) raises -> List[List[UInt8]]:
     """The MSA of `seqs` anchored on the first, the reference: every other distinct sequence aligned to it exactly
     (karan, `costs`, gaps shifted left through repeats as variant callers normalize them) and its letters put in the
@@ -883,6 +888,13 @@ def on_reference(
     placement by many partners' votes can split a copy-number change into copy-sized pieces. Rows in `seqs`' order.
 
     With `threads` above one, the alignments to the reference run over that many threads (karan's batch).
+
+    With `fallback`, where at least `REPLACED_SEQUENCES` of the sequences' alignments at `costs` replace a stretch of
+    the reference (`_replaces`: a deletion and an insertion of `REPLACEMENT` letters or more side by side) and those
+    stretches insert at least `REPLACED_LETTERS` of their letters, those sequences are aligned at `fallback` instead.
+    Costs made for close sequences (minimap2's asm5) delete and insert again what lies past their divergence: reads
+    of one sequence a few percent apart each are past it nearly everywhere, and costs with dearer long gaps align them
+    letter by letter, where the alleles of a population past it at one stretch keep the costs' own records.
 
     With `snap`, each insertion or deletion of `SNAP_LENGTH` letters or more then moves, whole, to a place a sequence
     before it (the heavier, as the input repeats them, then the earlier) put an event of its kind and length (within
@@ -920,11 +932,28 @@ def on_reference(
         var aligner = Aligner()
         for d in range(1, len(distinct)):
             partner.append(_onto(aligner, seqs[distinct[0]], seqs[distinct[d]], costs))
+    if fallback:
+        # Reads of one sequence, not alleles: most of them replace stretches, and the stretches are much of their
+        # letters (alleles past asm5's divergence replace one stretch of a few of them; their records are written so).
+        var replaced = List[Int]()
+        var inserted = 0
+        var letters = 0
+        for d in range(1, len(distinct)):
+            letters += len(seqs[distinct[d]])
+            if _replaces(partner[d], len(seqs[distinct[0]])):
+                replaced.append(d)
+                inserted += _long_inserted(partner[d])
+        if Float64(len(replaced)) >= REPLACED_SEQUENCES * Float64(len(distinct) - 1) and Float64(
+            inserted
+        ) >= REPLACED_LETTERS * Float64(letters):
+            var aligner = Aligner()
+            for d in replaced:
+                partner[d] = _onto(aligner, seqs[distinct[0]], seqs[distinct[d]], fallback.value())
     if consolidate:
         _consolidate(seqs, distinct, partner, costs)
     if snap:
         _snap(seqs, distinct, partner)
-    var rows_of = _on_reference_columns(seqs, distinct, partner, costs)
+    var rows_of = _on_reference_columns(seqs, distinct, partner, costs, fallback)
     var out = List[List[UInt8]]()
     for k in range(n):
         out.append(rows_of[_index_of(seqs, distinct, k)].copy())
@@ -1272,6 +1301,62 @@ def _consolidate_tolerance(length: Int, costs: Costs) -> Int:
     return (a + length // max(b, 1)) * costs.mismatch
 
 
+comptime REPLACED_SEQUENCES = 0.5
+"""The least share of the sequences whose alignment at `on_reference`'s costs replaces a stretch, for its fallback."""
+comptime REPLACED_LETTERS = 0.15
+"""The least share of the sequences' letters those replacements insert, for `on_reference`'s fallback."""
+comptime REPLACEMENT = 50
+"""The least length of the deletion and the insertion, within as many letters of each other, by which `_replaces`
+finds an alignment that replaced a stretch."""
+
+
+def _replaces(p: List[Int], reference_length: Int) -> Bool:
+    """Whether an alignment (`p` the query letters' reference letters, -1 inserted) deletes `REPLACEMENT` reference
+    letters or more and inserts as many query letters within `REPLACEMENT` letters of them: a stretch replaced rather
+    than aligned."""
+    var inserted_at = List[Int]()
+    var deleted_from = List[Int]()
+    var deleted_to = List[Int]()
+    var next_ref = 0
+    var inserting = 0
+    for j in range(len(p)):
+        if p[j] < 0:
+            inserting += 1
+            continue
+        if inserting >= REPLACEMENT:
+            inserted_at.append(next_ref)
+        inserting = 0
+        if p[j] - next_ref >= REPLACEMENT:
+            deleted_from.append(next_ref)
+            deleted_to.append(p[j])
+        next_ref = p[j] + 1
+    if inserting >= REPLACEMENT:
+        inserted_at.append(next_ref)
+    if reference_length - next_ref >= REPLACEMENT:
+        deleted_from.append(next_ref)
+        deleted_to.append(reference_length)
+    for at in inserted_at:
+        for d in range(len(deleted_from)):
+            if at >= deleted_from[d] - REPLACEMENT and at <= deleted_to[d] + REPLACEMENT:
+                return True
+    return False
+
+
+def _long_inserted(p: List[Int]) -> Int:
+    """The query letters in an alignment's insertions of `REPLACEMENT` letters or more (`p` the query letters'
+    reference letters, -1 inserted)."""
+    var total = 0
+    var inserting = 0
+    for j in range(len(p) + 1):
+        if j < len(p) and p[j] < 0:
+            inserting += 1
+            continue
+        if inserting >= REPLACEMENT:
+            total += inserting
+        inserting = 0
+    return total
+
+
 comptime SNAP_LENGTH = 10
 """The shortest insertion or deletion `on_reference`'s snapping moves."""
 
@@ -1480,7 +1565,11 @@ def _index_of(seqs: List[List[UInt8]], distinct: List[Int], k: Int) -> Int:
 
 
 def _on_reference_columns(
-    seqs: List[List[UInt8]], distinct: List[Int], partner: List[List[Int]], costs: Costs
+    seqs: List[List[UInt8]],
+    distinct: List[Int],
+    partner: List[List[Int]],
+    costs: Costs,
+    fallback: Optional[Costs] = None,
 ) raises -> List[List[UInt8]]:
     """The rows of the distinct sequences (`distinct[0]` the reference) whose letters `partner` pairs with reference
     letters (-1: inserted): each letter on its reference letter's column, the runs inserted at one place aligned to
@@ -1555,7 +1644,7 @@ def _on_reference_columns(
             if k != longest:
                 ordered.append(pieces[k].copy())
                 at.append(k)
-        var sub = on_reference(ordered, costs)
+        var sub = on_reference(ordered, costs, fallback=fallback)
         slot_width[place] = len(sub[0])
         for t in range(len(at)):
             var d = members[at[t]]

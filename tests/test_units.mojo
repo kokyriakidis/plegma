@@ -219,6 +219,38 @@ def test_on_reference_consolidates_copy_number_changes_inside_an_array() raises:
         assert_true(_gap_runs(rows[0], rows[k]) <= _gap_runs(plain[0], plain[k]) + 1)
 
 
+def test_on_reference_aligns_distant_sequences_at_the_fallback_costs() raises:
+    seed(71)
+    # Reads of one sequence at 12% error, about a quarter apart pairwise: past asm5's divergence, whose costs delete
+    # and insert each again whole; the fallback costs align them letter by letter.
+    var truth = _random(600)
+    var seqs = List[List[UInt8]]()
+    for _ in range(6):
+        seqs.append(_mutated(truth, 0.12))
+    var asm5 = Costs.two_piece(40, 78, 7, 162, 3)
+    var plain = on_reference(seqs, asm5)
+    var rows = on_reference(seqs, asm5, fallback=Costs.two_piece(24, 16, 12, 96, 5))
+    for k in range(len(seqs)):
+        assert_true(_ungapped(rows[k]) == seqs[k])
+        assert_equal(len(rows[k]), len(rows[0]))
+    assert_true(_long_change_places(plain, 50) > 0)
+    assert_equal(_long_change_places(rows, 50), 0)
+    assert_true(len(rows[0]) < len(plain[0]))
+    # Alleles: one of six with a stretch of its own in place of the reference's keeps asm5's alignment.
+    var left = _random(300)
+    var right = _random(300)
+    var alleles = List[List[UInt8]]()
+    alleles.append(_array(left, _random(120), 1, right, 0.0))
+    for _ in range(5):
+        alleles.append(_mutated(alleles[0], 0.005))
+    alleles.append(_array(left, _random(120), 1, right, 0.0))
+    var kept = on_reference(alleles, asm5)
+    var with_fallback = on_reference(alleles, asm5, fallback=Costs.two_piece(24, 16, 12, 96, 5))
+    assert_true(_long_change_places(kept, 50) > 0)
+    for k in range(len(alleles)):
+        assert_true(with_fallback[k] == kept[k])
+
+
 def test_on_tree_keeps_each_allele_as_simple_against_the_reference() raises:
     seed(61)
     var left = _random(80)

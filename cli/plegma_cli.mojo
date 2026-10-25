@@ -682,7 +682,15 @@ def _poa(input: String, options: Options) raises -> String:
         # share of the input spells.
         var tree = getenv("PLEGMA_TREE")
         var bytes = on_tree(seqs, reference_costs, Float64(tree)) if tree != "" else on_reference(
-            seqs, reference_costs, getenv("PLEGMA_SNAP") == "1", options.threads, getenv("PLEGMA_CONSOLIDATE") == "1"
+            seqs,
+            reference_costs,
+            getenv("PLEGMA_SNAP") == "1",
+            options.threads,
+            getenv("PLEGMA_CONSOLIDATE") == "1",
+            # Reads past asm5's divergence, which it would delete and insert again: aligned at pgrealign's scores
+            # (abPOA's 8, 16, 16+8k, 96+k halved: a mismatch 24, a gap of k letters min(16 + 12k, 96 + 5k)), whose
+            # long gaps cost more.
+            Costs.two_piece(24, 16, 12, 96, 5),
         )
         if options.sp_set and options.sp_passes > 0:
             # With -I, refined on the sum of pairs with the reference's row weighing 4 times the rows' number: the
