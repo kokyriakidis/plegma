@@ -353,12 +353,17 @@ def polish(
     var previous_total = Int.MAX
     var one_each = False
     comptime LETTERS = "ACGT"
+    var unchecked = False
     for _ in range(rounds):
         paths.fill(aligner, current, sequences, members, anchors)
+        unchecked = False
         if paths.total >= previous_total:
-            # The last round's edits together cost more than they saved: back to before them, one a segment.
+            # The last round's edits together cost more than they saved: back to before them. Once, then taken one
+            # a segment; when those cost more too, done (taking them again would only go back and forth).
             current = previous^
             previous = List[UInt8]()
+            if one_each:
+                break
             dirty = previous_dirty^
             previous_dirty = List[Bool]()
             one_each = True
@@ -597,10 +602,16 @@ def polish(
         previous = current^
         previous_dirty = dirty^
         current = next^
+        unchecked = True
         dirty = List[Bool](length=len(current) + 1, fill=False)
         for m in marks:
             for q in range(max(0, m - 2 * SEGMENT), min(len(current) + 1, m + 2 * SEGMENT)):
                 dirty[q] = True
+    if unchecked:
+        # The last round's edits, past the rounds allowed, kept only if they gained.
+        paths.fill(aligner, current, sequences, members, anchors)
+        if paths.total >= previous_total:
+            current = previous^
     return _likely(current^, sequences, members, likely_rounds, support, share, anchors)
 
 
@@ -674,6 +685,7 @@ def _likely(
     var block_gain = List[Float64]()
     var dirty = List[Bool](length=len(current) + 1, fill=True)
     comptime LETTERS = "ACGT"
+    var before = List[UInt8]()
     for _ in range(rounds):
         paths.fill(aligner, current, sequences, members, anchors)
         if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
@@ -952,6 +964,10 @@ def _likely(
             at = edit_end[t]
         for q in range(at, length):
             next.append(current[q])
+        if next == before:
+            # Back to the consensus of two rounds ago: the edits only go back and forth.
+            break
+        before = current^
         current = next^
         dirty = List[Bool](length=len(current) + 1, fill=False)
         for m in marks:
