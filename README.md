@@ -23,9 +23,10 @@ chr20 of the HPRC graph by pgrealign, its graphs genotype HG002 better than pgre
 0.614, 0.669 against 0.556 in repeats, 0.359 against 0.347 on the hard set; small 0.9715 against 0.9691;
 `experiments/chr20`). With `-F` (the reference's flanks) each alignment to the reference is instead pinned as minimap2
 pins it (`plegma/pins.mojo`, a port of its seeds, chain and pins at dipcall's settings, exact between the pins), so
-differences are written as the dipcall-made truth sets write them: on 387 local chr20 regions structural F1 0.679
-against 0.639 without it, and 0.705 against 0.669 under truvari refine, which scores haplotypes however their records
-are split (`experiments/chr20/refined.py`). `-A -N` instead places each distinct
+differences are written as the dipcall-made truth sets write them, and the chr20 pipeline uses it: structural F1
+0.737 against `-A`'s 0.709 and the star's 0.614, 0.703 in repeats, and on the hard set 0.452 against 0.359 and
+0.347; under truvari refine, which scores haplotypes however their records are split
+(`experiments/chr20/refined.py`), 0.758 against 0.737 and 0.667, the hard set 0.476 against 0.384 and 0.385. `-A -N` instead places each distinct
 sequence, longest first, exactly into the MSA so far in a band centred on the columns the placed sequences' optimal
 alignments to it (at vntr-eval's affine costs) vote for (an anchor audit, `experiments/anchors`, showed seeds inside
 repeats pair letters no optimal alignment pairs), and, where every sequence holds one clear tandem array, a second start
