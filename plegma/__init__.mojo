@@ -12,6 +12,9 @@ is implementation and may change.
   (`GLOBAL`, `LOCAL`, `EXTENSION`), over a `Topology`, through a reusable
   `Workspace` for runs of alignments, between two nodes (`align_between`;
   `SOURCE` and `SINK` for the graph's ends).
+- Pinned alignment to the graph: `align_pinned` (minimap2's pins between a
+  sequence and the consensus path, each on a k-mer unique in both, the
+  kernel only between them), over `window_nodes` with a `WindowScratch`.
 - Consensus polishing: `polish` (one-letter and whole-repeat-unit edits kept
   while they lower the sequences' summed edit distance to the consensus, then
   while they raise its likelihood under a pair HMM).
@@ -45,6 +48,7 @@ from .kernel import (
     align_to_graph,
 )
 from .order import guide_order
+from .pinned import WindowScratch, align_pinned, window_nodes
 from .pins import Pins, pinned_pairing, pins, pins_in_context
 from .polish import polish
 from .reference import on_reference

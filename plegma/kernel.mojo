@@ -57,10 +57,11 @@ def _neg[dt: DType]() -> Scalar[dt]:
 def _fits_16_bits(scoring: Scoring, m: Int, n: Int) -> Bool:
     """Whether every score an alignment of `m` letters to `n` nodes can reach fits 16-bit lanes: a cell is
     never below deleting every node and inserting every letter, never above matching every letter, and the gap
-    scan adds at most the extension cost of the whole query to that."""
+    scan adds at most the extension cost of the whole query to that. The floor stays above half the sentinel,
+    below which a score counts as unreached."""
     var low = -Int(scoring.gap(n)) - Int(scoring.gap(m))
     var high = Int(scoring.match_score) * m + Int(max(scoring.extend1, scoring.extend2)) * (m + 1)
-    return low > -15000 and high < 30000
+    return low > Int(_neg[DType.int16]()) // 2 + 500 and high < 30000
 
 
 @inline(.always)

@@ -171,5 +171,20 @@ def test_16_and_32_bit_lanes_agree() raises:
                 assert_equal(a.nodes[j], b.nodes[j])
 
 
+def test_a_long_deletion_reaches_the_end() raises:
+    """A read holding only a long path's two ends: one deletion of most of the path, a score far below what the
+    matches earn, which 16-bit lanes must still tell from an unreached cell."""
+    var path = _random(12000, 41)
+    var letters = List[UInt8](path.as_bytes()[0:200])
+    letters.extend(List[UInt8](path.as_bytes()[11800:12000]))
+    var query = String(unsafe_from_utf8=letters)
+    var graph = Graph()
+    _ = graph.add("path", path.as_bytes())
+    var topology = Topology(graph)
+    var found = align_to_graph(graph, topology, query.as_bytes(), Scoring(), GLOBAL, -1)
+    assert_equal(len(found.nodes), 400)
+    assert_equal(found.score, _score_from_cost(path, query, Scoring()))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -242,11 +242,22 @@ struct Graph(Movable, Sized):
             graph.names.append(names[r])
         return graph^
 
+    def heaviest_path(self, order: List[Int]) -> List[Int]:
+        """abPOA's heaviest bundle over every path: from a virtual source to a virtual sink, each node followed by its
+        heaviest out-edge (an edge weighing the paths that take it), the sink's edge weighing the paths that end there
+        (so the consensus stops where most sequences do), ties to the heavier rest of the path. `order` holds the
+        nodes in topological order."""
+        var count = len(self.bases)
+        var starts = List[Int](length=count, fill=0)
+        var ends = List[Int](length=count, fill=0)
+        for path in self.paths:
+            if len(path) > 0:
+                starts[Int(path[0])] += 1
+                ends[Int(path[len(path) - 1])] += 1
+        return self._bundle(order, starts, ends, self.edge_weight)
+
     def heaviest_path(self, order: List[Int], members: List[Int]) -> List[Int]:
-        """abPOA's heaviest bundle over the paths `members`: from a virtual source to a virtual sink, each node
-        followed by its heaviest out-edge (an edge weighing the members that take it), the sink's edge weighing the
-        members that end there (so the consensus stops where most sequences do), ties to the heavier rest of the
-        path. `order` holds the nodes in topological order."""
+        """`heaviest_path` with only the paths `members` weighing the edges, starts and ends."""
         var count = len(self.bases)
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
@@ -259,6 +270,10 @@ struct Graph(Movable, Sized):
             ends[Int(path[len(path) - 1])] += 1
             for k in range(len(path) - 1):
                 weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
+        return self._bundle(order, starts, ends, weight)
+
+    def _bundle(self, order: List[Int], starts: List[Int], ends: List[Int], weight: List[Int32]) -> List[Int]:
+        var count = len(self.bases)
         var score = List[Int](length=count, fill=0)
         var next = List[Int](length=count, fill=-1)
         for k in reversed(range(len(order))):

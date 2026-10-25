@@ -17,6 +17,7 @@ from plegma.clusters import cluster_rows
 from plegma.graph import GAP, Graph
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, SINK, SOURCE, Topology, Workspace
 from plegma.order import guide_order
+from plegma.pinned import WindowScratch, align_pinned
 from plegma.polish import polish
 from plegma.reference import on_reference
 
@@ -42,6 +43,8 @@ poa options:
     -L          align the sequences longest first
     -p          progressive: abPOA's guide order, most similar minimizer multisets first
     -s          ambiguous strand: a sequence scoring poorly is tried reverse-complemented, the better kept
+    -S          seeded (global mode): each sequence pinned to the consensus path as minimap2 pins an alignment
+                (asm5's seeds and chain), the DP only between the pins
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
 
 ref options:
@@ -76,6 +79,7 @@ struct Options(Copyable, Movable):
     var longest_first: Bool
     var progressive: Bool
     var strand: Bool
+    var seeded: Bool
     var start_msa: String
     var flanks: String
     var threads: Int
@@ -96,6 +100,7 @@ struct Options(Copyable, Movable):
         self.longest_first = False
         self.progressive = False
         self.strand = False
+        self.seeded = False
         self.start_msa = String()
         self.flanks = String()
         self.threads = 1
@@ -191,18 +196,19 @@ def _poa(mut names: List[String], mut seqs: List[List[UInt8]], options: Options)
         shown.append(p)
     var path_of = List[Int](length=len(seqs), fill=-1)
     var row_of = List[Int]()
+    var scratch = WindowScratch()
     var workspace = Workspace()
     for r in order:
         if len(graph) == 0:
             path_of[r] = graph.add(names[r], Span(seqs[r]))
             continue
-        var found = _align(graph, Span(seqs[r]), options, row_of, workspace)
+        var found = _align(graph, seqs[r], options, row_of, scratch, workspace)
         if options.strand:
             # abPOA's rule: a score under a third of the best a match run of the shorter length could earn.
             var floor = Int(options.scoring.match_score) * min(len(seqs[r]), len(graph.paths[0])) // 3
             if found.score < floor:
                 var flipped = _reverse_complement(Span(seqs[r]))
-                var other = _align(graph, Span(flipped), options, row_of, workspace)
+                var other = _align(graph, flipped, options, row_of, scratch, workspace)
                 if other.score > found.score:
                     seqs[r] = flipped^
                     found = other^
@@ -214,17 +220,26 @@ def _poa(mut names: List[String], mut seqs: List[List[UInt8]], options: Options)
 
 
 def _align(
-    graph: Graph, seq: Span[UInt8, _], options: Options, mut row_of: List[Int], mut workspace: Workspace
+    graph: Graph,
+    seq: List[UInt8],
+    options: Options,
+    mut row_of: List[Int],
+    mut scratch: WindowScratch,
+    mut workspace: Workspace,
 ) raises -> GraphAlignment:
     var topology = Topology(graph)
     row_of.resize(len(graph), -1)
+    if options.seeded and options.mode == GLOBAL:
+        return align_pinned(
+            graph, topology, seq, options.scoring, options.band_b, options.band_f, row_of, scratch, workspace
+        )
     return workspace.align(
         graph,
         topology,
         topology.order,
         SOURCE,
         SINK,
-        seq,
+        Span(seq),
         options.scoring,
         row_of,
         options.mode,
@@ -516,6 +531,8 @@ def main() raises:
             options.progressive = True
         elif a == "-s" and not reference:
             options.strand = True
+        elif a == "-S" and not reference:
+            options.seeded = True
         elif a == "-i" and not reference:
             options.start_msa = _value(args, i)
             i += 1
