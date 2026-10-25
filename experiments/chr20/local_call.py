@@ -165,13 +165,9 @@ def msa_rows(source, pkg, msas, flanks=None):
             return None
         rows = {a["id"]: rec["rows"][a["id"]] for a in alleles if a["id"] in rec["rows"]}
     else:
-        # CHM13's allele first (plegma -A -Q anchors the MSA on the first sequence).
+        # CHM13's allele first (plegma ref anchors the MSA on the first sequence).
         ref_seq = next((a["seq"].upper() for a in alleles if a["id"] == pkg.get("ref")), None)
         distinct = list(dict.fromkeys(([ref_seq] if ref_seq else []) + [a["seq"].upper() for a in alleles]))
-        # WEIGHTED=1: each distinct sequence written once per haplotype spelling it, so -A weighs it so.
-        copies = collections.Counter()
-        for a in alleles:
-            copies[a["seq"].upper()] += a["weight"] if os.environ.get("WEIGHTED") == "1" else 0
         if len(distinct) < 2:
             row_of = {distinct[0]: distinct[0]} if distinct else {}
         else:
@@ -186,8 +182,6 @@ def msa_rows(source, pkg, msas, flanks=None):
                 with open(path, "w") as f:
                     for k, s in enumerate(distinct):
                         f.write(">s%d\n%s\n" % (k, s))
-                        for c in range(copies[s] - 1):
-                            f.write(">s%d_%d\n%s\n" % (k, c, s))
                 text = subprocess.run([os.environ["PLEGMA"]] + flags + ["-r", "1", path], capture_output=True,
                                       text=True, check=True).stdout
             got, name = {}, None

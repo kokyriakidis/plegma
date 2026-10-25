@@ -8,7 +8,7 @@ usage: python3 -I experiments/chr20/qc_loop.py <work dir> <regions file> <out di
 For each label, its MSAs over the regions in <regions file> (one id per line): a msas.jsonl.gz (the star's, an
 arm's) cut to them, or plegma's for those flags (realign_plegma.py on those regions' packages, the CHM13 flanks
 given for -F; PLEGMA and KARAN the binaries). pgrealign qc then measures them under each `--scores`: `asm5`
-(minimap2's, -A's costs: -M 1 -X 19 -O 39,81 -E 3,1, the default, as qc asks for the scores an MSA is built with) or
+(minimap2's, ref's costs: -M 1 -X 19 -O 39,81 -E 3,1, the default, as qc asks for the scores an MSA is built with) or
 `default` (pgrealign's, abPOA's -M 8 -X 16 -O 16,96 -E 8,1, the star's):
 qc compares the alignment the MSA implies for 20 random pairs of alleles, and for CHM13's allele against the 20
 heaviest, with each pair's optimal alignment under those scores.
@@ -24,8 +24,8 @@ timeout, ...), over every region of the subset.
 
 qc counts a letter pair right only when the pair's one optimal alignment it computes (left-normalised) aligns it, so
 an MSA that places an indel at another place the same cost allows scores lower. With --coopt each label's pairs
-are scored again counting a letter pair right when some optimal alignment aligns it (build/anchors --coopt: forward
-and backward DP under the scores' two-piece costs; ANCHORS): the co-optimal pair and reference F1, which no choice
+are scored again counting a letter pair right when some optimal alignment aligns it (build/coopt: forward
+and backward DP under the scores' two-piece costs; COOPT): the co-optimal pair and reference F1, which no choice
 among equally good placements changes.
 
 Prints per label and scores the pair and reference F1, the long gap runs (50 or more gap columns) against the
@@ -78,7 +78,7 @@ qc.align_pair = cached_align_pair
 
 def coopt(msas, packages, scores, jobs, workdir):
     """Co-optimal counts of a label's MSAs: {"pair": [on], "ref": [on]} summed over its regions' pairs, `on` the MSA's
-    letter pairs some optimal alignment aligns. Each pair's co-optimal letter pairs (build/anchors --coopt-set) are
+    letter pairs some optimal alignment aligns. Each pair's co-optimal letter pairs (build/coopt) are
     kept on disk in <out dir>/coopt, keyed by the scores and the two sequences: they do not depend on the MSA."""
     import tempfile
 
@@ -105,7 +105,7 @@ def coopt(msas, packages, scores, jobs, workdir):
                     todo[key] = (seqs[a], seqs[b], path)
                 work.append((kind, path, qc.induced(rows[a], rows[b])))
     if todo:
-        anchors = os.environ.get("ANCHORS", os.path.expanduser("~/plegma-next/build/anchors"))
+        coopt_bin = os.environ.get("COOPT", os.path.expanduser("~/plegma-next/build/coopt"))
         items = sorted(todo.values(), key=lambda t: -len(t[0]) * len(t[1]))
         chunks = [items[k::jobs] for k in range(jobs)]
         with tempfile.TemporaryDirectory(dir=workdir) as tmp:
@@ -116,8 +116,8 @@ def coopt(msas, packages, scores, jobs, workdir):
                 path = os.path.join(tmp, "%d.tsv" % k)
                 with open(path, "w") as f:
                     f.writelines("%s\t%s\n" % (a, b) for a, b, _ in chunk)
-                procs.append((chunk, subprocess.Popen([anchors, "--coopt-set", path, "--two-piece",
-                                                       TWO_PIECE[scores]], stdout=subprocess.PIPE, text=True)))
+                procs.append((chunk, subprocess.Popen([coopt_bin, path, "--two-piece", TWO_PIECE[scores]],
+                                                       stdout=subprocess.PIPE, text=True)))
             for chunk, proc in procs:
                 for (_, _, out_path), row in zip(chunk, proc.stdout):
                     os.makedirs(os.path.dirname(out_path), exist_ok=True)

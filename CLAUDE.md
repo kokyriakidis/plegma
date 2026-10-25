@@ -6,14 +6,16 @@ the fastest, the leanest in memory and the most accurate POA aligner; rivals are
 (test regions and scoring: github.com/benedictpaten/vntr-eval; the realignment pipeline it feeds, and plegma's closest
 rival there: github.com/benedictpaten/pgrealign).
 
-The design: sequences join the graph one at a time, each anchored pairwise against it. sporos's MUMs, else its biggest
-SMEMs, are chained into an optimal backbone, recursing inside each gap for anchors again; only then are the gaps filled
-with karan's banded alignment and the result fused into the graph. No k-mer seeds and no multi-MUMs.
+Two commands over one library: `plegma poa`, the general POA (each sequence aligned to the whole graph, abPOA's
+modes and adaptive band, `plegma/kernel.mojo`; consensus polished, `plegma/polish.mojo`), and `plegma ref`, the MSA
+anchored on a reference for pgrealign (`plegma/reference.mojo`: each sequence aligned to the reference alone at
+minimap2's asm5 costs, pinned as minimap2 pins it with the reference's flanks, `plegma/pins.mojo`). `docs/design.md`
+maps the code; `docs/research/` holds the rival tools' studies.
 
 ## Dependencies
 
-`deps/sporos` (seeds: MUMs, SMEMs, FM-index) and `deps/karan` (exact pairwise alignment) are git submodules of the
-user's own libraries; every build puts both on the include path. Change them where plegma needs it: commit and push in
+`deps/karan` (exact pairwise alignment) and `deps/sporos` (FASTA/FASTQ reading) are git submodules of the user's
+own libraries; every build puts both on the include path. Change them where plegma needs it: commit and push in
 the library first (its own tests passing), then move the submodule here. All three pin the same Mojo nightly.
 
 ## Mojo skills

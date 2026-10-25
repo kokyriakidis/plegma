@@ -3,8 +3,7 @@ from std.testing import assert_equal, assert_true, TestSuite
 from karan import Costs, distance
 
 from plegma.graph import Graph
-from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology, Workspace, align_to_graph
-from plegma.poa import SINK, SOURCE
+from plegma.kernel import EXTENSION, GLOBAL, LOCAL, SINK, SOURCE, Scoring, Topology, Workspace, align_to_graph
 
 
 def _random(n: Int, seed: Int) -> String:

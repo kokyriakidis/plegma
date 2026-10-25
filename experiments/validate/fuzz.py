@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Runs build/plegma over random inputs with many option combinations and checks every output's invariants.
+"""Runs build/plegma's commands (poa, and ref with and without flanks) over random inputs with many option
+combinations and checks every output's invariants.
 
 usage: python3 -I experiments/validate/fuzz.py <plegma binary> <work dir> [cases] [seed]
 
@@ -125,16 +126,11 @@ def main():
     cases = int(sys.argv[3]) if len(sys.argv) > 3 else 200
     rng = random.Random(int(sys.argv[4]) if len(sys.argv) > 4 else 1)
     os.makedirs(work, exist_ok=True)
-    options = [[], ["-S"], ["-p"], ["-S", "-p"], ["-L"], ["-s"], ["-m", "1"], ["-m", "2"], ["-b", "-1"],
-               ["-a", "1"], ["-d", "3"], ["-O", "0", "-E", "2"], ["-O", "4,0", "-E", "2,0"], ["-S", "-n", "20"],
-               ["-S", "-T", "0"], ["-b", "0", "-f", "0"], ["-R", "1"], ["-S", "-p", "-R", "2"],
-               ["-P", "0"], ["-P", "1"], ["-S", "-K", "0:0"], ["-S", "-K", "8:100"], ["-d", "3", "-P", "3"], ["-L", "-I", "3"], ["-I", "2,16,0"], ["-L", "-I", "2,32,2"],
-               ["-I", "2", "-G", "16"], ["-A"], ["-A", "-N"], ["-A", "-N", "-U"], ["-A", "-N", "-I", "2,16,1", "-G", "8"],
-               ["-A", "-N", "-I", "0"], ["-A", "-I", "2,16,1"],
-               ["-A", "-N", "-V", "2,1"], ["-A", "-N", "-W", "2,2"], ["-A", "-N", "-V", "2,1,1,1", "-W", "4,2"], ["-I", "2", "-W", "4,2"],
-               ["-S", "-J"], ["-S", "-J", "-L", "-I", "2"], ["-A", "-N", "-V", "-5,1"],
-               ["-S", "-Y"], ["-S", "-Y", "-L", "-I", "2"], ["-S", "-Y", "-p", "-R", "1"],
-               ["-A", "-Q"], ["-A", "-L"]]
+    poa_options = [[], ["-p"], ["-L"], ["-s"], ["-m", "1"], ["-m", "2"], ["-b", "-1"], ["-a", "1"], ["-d", "3"],
+                   ["-O", "0", "-E", "2"], ["-O", "4,0", "-E", "2,0"], ["-b", "0", "-f", "0"], ["-P", "0"], ["-P", "1"],
+                   ["-d", "3", "-P", "3"], ["-L", "-p"]]
+    # A bare -F takes a flanks file made per case.
+    ref_options = [[], ["-t", "2"], ["-a", "1"], ["-d", "3"], ["-P", "0"], ["-P", "1"], ["-F"], ["-F", "-t", "3"]]
     failures = 0
     runs = 0
     for c in range(cases):
@@ -144,10 +140,18 @@ def main():
             for name, s in seqs:
                 f.write(">%s\n%s\n" % (name, s))
         letters = set("".join(s for _, s in seqs).upper())
-        opts = list(rng.choice(options))
+        command = "ref" if rng.random() < 0.25 else "poa"
+        pool = ref_options if command == "ref" else poa_options
+        opts = list(rng.choice(pool))
         if rng.random() < 0.3:
-            opts += list(rng.choice(options))
-        if rng.random() < 0.15 and len(seqs) > 2 and "-A" not in opts:
+            opts += list(rng.choice(pool))
+        if "-F" in opts:
+            flanks = os.path.join(work, "flanks%d.fa" % c)
+            with open(flanks, "w") as f:
+                for side in ("left", "right"):
+                    f.write(">%s\n%s\n" % (side, "".join(rng.choice("ACGT") for _ in range(rng.randint(0, 400)))))
+            opts = [x for o in opts for x in ([o, flanks] if o == "-F" else [o])]
+        if rng.random() < 0.15 and len(seqs) > 2 and command == "poa":
             # Start from the MSA of the first records, then add the rest.
             half = len(seqs) // 2
             start_in = os.path.join(work, "start%d.fa" % c)
@@ -155,14 +159,14 @@ def main():
                 for name, s in seqs[:half]:
                     f.write(">%s\n%s\n" % (name, s))
             start_msa = os.path.join(work, "start%d.msa.fa" % c)
-            subprocess.run([binary, "-r", "1", "-o", start_msa, start_in], capture_output=True)
+            subprocess.run([binary, "poa", "-r", "1", "-o", start_msa, start_in], capture_output=True)
             with open(inp, "w") as f:
                 for name, s in seqs[half:]:
                     f.write(">%s\n%s\n" % (name, s))
             opts += ["-i", start_msa]
         for result in ["0", "1", "3", "4"]:
             out = os.path.join(work, "out%d_%s" % (c, result))
-            cmd = [binary] + opts + ["-r", result, "-o", out, inp]
+            cmd = [binary, command] + opts + ["-r", result, "-o", out, inp]
             runs += 1
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)

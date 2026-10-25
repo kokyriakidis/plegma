@@ -6,14 +6,14 @@ usage: python3 -I experiments/chr20/representation.py <batch_call out dir> <prep
            [--regions file] [--jobs n] [--out dir]
 
 Writers, per haplotype (the region's window with the truth applied, against the window's CHM13):
-  optimal   the interior aligned exactly to CHM13's allele (plegma -A on the pair, the binary in PLEGMA): how -A writes
+  optimal   the interior aligned exactly to CHM13's allele (plegma ref on the pair, the binary in PLEGMA): how ref writes
   minimap2  the whole window aligned by minimap2 at dipcall's settings (-x asm5 -z200000,10000 -r2k; MINIMAP2), the
             truth's own pipeline's aligner, its primary alignment
   chained   the interior aligned as minimap2 pins it (mm2like.py: its seeds, chain and pins, karan between pins)
   chained_window  the same on the whole window, as minimap2 sees it
   chained_context the interior aligned between the pins the whole window finds inside it (the flanks seed, but are
-            not aligned: what -A can do with the flanks given)
-  pinned    plegma -A -F (the Mojo port, plegma/pins.mojo) on the interior with the window's flanks
+            not aligned: what ref can do with the flanks given)
+  pinned    plegma ref -F (the Mojo port, plegma/pins.mojo) on the interior with the window's flanks
 Prints each writer's structural and small TP/FN/FP; writes per region tsv to --out.
 """
 import collections
@@ -74,7 +74,7 @@ def minimap2_rows(ref, seq):
 
 
 def pinned_rows(ref, seq, left, right):
-    """The two rows of plegma -A -F on (reference, seq), the flanks given."""
+    """The two rows of plegma ref -F on (reference, seq), the flanks given."""
     if seq == ref:
         return ref, seq
     with tempfile.TemporaryDirectory() as tmp:
@@ -83,7 +83,7 @@ def pinned_rows(ref, seq, left, right):
             f.write(">r\n%s\n>q\n%s\n" % (ref, seq))
         with open(flanks, "w") as f:
             f.write(">left\n%s\n>right\n%s\n" % (left, right))
-        out = subprocess.run([os.environ["PLEGMA"], "-A", "-F", flanks, "-r", "1", path], capture_output=True,
+        out = subprocess.run([os.environ["PLEGMA"], "ref", "-F", flanks, "-r", "1", path], capture_output=True,
                              text=True, check=True).stdout
     rows, name = {}, None
     for line in out.splitlines():

@@ -1,12 +1,8 @@
 from std.testing import assert_equal, assert_true, TestSuite
 
-from karan import Aligner, Costs, distance
+from karan import Aligner, Costs, Mode, Ties
 
-from plegma.align import anchored_alignment
-from plegma.backbone import Level, MUMS
-from plegma.chain import ChainCosts
-from plegma.graph import Graph, cigar_runs
-from plegma.poa import GapAffine, SINK, SOURCE, align_window
+from plegma.graph import DELETION, INSERTION, Graph, cigar_runs
 
 
 def _bytes(text: StringSlice) -> List[UInt8]:
@@ -21,14 +17,8 @@ def _ungapped(row: String) -> String:
     return String(unsafe_from_utf8=out)
 
 
-def test_cigar_runs() raises:
-    var runs = cigar_runs("4=1D2=12I6X")
-    assert_equal(len(runs.ops), 5)
-    assert_equal(runs.counts[3], 12)
-    assert_equal(runs.ops[4], UInt8(ord("X")))
-
-
-def test_star_msa_spells_every_sequence() raises:
+def _sequences() -> List[List[UInt8]]:
+    """A tandem array between two flanks, in five copy numbers, one copy changed in each and one letter in one."""
     var unit = "TGATGGTGGTGGTTGGTAG"
     var flank_left = "CCATTAGGACTTGACCGATAGGCAT"
     var flank_right = "GGATCCTTAGAGCTCAATCGGA"
@@ -40,93 +30,81 @@ def test_star_msa_spells_every_sequence() raises:
         text += flank_right
         sequences.append(_bytes(text))
     sequences[3][40] = UInt8(ord("A"))
-    var levels: List[Level] = [Level(MUMS, 12)]
-    for config in range(2):
-        var graph = Graph()
-        var aligner = Aligner()
-        _ = graph.add("s0", Span(sequences[0]))
-        for i in range(1, len(sequences)):
-            var found = anchored_alignment(
-                aligner,
-                Span(sequences[0]),
-                Span(sequences[i]),
-                levels.copy() if config == 1 else List[Level](),
-                ChainCosts.chainx(),
-                stay=True,
-            )
-            _ = graph.fuse(String(t"s{i}"), Span(sequences[i]), 0, found.ops, found.counts)
-        var rows = graph.msa()
-        assert_equal(len(rows), len(sequences))
-        for i in range(len(rows)):
-            assert_equal(rows[i].byte_length(), rows[0].byte_length())
-            assert_true(_ungapped(rows[i]) == String(unsafe_from_utf8=sequences[i].copy()))
-        # The shared flanks stack: the first columns hold one letter each across all rows.
-        for c in range(10):
-            for i in range(1, len(rows)):
-                assert_equal(rows[i].as_bytes()[c], rows[0].as_bytes()[c])
+    return sequences^
 
 
-def _order(graph: Graph) raises -> Tuple[List[Int], List[Int]]:
+def test_cigar_runs() raises:
+    var runs = cigar_runs("4=1D2=12I6X")
+    assert_equal(len(runs.ops), 5)
+    assert_equal(runs.counts[3], 12)
+    assert_equal(runs.ops[4], UInt8(ord("X")))
+
+
+def test_star_msa_spells_every_sequence() raises:
+    """Each sequence fused along its alignment to the first one's path: every row spells its sequence and the
+    shared flanks stack."""
+    var sequences = _sequences()
+    var graph = Graph()
+    var aligner = Aligner()
+    _ = graph.add("s0", Span(sequences[0]))
+    for k in range(1, len(sequences)):
+        var found = aligner.align(Span(sequences[0]), Span(sequences[k]), Costs.edit(), Mode.GLOBAL, ties=Ties.LEFT)
+        var runs = cigar_runs(found.cigar)
+        var aligned = List[Int]()
+        var i = 0
+        for x in range(len(runs.ops)):
+            for _ in range(runs.counts[x]):
+                if runs.ops[x] == DELETION:
+                    i += 1
+                elif runs.ops[x] == INSERTION:
+                    aligned.append(-1)
+                else:
+                    aligned.append(Int(graph.paths[0][i]))
+                    i += 1
+        _ = graph.fuse_nodes(String(t"s{k}"), Span(sequences[k]), aligned)
+    var rows = graph.msa()
+    assert_equal(len(rows), len(sequences))
+    for k in range(len(rows)):
+        assert_equal(rows[k].byte_length(), rows[0].byte_length())
+        assert_true(_ungapped(rows[k]) == String(unsafe_from_utf8=sequences[k].copy()))
+    # The shared flanks stack: the first columns hold one letter each across all rows.
+    for c in range(10):
+        for k in range(1, len(rows)):
+            assert_equal(rows[k].as_bytes()[c], rows[0].as_bytes()[c])
+
+
+def test_from_msa_keeps_the_rows() raises:
+    """An MSA's graph spells each row as its path, and its own MSA is the same rows."""
+    var names: List[String] = ["a", "b", "c"]
+    var rows: List[String] = ["ACG-TTA", "A-GCTTA", "ACGCT-A"]
+    var graph = Graph.from_msa(names, rows)
+    assert_equal(len(graph.paths), 3)
+    var again = graph.msa()
+    for k in range(3):
+        assert_true(again[k] == rows[k])
+    # A column holds one node per letter: ACG-TTA and ACGCT-A share the C of column 1.
+    assert_equal(graph.paths[0][1], graph.paths[2][1])
+
+
+def test_heaviest_path_follows_the_majority() raises:
+    var names: List[String] = ["a", "b", "c"]
+    var rows: List[String] = ["ACGTA", "ACTTA", "ACGTA"]
+    var graph = Graph.from_msa(names, rows)
     var rank = graph.node_order()
     var order = List[Int](length=len(rank), fill=0)
     for node in range(len(rank)):
         order[rank[node]] = node
-    return (rank^, order^)
-
-
-def test_window_on_one_path_matches_karan() raises:
-    var texts: List[String] = [
-        "ACGTTGCAAGGCTTAGGACCATGACGTA",
-        "ACGTGCAAGGCTTTTAGGACCATGACGTA",
-        "TTTTACGTTGCAAGG",
-        "ACGTTGCAAGGCTTAGGACCATGACGTAACGTTGCAAGGCTTAGGACCATGACGTA",
-        "AC",
-    ]
-    for a in texts:
-        for b in texts:
-            var graph = Graph()
-            _ = graph.add("a", a.as_bytes())
-            var ro = _order(graph)
-            var found = align_window(graph, ro[0], ro[1], SOURCE, SINK, b.as_bytes(), GapAffine(4, 6, 2), 1 << 30)
-            assert_equal(found.value().cost, distance(a, b, Costs.affine(4, 6, 2)))
-            var convex = align_window(
-                graph, ro[0], ro[1], SOURCE, SINK, b.as_bytes(), GapAffine(4, 6, 2, 24, 1), 1 << 30
-            )
-            assert_equal(convex.value().cost, distance(a, b, Costs.two_piece(4, 6, 2, 24, 1)))
-            # Through the window's own nodes: the same alignment between the first and last letters.
-            if a.byte_length() > 2 and b.byte_length() > 2:
-                var path = graph.paths[0].copy()
-                var inner = align_window(
-                    graph,
-                    ro[0],
-                    ro[1],
-                    Int(path[0]),
-                    Int(path[len(path) - 1]),
-                    b.as_bytes()[1 : b.byte_length() - 1],
-                    GapAffine(4, 6, 2),
-                    1 << 30,
-                )
-                var a_inner = String(a[byte = 1 : a.byte_length() - 1])
-                var b_inner = String(b[byte = 1 : b.byte_length() - 1])
-                assert_equal(inner.value().cost, distance(a_inner, b_inner, Costs.affine(4, 6, 2)))
-
-
-def test_window_takes_the_better_path() raises:
-    var a = "GGCATTAGCATCAGGGATTACCTTAGCAGTCCA"
-    var b = "GGCATTAGCATCATTTTTTTTTTTTCAGTCCA"
-    var graph = Graph()
-    var aligner = Aligner()
-    _ = graph.add("a", a.as_bytes())
-    var found = anchored_alignment(
-        aligner, a.as_bytes(), b.as_bytes(), List[Level](), ChainCosts.chainx(), Costs.affine(4, 6, 2)
-    )
-    _ = graph.fuse("b", b.as_bytes(), 0, found.ops, found.counts)
-    var ro = _order(graph)
-    for query in [a, b, String("GGCATTAGCATCATTTTTTTTTTTTCAGTCCA")]:
-        var got = align_window(graph, ro[0], ro[1], SOURCE, SINK, query.as_bytes(), GapAffine(4, 6, 2), 1 << 30)
-        var best = min(distance(a, query, Costs.affine(4, 6, 2)), distance(b, query, Costs.affine(4, 6, 2)))
-        assert_true(got.value().cost <= best)
-        assert_equal(got.value().cost, 0)
+    var everyone: List[Int] = [0, 1, 2]
+    var letters = List[UInt8]()
+    for node in graph.heaviest_path(order, everyone):
+        letters.append(graph.bases[node])
+    assert_true(String(unsafe_from_utf8=letters) == "ACGTA")
+    # Only b's path weighs: its own letters.
+    var b_only: List[Int] = [1]
+    letters.clear()
+    for node in graph.heaviest_path(order, b_only):
+        letters.append(graph.bases[node])
+    assert_true(String(unsafe_from_utf8=letters) == "ACTTA")
 
 
 def main() raises:

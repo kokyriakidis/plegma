@@ -1,7 +1,7 @@
 #!/bin/bash
 # chr20's plegma arm and the genotyping test, from a pgrealign run's extract (the star arm's, so both arms realign the
 # same regions):
-#   bash experiments/chr20/plegma_arm.sh <work dir> <plegma binary> [plegma flags (-A -F)] [arm name (plegma)]
+#   bash experiments/chr20/plegma_arm.sh <work dir> <plegma binary> [plegma flags (ref -F)] [arm name (plegma)]
 # <work dir>/star/chr20 holds pgrealign's prepare and extract (chr20.gbz, extract/) and its realigned graph; the
 # plegma arm's MSAs (realign_plegma.py), spliced in by pgrealign replace, are checked by pgrealign verify; then the
 # genotyping arms (test_arm.sh) for the original graph, pgrealign's and plegma's. A stage whose output exists is
@@ -9,9 +9,9 @@
 set -u -o pipefail
 W=$1
 PLEGMA=$2
-# -A -F by default: pinned as minimap2 pins it, CHM13's flanks given per region by realign_plegma.py --reference
-# (on chr20, structural F1 0.737 against -A's 0.709; the hard set 0.452 against 0.359).
-FLAGS=${3:--A -F}
+# ref -F by default: pinned as minimap2 pins it, CHM13's flanks given per region by realign_plegma.py --reference
+# (on chr20, structural F1 0.737 against 0.709 without -F; the hard set 0.452 against 0.359).
+FLAGS=${3:-ref -F}
 ARM=${4:-plegma}
 HERE=$(cd "$(dirname "$0")" && pwd)
 PGREALIGN=${PGREALIGN:-$HOME/rivals-src/pgrealign}

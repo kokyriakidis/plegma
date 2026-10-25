@@ -15,9 +15,12 @@ from std.sys import simd_width_of, size_of
 
 from .alphabet import encode_base
 from .graph import Graph
-from .poa import SINK, SOURCE
 
 
+comptime SOURCE = -1
+"""The left end before every path's first node."""
+comptime SINK = -2
+"""The right end after every path's last node."""
 comptime GLOBAL = 0
 """The whole query against a path from a graph source to a graph sink."""
 comptime LOCAL = 1

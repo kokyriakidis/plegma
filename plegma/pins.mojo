@@ -743,7 +743,7 @@ def _chains(a: List[Seed], bw: Int) -> List[List[Seed]]:
             continue
         # mg_chain_bk_end
         var i = zi
-        var end_i = -1
+        var end_i: Int
         var max_i = zi
         var max_s = 0
         while True:

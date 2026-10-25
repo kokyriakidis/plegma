@@ -84,8 +84,8 @@ def msa_key(source, pkg):
         st = os.stat(binary)
         stamp = "%d.%d" % (st.st_size, int(st.st_mtime))
     alleles = sorted((a["id"], a["seq"].upper(), a["weight"]) for a in pkg["alleles"])
-    # The environment switches plegma reads (PLEGMA_QCOSTS, PLEGMA_VOTERS, ...) and WEIGHTED change the MSA too.
-    switches = sorted((k, v) for k, v in os.environ.items() if (k.startswith("PLEGMA_") or k == "WEIGHTED"))
+    # Environment switches named PLEGMA_* (none at present) would change the MSA too.
+    switches = sorted((k, v) for k, v in os.environ.items() if k.startswith("PLEGMA_"))
     text = json.dumps([binary, stamp, source, pkg.get("ref"), alleles, switches])
     return hashlib.sha1(text.encode()).hexdigest()[:20]
 

@@ -20,7 +20,7 @@ from std.math import log
 
 from karan import Aligner, Costs, Mode, Ties
 
-from .backbone import RepeatMask
+from .alphabet import encode_base
 from .graph import DELETION, INSERTION, MATCH, cigar_runs
 
 
@@ -176,6 +176,48 @@ struct _Bands(Movable):
         if j < self.low[c] or j > self.high[c]:
             return 0.0
         return matrix[self.start[c] + j - self.low[c]]
+
+
+struct RepeatMask(Movable):
+    """The stretches of a sequence inside tandem repeats: a k-mer start is masked when the same k-mer starts
+    again within `distance` letters. An anchor any of whose k-mers is masked sits in a repeat, where an exact
+    match, unique or not, may pair different copies."""
+
+    var k: Int
+    var masked_before: List[Int32]
+    """How many masked k-mer starts precede each position."""
+
+    def __init__(out self, sequence: ImmSpan[UInt8, _], k: Int, distance: Int):
+        self.k = k
+        var n = len(sequence)
+        self.masked_before = List[Int32](length=n + 1, fill=0)
+        if k <= 0 or n < k:
+            return
+        var marked = List[Bool](length=n, fill=False)
+        var last = Dict[UInt64, Int]()
+        var mask = (UInt64(1) << UInt64(2 * k)) - 1
+        var key = UInt64(0)
+        var valid = 0
+        for i in range(n):
+            var code = encode_base(sequence[i])
+            valid = valid + 1 if code < 4 else 0
+            key = ((key << 2) | UInt64(code & 3)) & mask
+            if valid < k:
+                continue
+            var start = i - k + 1
+            var seen = last.get(key)
+            if seen and start - seen.value() <= distance:
+                marked[start] = True
+                marked[seen.value()] = True
+            last[key] = start
+        for i in range(n):
+            self.masked_before[i + 1] = self.masked_before[i] + Int32(1 if marked[i] else 0)
+
+    def covers(self, start: Int, end: Int) -> Bool:
+        """Whether any k-mer of `start ..< end` is masked."""
+        if self.k <= 0 or end - start < self.k:
+            return False
+        return self.masked_before[end - self.k + 1] > self.masked_before[start]
 
 
 def _segments(consensus: List[UInt8], discord: List[Int32], mask: RepeatMask) -> List[Int]:

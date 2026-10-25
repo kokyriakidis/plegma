@@ -1,9 +1,9 @@
 # Research notes
 
 Reports written while designing plegma (2026-10-21), each from reading a rival's source and papers or the test
-bed's code and results; `../design.md` draws them together. File:line references point into the shallow clones
-the reports name (commits given in each), not into this repository. Claims marked *inferred* are the author's
-reasoning, not read in code or measured.
+bed's code and results. The plan they fed (seeded, chained backbones) is gone from the code; the findings stand.
+File:line references point into the shallow clones the reports name (commits given in each), not into this
+repository. Claims marked *inferred* are the author's reasoning, not read in code or measured.
 
 | file | subject |
 | :-- | :-- |

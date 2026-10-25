@@ -8,7 +8,7 @@ mm_collect_matches), index.c (mm_idx_cal_max_occ), lchain.c (mg_lchain_rmq, comp
 map.c (the long-join re-chain) and align.c (mm_fix_bad_ends, mm_filter_bad_seeds, mm_filter_bad_seeds_alt and
 mm_align1's gap filling: a pin at each kept seed's middle once both sequences advanced MIN_KSW_LEN). The RMQ's ties
 fall to the later anchor (minimap2's follow its tree's shape). The segments between pins are aligned globally by
-karan at -A's costs (asm5's scores made costs), ties left; the ends too (minimap2 extends them).
+karan at ref's costs (asm5's scores made costs), ties left; the ends too (minimap2 extends them).
 
   pins(ref, query) -> [(ref, query)] the points the alignment passes through
   chained_rows(pairs) -> {name: (ref row, query row)}, pairs {name: (ref, query)}: every segment in one karan run.

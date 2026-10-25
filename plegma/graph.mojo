@@ -1,9 +1,9 @@
 """The partial order graph: one node per letter, nodes aligned to each other grouped into columns, and every
 sequence's path through it kept.
 
-A sequence joins by an alignment to one path already in the graph, as runs of `=`, `X`, `I` and `D` (karan's
-CIGAR letters, the path the reference): a match lands on the path's node, a substitution on the node of that letter
-in the path node's column (made if missing), an insertion on a node of its own column.
+A sequence joins by its letters' nodes (`fuse_nodes`, the nodes a graph alignment pairs them with): a letter lands
+on its node, or on the node of that letter in the node's column (made if missing); an inserted letter on a node of its
+own column. An MSA's rows make a graph directly (`from_msa`).
 """
 
 
@@ -154,36 +154,6 @@ struct Graph(Movable, Sized):
         self.names.append(name)
         return len(self.paths) - 1
 
-    def fuse(
-        mut self, name: String, sequence: Span[UInt8, _], partner: Int, ops: List[UInt8], counts: List[Int]
-    ) raises -> Int:
-        """Adds `sequence` aligned to path `partner` by the runs `ops[i]` x `counts[i]`, which must span both;
-        returns the new path's index."""
-        var path = List[Int32](capacity=len(sequence))
-        var along = self.paths[partner].copy()
-        var i = 0
-        var j = 0
-        for r in range(len(ops)):
-            var op = ops[r]
-            for _ in range(counts[r]):
-                if op == DELETION:
-                    i += 1
-                    continue
-                if op == INSERTION:
-                    self._on_path(path, self._node(sequence[j], -1))
-                    j += 1
-                    continue
-                if i >= len(along) or j >= len(sequence):
-                    raise Error(t"alignment of {name} runs past its sequences")
-                self._on_path(path, self._lands(Int(along[i]), sequence[j]))
-                i += 1
-                j += 1
-        if i != len(along) or j != len(sequence):
-            raise Error(t"alignment of {name} covers {i} of {len(along)} and {j} of {len(sequence)} letters")
-        self.paths.append(path^)
-        self.names.append(name)
-        return len(self.paths) - 1
-
     def _lands(mut self, node: Int, base: UInt8) -> Int:
         """The node a letter aligned to `node` lands on: `node` itself, or the node of that letter in its
         column, made if missing."""
@@ -272,8 +242,11 @@ struct Graph(Movable, Sized):
             graph.names.append(names[r])
         return graph^
 
-    def heaviest_path_of(self, order: List[Int], members: List[Int]) -> List[Int]:
-        """`heaviest_path` with only the paths `members` weighing the edges, starts and ends."""
+    def heaviest_path(self, order: List[Int], members: List[Int]) -> List[Int]:
+        """abPOA's heaviest bundle over the paths `members`: from a virtual source to a virtual sink, each node
+        followed by its heaviest out-edge (an edge weighing the members that take it), the sink's edge weighing the
+        members that end there (so the consensus stops where most sequences do), ties to the heavier rest of the
+        path. `order` holds the nodes in topological order."""
         var count = len(self.bases)
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
@@ -286,23 +259,6 @@ struct Graph(Movable, Sized):
             ends[Int(path[len(path) - 1])] += 1
             for k in range(len(path) - 1):
                 weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
-        return self._heaviest(order, starts, ends, weight)
-
-    def heaviest_path(self, order: List[Int]) -> List[Int]:
-        """abPOA's heaviest bundle: from a virtual source to a virtual sink, each node followed by its heaviest
-        out-edge, the sink's edge weighing the paths that end there (so the consensus stops where most sequences
-        do), ties to the heavier rest of the path. `order` holds the nodes in topological order."""
-        var count = len(self.bases)
-        var starts = List[Int](length=count, fill=0)
-        var ends = List[Int](length=count, fill=0)
-        for path in self.paths:
-            if len(path) > 0:
-                starts[Int(path[0])] += 1
-                ends[Int(path[len(path) - 1])] += 1
-        return self._heaviest(order, starts, ends, self.edge_weight)
-
-    def _heaviest(self, order: List[Int], starts: List[Int], ends: List[Int], weights: List[Int32]) -> List[Int]:
-        var count = len(self.bases)
         var score = List[Int](length=count, fill=0)
         var next = List[Int](length=count, fill=-1)
         for k in reversed(range(len(order))):
@@ -313,9 +269,9 @@ struct Graph(Movable, Sized):
             var e = Int(self.first_out[node])
             while e >= 0:
                 var s = Int(self.edge_to[e])
-                var weight = Int(weights[e])
-                if weight > 0 and (weight > best_weight or (weight == best_weight and score[s] >= best_score)):
-                    best_weight = weight
+                var w = Int(weight[e])
+                if w > 0 and (w > best_weight or (w == best_weight and score[s] >= best_score)):
+                    best_weight = w
                     best_score = score[s]
                     choice = s
                 e = Int(self.next_out[e])

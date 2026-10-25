@@ -21,29 +21,21 @@ libsais = ">=2.12,<3"
 [tasks]
 # `mojo build -o` writes into a directory but will not create one.
 prepare = "mkdir -p build"
-# The submodules deps/sporos (seeds: MUMs, SMEMs) and deps/karan (pairwise alignment) are on every include path.
+# The submodules deps/sporos (FASTA/FASTQ reading) and deps/karan (pairwise alignment) are on every include path.
 build = { cmd = "mojo precompile -I deps/sporos -I deps/karan plegma -o build/plegma.mojoc", depends-on = ["prepare"] }
 build-test-alphabet = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_alphabet.mojo -o build/test_alphabet", depends-on = ["prepare"] }
 build-test-deps = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_deps.mojo -o build/test_deps", depends-on = ["prepare"] }
-build-test-chain = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_chain.mojo -o build/test_chain", depends-on = ["prepare"] }
 build-test-graph = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_graph.mojo -o build/test_graph", depends-on = ["prepare"] }
 build-test-kernel = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_kernel.mojo -o build/test_kernel", depends-on = ["prepare"] }
 build-test-polish = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_polish.mojo -o build/test_polish", depends-on = ["prepare"] }
-build-test-refine = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_refine.mojo -o build/test_refine", depends-on = ["prepare"] }
-build-test-units = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_units.mojo -o build/test_units", depends-on = ["prepare"] }
-test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_chain && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_refine && ./build/test_units", depends-on = ["build-test-alphabet", "build-test-deps", "build-test-chain", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-refine", "build-test-units"] }
-# The pairwise experiments E1-E5 (experiments/pairwise): `pixi run pairwise-run <vntr-eval>/regions <out dir> [jobs]`.
-# The command line, abPOA's flags: `pixi run build-cli`, then `build/plegma -h`.
+build-test-reference = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_reference.mojo -o build/test_reference", depends-on = ["prepare"] }
+test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_reference", depends-on = ["build-test-alphabet", "build-test-deps", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-reference"] }
+# The command line, `plegma poa` (abPOA's flags) and `plegma ref`: `pixi run build-cli`, then `build/plegma -h`.
 build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan cli/plegma_cli.mojo -o build/plegma", depends-on = ["prepare"] }
 # Random inputs through every option combination, every output checked: `pixi run fuzz [cases] [seed]`.
 fuzz = { cmd = "python3 -I experiments/validate/fuzz.py build/plegma build/fuzz", depends-on = ["build-cli"] }
-build-progressive = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/progressive/progressive.mojo -o build/progressive", depends-on = ["prepare"] }
-# Seeding strategies against true and optimal pairwise alignments (experiments/seeding).
-build-seeding = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/seeding/seeding.mojo -o build/seeding", depends-on = ["prepare"] }
-build-placement = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/placement/placement.mojo -o build/placement", depends-on = ["prepare"] }
-build-anchors = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/anchors/anchors.mojo -o build/anchors", depends-on = ["prepare"] }
-build-structure = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/anchors/structure.mojo -o build/structure", depends-on = ["prepare"] }
-build-pairwise = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/pairwise/pairwise.mojo -o build/pairwise", depends-on = ["prepare"] }
+# The co-optimal letter pairs experiments/chr20/qc_loop.py --coopt scores against.
+build-coopt = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/chr20/coopt.mojo -o build/coopt", depends-on = ["prepare"] }
 format = "mojo format -l 120 plegma tests experiments cli"
 # Pulls the latest Mojo skills from github.com/modular/skills into .claude/skills for coding agents.
 sync-skills = "bash .claude/sync-skills.sh"

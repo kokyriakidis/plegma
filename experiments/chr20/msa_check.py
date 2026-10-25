@@ -12,7 +12,7 @@ genotypes from those rows:
 each written two ways:
   msa      every difference between the row and CHM13's row in the MSA's columns, one record per run of differing
            columns: what a caller reports through this MSA's graph
-  optimal  the row aligned exactly to CHM13's allele on its own (plegma -A on the pair, the binary in PLEGMA): how
+  optimal  the row aligned exactly to CHM13's allele on its own (plegma ref on the pair, the binary in PLEGMA): how
            the allele's differences read at their best, whatever MSA holds it
 and scored together over all regions (batch_call.score: truvari for >= 50 bp, aardvark for small variants). So
   truth x optimal   the ceiling of these alleles (what the panel and the sampling allow)
@@ -95,14 +95,14 @@ def vcf_lines(rid, hap_records):
 
 
 def optimal_rows(ref_seq, seq):
-    """The two rows of plegma -A on (reference, seq): the exact alignment to the reference."""
+    """The two rows of plegma ref on (reference, seq): the exact alignment to the reference."""
     if seq == ref_seq:
         return ref_seq, seq
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "in.fa")
         with open(path, "w") as f:
             f.write(">r\n%s\n>q\n%s\n" % (ref_seq, seq))
-        out = subprocess.run([os.environ["PLEGMA"], "-A", "-r", "1", path], capture_output=True, text=True,
+        out = subprocess.run([os.environ["PLEGMA"], "ref", "-r", "1", path], capture_output=True, text=True,
                              check=True).stdout
     rows, name = {}, None
     for line in out.splitlines():

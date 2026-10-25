@@ -1,7 +1,7 @@
 from std.testing import assert_equal, assert_true, TestSuite
 
 from karan import Costs, Mode, align
-from sporos import Reference
+from sporos import read_fasta
 
 
 def test_karan_align() raises:
@@ -12,17 +12,15 @@ def test_karan_align() raises:
     assert_equal(affine.cost, 12)
 
 
-def test_sporos_mums() raises:
-    var ref_bytes = List[UInt8]("GATTACAGGCCTTAAGCTTGCATGCCTGCAGGTCGACTCTAGAGGATCCCCGGGTACCGAGCTCGAATTC".as_bytes())
-    var query = List[UInt8]("TTTTGCATGCCTGCAGGTCGACTCTAGAGGAAAA".as_bytes())
-    var seqs = List[Span[UInt8, origin_of(ref_bytes)]]()
-    seqs.append(Span(ref_bytes))
-    var reference = Reference(seqs)
-    var mums = reference.mems(Span(query), min_len=20, mode="mum")
-    assert_equal(len(mums), 1)
-    assert_equal(mums[0].ref_pos, 17)
-    assert_equal(mums[0].query_pos, 2)
-    assert_equal(mums[0].length, 29)
+def test_sporos_reads_fasta_and_fastq() raises:
+    var path = "build/test_deps.fq"
+    with open(path, "w") as f:
+        f.write("@a first\nACGT\n+\nIIII\n@b\nGGCCA\n+\nIIIII\n")
+    var records = read_fasta(path)
+    assert_equal(len(records), 2)
+    assert_true(records.names[0] == "a")
+    assert_equal(len(records.seq(1)), 5)
+    assert_equal(records.seq(1)[4], UInt8(ord("A")))
 
 
 def main() raises:

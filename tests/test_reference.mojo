@@ -5,9 +5,7 @@ from std.testing import assert_equal, assert_true, TestSuite
 from karan import Aligner, Costs
 
 from plegma.pins import pinned_pairing, pins_in_context
-from plegma.progressive import on_reference, on_tree, progressive
-from plegma.refine import gap_opens, sum_of_pairs
-from plegma.units import tandem_layout, tandem_repeat
+from plegma.reference import on_reference
 
 
 def _random(length: Int) -> List[UInt8]:
@@ -49,82 +47,6 @@ def _array(left: List[UInt8], unit: List[UInt8], copies: Int, right: List[UInt8]
         out.extend(_mutated(unit, rate))
     out.extend(right.copy())
     return out^
-
-
-def test_the_period_of_an_array_between_flanks() raises:
-    seed(31)
-    var left = _random(150)
-    var right = _random(150)
-    for period in [7, 27, 60]:
-        var unit = _random(period)
-        var seq = _array(left, unit, 1500 // period, right, 0.02)
-        var r = tandem_repeat(seq)
-        assert_equal(r.period, period)
-        assert_true(r.start >= 140 and r.start <= 150 + 3 * period, String(r.start))
-        assert_true(r.identity > 0.8)
-
-
-def test_the_smallest_period_not_a_multiple() raises:
-    # A unit of 10 repeated exactly matches itself 20 and 30 letters on as well: the period is 10.
-    seed(37)
-    var unit = _random(10)
-    var seq = _array(_random(100), unit, 80, _random(100), 0.0)
-    assert_equal(tandem_repeat(seq).period, 10)
-
-
-def test_no_period_in_random_sequence() raises:
-    seed(41)
-    var seq = _random(2000)
-    var r = tandem_repeat(seq)
-    assert_true(r.period == 0 or r.end - r.start < 100)
-
-
-def test_layout_spells_each_array_and_cuts_copies_in_phase() raises:
-    seed(43)
-    var left = _random(120)
-    var right = _random(120)
-    var unit = _random(23)
-    var seqs = List[List[UInt8]]()
-    for copies in [30, 34, 31, 38, 30, 36]:
-        seqs.append(_array(left, unit, copies, right, 0.04))
-    var layout = tandem_layout(seqs)
-    assert_equal(layout.period, 23)
-    assert_equal(len(layout.rows), len(seqs))
-    for k in range(len(seqs)):
-        assert_equal(len(layout.rows[k]), len(layout.rows[0]))
-        var spelled = _ungapped(layout.rows[k])
-        assert_equal(len(spelled), layout.ends[k] - layout.starts[k])
-        for t in range(len(spelled)):
-            assert_equal(spelled[t], seqs[k][layout.starts[k] + t])
-
-
-def test_no_layout_without_an_array() raises:
-    seed(47)
-    var truth = _random(800)
-    var seqs = List[List[UInt8]]()
-    for _ in range(5):
-        seqs.append(_mutated(truth, 0.05))
-    assert_equal(len(tandem_layout(seqs).rows), 0)
-
-
-def test_progressive_keeps_the_sequences_and_the_copy_start_helps() raises:
-    seed(53)
-    var left = _random(100)
-    var right = _random(100)
-    var unit = _random(19)
-    var seqs = List[List[UInt8]]()
-    for copies in [12, 14, 13, 16, 12]:
-        seqs.append(_array(left, unit, copies, right, 0.04))
-    seqs.append(seqs[1].copy())
-    var both = progressive(seqs, 3, group_band=32)
-    var placed = progressive(seqs, 3, group_band=32, units=False)
-    for k in range(len(seqs)):
-        assert_true(_ungapped(both[k]) == seqs[k])
-        assert_equal(len(both[k]), len(both[0]))
-        assert_true(_ungapped(placed[k]) == seqs[k])
-    assert_true(both[1] == both[len(seqs) - 1])
-    # The copy-level start is kept only when cheaper.
-    assert_true(sum_of_pairs(both) + gap_opens(both) <= sum_of_pairs(placed) + gap_opens(placed))
 
 
 def _gap_runs(a: List[UInt8], b: List[UInt8]) -> Int:
@@ -194,32 +116,6 @@ def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
     assert_true(extra <= 6 * 23)
 
 
-def test_on_reference_consolidates_copy_number_changes_inside_an_array() raises:
-    seed(67)
-    var left = _random(80)
-    var right = _random(80)
-    var unit = _random(23)
-    # Copies a percent apart: each sequence's own optimum puts its copy-number change at a place of its own, where
-    # moving it to one place costs a mismatch or two (copies further apart refuse the move at -A's costs).
-    var seqs = List[List[UInt8]]()
-    seqs.append(_array(left, unit, 20, right, 0.01))
-    for copies in [14, 9, 26, 24, 11, 17, 23]:
-        seqs.append(_array(left, unit, copies, right, 0.01))
-    var costs = Costs.two_piece(40, 78, 7, 162, 3)
-    var plain = on_reference(seqs, costs)
-    var rows = on_reference(seqs, costs, consolidate=True)
-    for k in range(len(seqs)):
-        assert_true(_ungapped(rows[k]) == seqs[k])
-        assert_equal(len(rows[k]), len(rows[0]))
-    # The long changes at fewer places than each sequence's own optimum puts them, and no allele with more gaps
-    # against the reference.
-    var places = _long_change_places(rows, 10)
-    var plain_places = _long_change_places(plain, 10)
-    assert_true(places < plain_places, String(places, " ", plain_places))
-    for k in range(1, len(seqs)):
-        assert_true(_gap_runs(rows[0], rows[k]) <= _gap_runs(plain[0], plain[k]) + 1)
-
-
 def test_on_reference_aligns_distant_sequences_at_the_fallback_costs() raises:
     seed(71)
     # Reads of one sequence at 12% error, about a quarter apart pairwise: past asm5's divergence, whose costs delete
@@ -285,32 +181,24 @@ def test_pinned_alignment_spells_and_pins_identical_sequences_on_the_diagonal() 
         assert_equal(len(rows[k]), len(rows[0]))
 
 
-def test_on_tree_keeps_each_allele_as_simple_against_the_reference() raises:
-    seed(61)
-    var left = _random(80)
-    var right = _random(80)
-    var unit = _random(23)
-    var extra = _random(30)
-    var reference = _array(left, unit, 20, right, 0.0)
-    var family = _array(left, unit, 14, right, 0.0)
-    # A member of the family with a stretch of its own inside the array: the family's deletion and an insertion.
-    var member = _array(left, unit, 7, List[UInt8](), 0.0)
-    member.extend(extra.copy())
-    member.extend(_array(List[UInt8](), unit, 7, right, 0.0))
+def test_on_reference_rows_do_not_depend_on_the_threads() raises:
+    seed(79)
+    var left = _random(1500)
+    var right = _random(1500)
+    var unit = _random(29)
     var seqs = List[List[UInt8]]()
-    seqs.append(reference.copy())
-    seqs.append(member.copy())
-    for _ in range(3):
-        seqs.append(family.copy())
-    for share in [0.0, 0.5]:
-        var rows = on_tree(seqs, Costs.two_piece(40, 78, 7, 162, 3), share)
-        for k in range(len(seqs)):
-            assert_true(_ungapped(rows[k]) == seqs[k])
-            assert_equal(len(rows[k]), len(rows[0]))
-        assert_true(rows[2] == rows[4])
-        # Against the reference the family is one deletion, the member that deletion and its insertion.
-        assert_equal(_gap_runs(rows[0], rows[2]) + _gap_runs(rows[2], rows[0]), 1)
-        assert_equal(_gap_runs(rows[0], rows[1]) + _gap_runs(rows[1], rows[0]), 2)
+    seqs.append(_array(_random(200), unit, 25, _random(200), 0.02))
+    for copies in [18, 25, 31, 22, 27, 12]:
+        seqs.append(_array(_random(200), unit, copies, _random(200), 0.02))
+    var flanks = List[List[UInt8]]()
+    flanks.append(left.copy())
+    flanks.append(right.copy())
+    var asm5 = Costs.two_piece(40, 78, 7, 162, 3)
+    var exact = on_reference(seqs, asm5)
+    var pinned = on_reference(seqs, asm5, flanks=flanks)
+    for threads in [2, 4]:
+        assert_true(on_reference(seqs, asm5, threads=threads) == exact)
+        assert_true(on_reference(seqs, asm5, threads=threads, flanks=flanks) == pinned)
 
 
 def main() raises:
