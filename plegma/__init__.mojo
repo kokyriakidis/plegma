@@ -9,7 +9,8 @@ is implementation and may change.
   `from_msa`, `msa`, `heaviest_path`), `cigar_runs` -> `Runs`.
 - Whole-graph alignment (abPOA's modes, scoring and adaptive band, memory
   following the band): `align_to_graph` -> `GraphAlignment` under `Scoring`
-  (`GLOBAL`, `LOCAL`, `EXTENSION`), over a `Topology`, through a reusable
+  (`GLOBAL`, `LOCAL`, `EXTENSION`; for reads fixed at one end of a local
+  assembly `PREFIX` and `SUFFIX`), over a `Topology`, through a reusable
   `Workspace` for runs of alignments, between two nodes (`align_between`;
   `SOURCE` and `SINK` for the graph's ends).
 - Pinned alignment to the graph: `align_pinned` (minimap2's pins between a
@@ -18,6 +19,10 @@ is implementation and may change.
 - Consensus polishing: `polish` (one-letter and whole-repeat-unit edits kept
   while they lower the sequences' summed edit distance to the consensus, then
   while they raise its likelihood under a pair HMM).
+- The POA of a read set: `poa` -> `Poa` under `PoaOptions`, each read
+  anchored `BOTH`, `LEFT` or `RIGHT` (a local assembly's reads: spanning it,
+  or fixed at one anchor; with none spanning, each side assembled and the two
+  joined, or one side alone, one-directional).
 - Order and clusters: `guide_order` (abPOA's progressive order by minimizer
   multiset Jaccard), `cluster_rows` (several consensus sequences, by MSA
   columns where the sequences disagree).
@@ -35,11 +40,16 @@ from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
 from .clusters import cluster_rows
 from .graph import Graph, Runs, cigar_runs
 from .kernel import (
+    BOTH,
     EXTENSION,
     GLOBAL,
+    LEFT,
     LOCAL,
+    PREFIX,
+    RIGHT,
     SINK,
     SOURCE,
+    SUFFIX,
     GraphAlignment,
     Scoring,
     Topology,
@@ -50,5 +60,6 @@ from .kernel import (
 from .order import guide_order
 from .pinned import WindowScratch, align_pinned, window_nodes
 from .pins import Pins, pinned_pairing, pins, pins_in_context
+from .poa import Poa, PoaOptions, poa
 from .polish import polish
 from .reference import on_reference

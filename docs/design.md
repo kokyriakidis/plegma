@@ -25,6 +25,24 @@ Two commands share one library. This file maps the code to them, for whoever cha
   sequences to it, then while they raise their likelihood under a pair HMM. `-d` clusters the sequences on the MSA's
   heterozygous columns (`plegma/clusters.mojo`), one consensus per cluster.
 
+### Reads fixed at one anchor (`plegma/poa.mojo`)
+
+A local assembly's reads span both anchors (`BOTH`) or are fixed at one (`LEFT`, `RIGHT`; `anchor=` in the FASTA
+header). The spanning reads build the graph first; a left read is then aligned in the kernel's `PREFIX` mode (from
+a source and its first letter, every letter, ending at any node; letters past a sink free, so they join as new nodes
+and grow the graph), a right read in `SUFFIX` (from any node, letters before a source free, ending at a sink). Both
+modes run in the adaptive band (`PREFIX` without the diagonal toward an end it does not have), and under `-S` only
+the first or last pinned window takes the read's mode. The consensus runs between the spanning reads' ends
+(`Graph.heaviest_path_spanning`), every read weighing the edges.
+
+With no spanning read each side is assembled alone, the longest read first: the left consensus followed forward
+while most reads go on (`Graph.heaviest_path`), the right one backward (`Graph.heaviest_path_backward`). Both sides:
+joined at the middle pin of minimap2's chain between them (`pins.pins`), or a short karan overlap of their ends; the
+graph is rebuilt on the joined sequence. One side: its consensus cut where fewer than `-c` reads reach (a
+one-directional assembly). Polishing aligns each read as it is anchored (`polish`'s `anchors`: karan's `PREFIX` or
+`SUFFIX`, or the consensus inside a longer read's prefix or suffix), counts disagreement against the reads covering
+each position, and lets a read vote only in the segments its alignment spans whole.
+
 ## `plegma ref`: the MSA anchored on a reference
 
 `plegma/reference.mojo` `on_reference`, for pgrealign: every distinct sequence's letters paired with the reference's

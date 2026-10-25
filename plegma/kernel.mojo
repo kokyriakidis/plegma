@@ -27,6 +27,19 @@ comptime LOCAL = 1
 """The best-scoring part of the query against any part of a path."""
 comptime EXTENSION = 2
 """From the graph's sources and the query's start, as far as it pays."""
+comptime PREFIX = 3
+"""A read anchored at the graph's start: from a source and the query's start, every query letter, ending at any node;
+past a sink, the query's remaining letters are free (an overhang the graph does not hold yet)."""
+comptime SUFFIX = 4
+"""A read anchored at the graph's end: from any node (the query's letters before a source free: an overhang), every
+query letter, ending at a sink."""
+
+comptime BOTH = 0
+"""A read spanning both anchors of a local assembly (aligned `GLOBAL`)."""
+comptime LEFT = 1
+"""A read fixed at the left anchor only (aligned `PREFIX`)."""
+comptime RIGHT = 2
+"""A read fixed at the right anchor only (aligned `SUFFIX`)."""
 
 
 # A cell's traceback byte: where its score came from (the low three bits), and whether each gap state extended
@@ -52,6 +65,12 @@ def _neg[dt: DType]() -> Scalar[dt]:
         return Scalar[dt](-16000)
     else:
         return Scalar[dt](-(1 << 29))
+
+
+@inline(.always)
+def _banded(mode: Int) -> Bool:
+    """Whether `mode` runs in the adaptive band: those that use every query letter."""
+    return mode == GLOBAL or mode == PREFIX or mode == SUFFIX
 
 
 def _fits_16_bits(scoring: Scoring, m: Int, n: Int) -> Bool:
@@ -240,7 +259,7 @@ struct Workspace(Movable):
         score the alignment can reach fits them; narrower rows run faster in 32-bit lanes, whose vectors they
         fill."""
         var m = len(query)
-        var reach = band_b + Int(band_f * Float64(m)) if band_b >= 0 and mode == GLOBAL else m + 1
+        var reach = band_b + Int(band_f * Float64(m)) if band_b >= 0 and _banded(mode) else m + 1
         if reach >= 64 and _fits_16_bits(scoring, m, len(nodes)):
             return self._align[DType.int16](
                 graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f
@@ -278,7 +297,7 @@ struct Workspace(Movable):
             row_of[nodes[r]] = r + 1
         var m = len(query)
         var width = m + 1
-        var banded = band_b >= 0 and mode == GLOBAL
+        var banded = band_b >= 0 and _banded(mode)
         var w = band_b + Int(band_f * Float64(m)) if banded else width
         var convex = scoring.convex()
         var gap1 = S(Int(scoring.open1 + scoring.extend1))
@@ -286,6 +305,7 @@ struct Workspace(Movable):
         var e1 = S(Int(scoring.extend1))
         var e2 = S(Int(scoring.extend2))
         var local = mode == LOCAL
+        var free_start = mode == SUFFIX
 
         # The workspace's arrays, sized to this alignment; whatever an earlier one left is overwritten before use.
         self.profile.resize(BYTES * (5 * width + V), 0)
@@ -355,7 +375,7 @@ struct Workspace(Movable):
         var first_row = self.pool[first_slot].unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
         _fill[dt](first_row, 3 * first_stride)
         for j in range(self.hi[0] + 1):
-            first_row[unsafe_offset=V + j] = S(0) if local else max(S(-Int(scoring.gap(j))), NEG)
+            first_row[unsafe_offset=V + j] = S(0) if local or free_start else max(S(-Int(scoring.gap(j))), NEG)
         self.trace.resize(self.hi[0] + 1, _SOURCE)
 
         var best = S(0) if local else NEG
@@ -392,7 +412,11 @@ struct Workspace(Movable):
             # Only cells some predecessor reaches: [low, high] as they stand.
             var reach_low = low
             var reach_high = high
-            if banded:
+            if banded and mode == PREFIX:
+                # No end to reach: the band follows the best cells.
+                low = max(low, left - w)
+                high = min(high, right + w)
+            elif banded:
                 var diagonal = m - max(0, topology.remaining[node] - base_remaining)
                 low = max(low, min(left, diagonal) - w)
                 high = min(high, max(right, diagonal) + w)
@@ -587,6 +611,10 @@ struct Workspace(Movable):
                     h.unsafe_store(at, value)
                     source_of.unsafe_store(at, source)
                     at += V
+            if free_start and low == 0 and h[unsafe_offset=0] < S(0):
+                # The alignment may start at this node: the graph before it skipped free.
+                h[unsafe_offset=0] = S(0)
+                source_of[unsafe_offset=0] = S(_START)
             # Gaps along the query, left to right, from those scores: a gap opened after another never beats one
             # longer gap (with E1 >= E2), so the insertion states need not see each other.
             # As running maxima: F[k] = max over t < k of (H[t] + e t) - (o + e) - e (k - 1), a prefix maximum
@@ -655,11 +683,21 @@ struct Workspace(Movable):
                     c[unsafe_offset=3 * at] = UInt8(pick_h[unsafe_offset=at])
                     c[unsafe_offset=3 * at + 1] = UInt8(pick_d1[unsafe_offset=at])
                     c[unsafe_offset=3 * at + 2] = UInt8(pick_d2[unsafe_offset=at])
-            if mode != GLOBAL:
+            if mode == LOCAL or mode == EXTENSION:
                 if row_best > best:
                     best = row_best
                     best_row = r
                     best_col = row_left
+            elif mode == PREFIX:
+                # Every query letter used, at any node; at a sink, the letters left free.
+                if high == m and h[unsafe_offset=m - low] > best:
+                    best = h[unsafe_offset=m - low]
+                    best_row = r
+                    best_col = m
+                if ends_here and row_best > best:
+                    best = row_best
+                    best_row = r
+                    best_col = row_right
             elif ends_here and high == m and h[unsafe_offset=m - low] > best:
                 best = h[unsafe_offset=m - low]
                 best_row = r
@@ -675,7 +713,7 @@ struct Workspace(Movable):
                 self.free.append(slot)
                 self.slot_of[r] = -1
 
-        if mode == GLOBAL:
+        if mode == GLOBAL or mode == SUFFIX:
             var start_row = self.pool[self.slot_of[0] if self.slot_of[0] >= 0 else 0].unsafe_ptr().unsafe_bitcast[S]()
             if direct and self.slot_of[0] >= 0 and self.hi[0] == m and start_row[unsafe_offset=V + m] > best:
                 best = start_row[unsafe_offset=V + m]

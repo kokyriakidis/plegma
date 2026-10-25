@@ -15,9 +15,8 @@ from sporos import read_fasta
 
 from plegma.clusters import cluster_rows
 from plegma.graph import GAP, Graph
-from plegma.kernel import EXTENSION, GLOBAL, LOCAL, GraphAlignment, Scoring, SINK, SOURCE, Topology, Workspace
-from plegma.order import guide_order
-from plegma.pinned import WindowScratch, align_pinned
+from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology
+from plegma.poa import BOTH, GUIDE_ORDER, INPUT_ORDER, LEFT, LONGEST_FIRST, RIGHT, Poa, PoaOptions, poa
 from plegma.polish import polish
 from plegma.reference import on_reference
 
@@ -49,6 +48,11 @@ poa options:
     -N          not seeded: each sequence aligned to the whole graph
     -s          ambiguous strand: a sequence scoring poorly is tried reverse-complemented, the better kept
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
+    -c INT      a one-directional assembly (reads fixed at one anchor, none spanning) stops where fewer reads
+                go on [3]
+                A read's anchor is a word of its FASTA header: anchor=both (the default: it spans the local assembly's
+                two anchors), anchor=left or anchor=right (fixed at that anchor only, ending inside the gap). With
+                reads of both sides and none spanning, each side is assembled and the two joined where they overlap.
 
 ref options:
     -F FILE     the reference's flanks (FASTA: left, then right): each alignment to the reference pinned as minimap2
@@ -83,6 +87,7 @@ struct Options(Copyable, Movable):
     var progressive: Bool
     var strand: Bool
     var seeded: Bool
+    var min_cover: Int
     var start_msa: String
     var flanks: String
     var threads: Int
@@ -106,6 +111,7 @@ struct Options(Copyable, Movable):
         self.progressive = True
         self.strand = False
         self.seeded = True
+        self.min_cover = 3
         self.start_msa = String()
         self.flanks = String()
         self.threads = 1
@@ -116,20 +122,6 @@ struct Options(Copyable, Movable):
         self.polish_rounds = 50
         self.likely_rounds = 20
         self.verbose = False
-
-
-struct Aligned(Movable):
-    """What either command made of a file, for the outputs: the graph, its paths in output order (`shown`: a starting
-    MSA's rows, then every record in input order), and the MSA's rows in that order when the command made them."""
-
-    var graph: Graph
-    var shown: List[Int]
-    var rows: List[String]
-
-    def __init__(out self, var graph: Graph, var shown: List[Int], var rows: List[String]):
-        self.graph = graph^
-        self.shown = shown^
-        self.rows = rows^
 
 
 def _value(args: List[String], i: Int) raises -> String:
@@ -154,103 +146,90 @@ def _upper(seq: Span[UInt8, _]) -> List[UInt8]:
     return out^
 
 
-def _reverse_complement(seq: Span[UInt8, _]) -> List[UInt8]:
-    var out = List[UInt8](capacity=len(seq))
-    for i in reversed(range(len(seq))):
-        var c = seq[i]
-        var lower = c | 0x20
-        if lower == UInt8(ord("a")):
-            out.append(UInt8(ord("T")))
-        elif lower == UInt8(ord("c")):
-            out.append(UInt8(ord("G")))
-        elif lower == UInt8(ord("g")):
-            out.append(UInt8(ord("C")))
-        elif lower == UInt8(ord("t")) or lower == UInt8(ord("u")):
-            out.append(UInt8(ord("A")))
-        else:
-            out.append(c)
+def _anchors(path: String, count: Int) raises -> List[Int]:
+    """Each record's anchor from its FASTA header: `anchor=left`, `anchor=right` or `anchor=both` (the default)
+    among the words after its name; all `BOTH` for a FASTQ file or headers past `count`."""
+    var out = List[Int](length=count, fill=BOTH)
+    var text: String
+    with open(path, "r") as f:
+        text = f.read()
+    if text.byte_length() == 0 or text.as_bytes()[0] != UInt8(ord(">")):
+        return out^
+    var k = 0
+    for line in text.split("\n"):
+        if line.byte_length() == 0 or line.as_bytes()[0] != UInt8(ord(">")):
+            continue
+        if k >= count:
+            break
+        for word in line.split():
+            if word == "anchor=left":
+                out[k] = LEFT
+            elif word == "anchor=right":
+                out[k] = RIGHT
+            elif word == "anchor=both":
+                out[k] = BOTH
+        k += 1
     return out^
 
 
-def _poa(mut names: List[String], mut seqs: List[List[UInt8]], options: Options) raises -> Aligned:
-    """`plegma poa`: each sequence aligned to the whole graph so far (in input order, `-L` longest first, or `-p`'s
-    guide order) and fused into it; with `-s`, one scoring poorly tried reverse-complemented (it and its name then
-    changed in `seqs` and `names`)."""
-    var order = List[Int]()
-    for r in range(len(seqs)):
-        order.append(r)
-    if options.progressive:
-        order = guide_order(seqs)
-    elif options.longest_first:
-        # Longest first, file order among equals: sort keys (2^32 - length) << 32 | index.
-        var keys = List[UInt64]()
-        for r in range(len(seqs)):
-            keys.append((UInt64((1 << 32) - len(seqs[r])) << 32) | UInt64(r))
-        sort(keys)
-        for k in range(len(keys)):
-            order[k] = Int(keys[k] & 0xFFFFFFFF)
-    var graph = Graph()
+struct Aligned(Movable):
+    """What either command made of a file, for the outputs: the graph, its paths in output order (`shown`: a starting
+    MSA's rows, then every record in input order), the MSA's rows in that order when the command made them, the
+    records a consensus may be polished against, and the consensus itself when the command made it (reads anchored
+    at one end: one sequence, or the two sides' when they could not be joined)."""
+
+    var graph: Graph
+    var shown: List[Int]
+    var rows: List[String]
+    var polish_with: List[Int]
+    var anchors: List[Int]
+    var consensus: List[List[UInt8]]
+
+    def __init__(out self, var graph: Graph, var shown: List[Int], var rows: List[String]):
+        self.graph = graph^
+        self.shown = shown^
+        self.rows = rows^
+        self.polish_with = List[Int]()
+        self.anchors = List[Int]()
+        self.consensus = List[List[UInt8]]()
+
+    def __init__(out self, var made: Poa):
+        self.graph = Graph()
+        self.shown = List[Int]()
+        self.rows = List[String]()
+        self.polish_with = List[Int]()
+        self.anchors = List[Int]()
+        self.consensus = List[List[UInt8]]()
+        made^.parts(self.graph, self.shown, self.polish_with, self.consensus)
+
+
+def _poa(input: String, mut names: List[String], mut seqs: List[List[UInt8]], options: Options) raises -> Aligned:
+    """`plegma poa`: `plegma.poa` with the command's options, each record anchored as its header says."""
+    var settings = PoaOptions()
+    settings.mode = options.mode
+    settings.scoring = options.scoring
+    settings.band_b = options.band_b
+    settings.band_f = options.band_f
+    settings.order = GUIDE_ORDER if options.progressive else (LONGEST_FIRST if options.longest_first else INPUT_ORDER)
+    settings.seeded = options.seeded
+    settings.strand = options.strand
+    settings.min_cover = options.min_cover
+    var start = Graph()
     if options.start_msa.byte_length() > 0:
-        var start = read_fasta(options.start_msa)
+        var msa = read_fasta(options.start_msa)
         var rows = List[String]()
-        for r in range(len(start)):
-            rows.append(String(unsafe_from_utf8=_upper(start.seq(r))))
-        graph = Graph.from_msa(start.names, rows)
-    var shown = List[Int]()
-    for p in range(len(graph.paths)):
-        shown.append(p)
-    var path_of = List[Int](length=len(seqs), fill=-1)
-    var row_of = List[Int]()
-    var scratch = WindowScratch()
-    var workspace = Workspace()
-    for r in order:
-        if len(graph) == 0:
-            path_of[r] = graph.add(names[r], Span(seqs[r]))
-            continue
-        var found = _align(graph, seqs[r], options, row_of, scratch, workspace)
-        if options.strand:
-            # abPOA's rule: a score under a third of the best a match run of the shorter length could earn.
-            var floor = Int(options.scoring.match_score) * min(len(seqs[r]), len(graph.paths[0])) // 3
-            if found.score < floor:
-                var flipped = _reverse_complement(Span(seqs[r]))
-                var other = _align(graph, flipped, options, row_of, scratch, workspace)
-                if other.score > found.score:
-                    seqs[r] = flipped^
-                    found = other^
-                    names[r] += "_reverse_complement"
-        path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
-    for r in range(len(seqs)):
-        shown.append(path_of[r])
-    return Aligned(graph^, shown^, List[String]())
-
-
-def _align(
-    graph: Graph,
-    seq: List[UInt8],
-    options: Options,
-    mut row_of: List[Int],
-    mut scratch: WindowScratch,
-    mut workspace: Workspace,
-) raises -> GraphAlignment:
-    var topology = Topology(graph)
-    row_of.resize(len(graph), -1)
-    if options.seeded and options.mode == GLOBAL:
-        return align_pinned(
-            graph, topology, seq, options.scoring, options.band_b, options.band_f, row_of, scratch, workspace
-        )
-    return workspace.align(
-        graph,
-        topology,
-        topology.order,
-        SOURCE,
-        SINK,
-        Span(seq),
-        options.scoring,
-        row_of,
-        options.mode,
-        options.band_b,
-        options.band_f,
-    )
+        for r in range(len(msa)):
+            rows.append(String(unsafe_from_utf8=_upper(msa.seq(r))))
+        start = Graph.from_msa(msa.names, rows)
+    var anchors = _anchors(input, len(seqs))
+    var out = Aligned(poa(names, seqs, anchors, settings, start^))
+    if len(out.consensus) > 0:
+        # Reads anchored at one end: the consensus polished against every read, each aligned as it is anchored.
+        out.polish_with.clear()
+        for r in range(len(seqs)):
+            out.polish_with.append(r)
+        out.anchors = anchors^
+    return out^
 
 
 def _ref(names: List[String], seqs: List[List[UInt8]], options: Options) raises -> Aligned:
@@ -278,7 +257,10 @@ def _ref(names: List[String], seqs: List[List[UInt8]], options: Options) raises 
     for r in range(len(seqs)):
         rows.append(String(unsafe_from_utf8=bytes[r]))
         shown.append(r)
-    return Aligned(Graph.from_msa(names, rows), shown^, rows^)
+    var out = Aligned(Graph.from_msa(names, rows), shown^, rows^)
+    for r in range(len(seqs)):
+        out.polish_with.append(r)
+    return out^
 
 
 def _most_frequent(rows: List[String]) -> String:
@@ -349,7 +331,28 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
     var everyone = List[Int]()
     for m in range(len(aligned.shown)):
         everyone.append(m)
-    if result == 0 or result == 2:
+    # A starting MSA's rows come first in `shown`; past them, record r is at first + r.
+    var first = len(aligned.shown) - len(seqs)
+    if (result == 0 or result == 2) and len(aligned.consensus) > 0:
+        # Reads anchored at one end: the assembly's own consensus, polished against every read as it is anchored
+        # (when one sequence); two sides that could not be joined, each apart.
+        if len(aligned.consensus) == 1:
+            var letters = aligned.consensus[0].copy()
+            var polishing = options.polish_rounds > 0 or options.likely_rounds > 0
+            if polishing and options.mode == GLOBAL and len(aligned.polish_with) > 0:
+                letters = polish(
+                    letters,
+                    seqs,
+                    aligned.polish_with,
+                    options.polish_rounds,
+                    likely_rounds=options.likely_rounds,
+                    anchors=aligned.anchors,
+                )
+            text.write(">Consensus_sequence\n", StringSlice(unsafe_from_utf8=Span(letters)), "\n")
+        else:
+            text.write(">Consensus_sequence_left\n", StringSlice(unsafe_from_utf8=Span(aligned.consensus[0])), "\n")
+            text.write(">Consensus_sequence_right\n", StringSlice(unsafe_from_utf8=Span(aligned.consensus[1])), "\n")
+    elif result == 0 or result == 2:
         var clusters = cluster_rows(rows, options.max_consensus, options.min_freq) if options.max_consensus > 1 else (
             List[List[Int]]()
         )
@@ -376,9 +379,21 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
             text.write(">", aligned.graph.names[aligned.shown[k]], "\n", rows[k], "\n")
     if result == 3 or result == 4:
         var consensus_path = List[Int]()
-        if result == 4:
+        if result == 4 and len(aligned.consensus) == 0:
             # The graph's consensus path is the heaviest bundle, whichever consensus the FASTA output used.
             consensus_path = aligned.graph.heaviest_path(Topology(aligned.graph).order, aligned.shown)
+        elif result == 4:
+            # Reads anchored at one end: the bundle between the spanning reads' ends; with none, the assembled
+            # sequence the reads were aligned to (its path the graph's first, not shown).
+            var spanning = List[Int]()
+            for r in aligned.polish_with:
+                if len(aligned.anchors) == 0 or aligned.anchors[r] == BOTH:
+                    spanning.append(aligned.shown[first + r])
+            if len(spanning) > 0:
+                consensus_path = aligned.graph.heaviest_path_spanning(Topology(aligned.graph).order, spanning)
+            elif len(aligned.graph.paths) > 0:
+                for node in aligned.graph.paths[0]:
+                    consensus_path.append(Int(node))
         _write_gfa(aligned.graph, aligned.shown, consensus_path, text)
     return text^
 
@@ -467,7 +482,7 @@ def _run(input: String, options: Options) raises -> String:
     for r in range(len(records)):
         seqs.append(_upper(records.seq(r)))
     var t1 = perf_counter_ns()
-    var aligned = _ref(names, seqs, options) if options.reference else _poa(names, seqs, options)
+    var aligned = _ref(names, seqs, options) if options.reference else _poa(input, names, seqs, options)
     var nodes = len(aligned.graph)
     var t2 = perf_counter_ns()
     var text = _write(aligned^, seqs, options)
@@ -545,6 +560,9 @@ def main() raises:
             options.seeded = True
         elif a == "-N" and not reference:
             options.seeded = False
+        elif a == "-c" and not reference:
+            options.min_cover = Int(_value(args, i))
+            i += 1
         elif a == "-i" and not reference:
             options.start_msa = _value(args, i)
             i += 1

@@ -29,8 +29,9 @@ build-test-graph = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I test
 build-test-kernel = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_kernel.mojo -o build/test_kernel", depends-on = ["prepare"] }
 build-test-polish = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_polish.mojo -o build/test_polish", depends-on = ["prepare"] }
 build-test-pinned = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_pinned.mojo -o build/test_pinned", depends-on = ["prepare"] }
+build-test-poa = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_poa.mojo -o build/test_poa", depends-on = ["prepare"] }
 build-test-reference = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_reference.mojo -o build/test_reference", depends-on = ["prepare"] }
-test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_pinned && ./build/test_reference", depends-on = ["build-test-alphabet", "build-test-deps", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-pinned", "build-test-reference"] }
+test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_pinned && ./build/test_poa && ./build/test_reference", depends-on = ["build-test-poa", "build-test-alphabet", "build-test-deps", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-pinned", "build-test-reference"] }
 # The command line, `plegma poa` (abPOA's flags) and `plegma ref`: `pixi run build-cli`, then `build/plegma -h`.
 build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan cli/plegma_cli.mojo -o build/plegma", depends-on = ["prepare"] }
 # Random inputs through every option combination, every output checked: `pixi run fuzz [cases] [seed]`.

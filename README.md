@@ -22,6 +22,13 @@ the graph as GFA (`-r`):
   k-mers unique in both), the DP running only between the pins: the same consensus as aligning each in input order
   to the whole graph (`-n -N`), better allele MSAs (pgrealign qc pair F1 0.872 against 0.864 on 377 chr20 regions),
   up to 7 times faster and in a sixth of the memory on the largest chr20 VNTRs.
+  Reads of a local assembly may be fixed at one anchor only (`anchor=left` or `anchor=right` in their FASTA
+  headers, `plegma/poa.mojo`): aligned from the graph's start to anywhere (or from anywhere to its end), whatever
+  passes the graph's end growing it; with no read spanning both anchors each side is assembled and the two joined
+  where they overlap, or one side alone stops where fewer than `-c` reads go on (a telomere). The consensus is
+  polished against every read as it is anchored. On simulated local assemblies (`experiments/msa/anchored.py`) it
+  reproduces 5 kb truths exactly in 0.2 s and 20 MB, where pericles (theseus-lib's consensus branch), which needs a
+  spanning read, takes 17 to 63 s and its majority vote leaves 4 to 29 errors.
 - **`plegma ref`**: the MSA anchored on the first sequence, the reference (CHM13's allele in a pangenome region): every
   other aligned to it alone at minimap2's asm5 scores, gaps left-normalized, its letters in the reference's columns
   and the runs inserted at one place aligned to each other on the longest, so each sequence's alignment with the

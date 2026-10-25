@@ -38,7 +38,8 @@ def mutate(rng, s, rate):
 
 
 def make_case(rng):
-    kind = rng.choice(["reads", "reads", "repeat", "mixed", "tiny", "lower", "n", "dups", "strand", "one"])
+    kind = rng.choice(["reads", "reads", "repeat", "mixed", "tiny", "lower", "n", "dups", "strand", "one", "anchored",
+                       "anchored"])
     length = rng.choice([1, 2, 5, 20, 60, 200, 700, 1500])
     base = "".join(rng.choice("ACGT") for _ in range(length))
     if kind == "repeat":
@@ -65,6 +66,15 @@ def make_case(rng):
         if kind == "strand" and rng.random() < 0.4:
             s = rc(s)
         seqs.append(("s%d" % i, s or "A"))
+    if kind == "anchored":
+        # A local assembly: reads spanning it, fixed at its left or its right end only, the spanning ones first or
+        # none at all (each tagged anchor=... in its header, which poa reads; the other command ignores it).
+        seqs = []
+        for i in range(rng.choice([1, 3, 8, 20])):
+            side = rng.choice(["both", "left", "right"] if rng.random() < 0.6 else ["left", "right"])
+            cut = rng.randint(0, len(base))
+            part = base if side == "both" else (base[:cut] if side == "left" else base[cut:])
+            seqs.append(("s%d anchor=%s" % (i, side), mutate(rng, part, rng.choice([0.0, 0.02, 0.1])) or "A"))
     return kind, seqs
 
 
@@ -89,7 +99,7 @@ def check_msa(seqs, path):
             return "row %s has %d columns, not %d" % (rname, len(row), width)
         spelled = row.replace("-", "")
         want = rc(seq) if rname.endswith("_reverse_complement") else seq
-        if not rname.startswith(name):
+        if not rname.startswith(name.split()[0]):
             return "row %s for record %s" % (rname, name)
         if spelled.upper() != want.upper():
             return "row %s spells %r, not %r" % (rname, spelled[:40], want[:40])

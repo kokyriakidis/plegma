@@ -22,6 +22,7 @@ from karan import Aligner, Costs, Mode, Ties
 
 from .alphabet import encode_base
 from .graph import DELETION, INSERTION, MATCH, cigar_runs
+from .kernel import LEFT, RIGHT
 
 
 comptime BAND = 32
@@ -63,6 +64,13 @@ struct _Paths(Movable):
     var leave: List[Int32]
     var discord: List[Int32]
     """Per consensus boundary i: how many sequences insert before letter i, or delete or substitute it."""
+    var cover: List[Int32]
+    """Per consensus boundary i: how many sequences' alignments span it (a read anchored at one end spans a part)."""
+    var span_start: List[Int]
+    var span_end: List[Int]
+    """Per sequence: the consensus boundaries its alignment spans, span_start ..= span_end."""
+    var spanned: Int
+    """The consensus letters the sequences' alignments span, summed."""
     var total: Int
     var stride: Int
     var matched: Int
@@ -77,6 +85,10 @@ struct _Paths(Movable):
         self.enter = List[Int32]()
         self.leave = List[Int32]()
         self.discord = List[Int32]()
+        self.cover = List[Int32]()
+        self.span_start = List[Int]()
+        self.span_end = List[Int]()
+        self.spanned = 0
         self.total = 0
         self.stride = 0
         self.matched = 0
@@ -86,16 +98,29 @@ struct _Paths(Movable):
         self.copying = 0
 
     def fill(
-        mut self, mut aligner: Aligner, consensus: List[UInt8], sequences: List[List[UInt8]], members: List[Int]
+        mut self,
+        mut aligner: Aligner,
+        consensus: List[UInt8],
+        sequences: List[List[UInt8]],
+        members: List[Int],
+        anchors: List[Int],
     ) raises:
+        """Every member aligned to the consensus: whole (`anchors` empty, or `BOTH`), or, a read anchored at one end,
+        against a prefix (`LEFT`) or a suffix (`RIGHT`) of it. A path outside its alignment's span stays at its
+        read's start before it and its end after it."""
         var length = len(consensus)
         self.stride = length + 1
         var count = len(members)
         self.enter.resize(count * self.stride, 0)
         self.leave.resize(count * self.stride, 0)
         self.discord.resize(self.stride, 0)
+        self.cover.resize(self.stride, 0)
+        self.span_start.resize(count, 0)
+        self.span_end.resize(count, 0)
+        self.spanned = 0
         for i in range(self.stride):
             self.discord[i] = 0
+            self.cover[i] = 0
         self.total = 0
         self.matched = 0
         self.substituted = 0
@@ -104,13 +129,26 @@ struct _Paths(Movable):
         self.copying = 0
         for k in range(count):
             ref seq = sequences[members[k]]
-            var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), Mode.GLOBAL, ties=Ties.LEFT)
+            var anchor = anchors[members[k]] if len(anchors) > 0 else 0
+            var mode = Mode.GLOBAL
+            # A read anchored at one end inside a prefix (a suffix) of the consensus; one reaching past its end
+            # (start), the consensus inside the read's prefix (suffix), the rest of the read free.
+            if anchor == LEFT:
+                mode = Mode.ends_free(query_end=len(seq)) if len(seq) > length else Mode.PREFIX
+            elif anchor == RIGHT:
+                mode = Mode.ends_free(query_start=len(seq)) if len(seq) > length else Mode.SUFFIX
+            var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), mode, ties=Ties.LEFT)
             self.total += found.cost
             var runs = cigar_runs(found.cigar)
             var base = k * self.stride
-            var i = 0
-            var j = 0
-            self.enter[base] = 0
+            var i = found.reference_start
+            var j = found.query_start
+            self.span_start[k] = i
+            self.span_end[k] = found.reference_end
+            self.spanned += found.reference_end - found.reference_start
+            for b in range(i + 1):
+                self.enter[base + b] = Int32(j)
+                self.leave[base + b] = Int32(j)
             for r in range(len(runs.ops)):
                 var op = runs.ops[r]
                 if op == INSERTION:
@@ -135,7 +173,12 @@ struct _Paths(Movable):
                         j += 1
                     i += 1
                     self.enter[base + i] = Int32(j)
-            self.leave[base + length] = Int32(j)
+            self.leave[base + i] = Int32(j)
+            for b in range(i + 1, self.stride):
+                self.enter[base + b] = Int32(j)
+                self.leave[base + b] = Int32(j)
+            for b in range(self.span_start[k], i + 1):
+                self.cover[b] += 1
 
 
 struct _Bands(Movable):
@@ -277,8 +320,11 @@ def polish(
     support: Int = 2,
     share: Float64 = 0.5,
     likely_rounds: Int = 20,
+    anchors: List[Int] = List[Int](),
 ) raises -> List[UInt8]:
-    """`consensus` polished against the `members` of `sequences`, for at most `rounds` rounds of edits scored by
+    """`consensus` polished against the `members` of `sequences` (each aligned whole, or, with `anchors` per
+    sequence, a read anchored at one end against a prefix or a suffix of it), for at most `rounds` rounds of edits
+    scored by
     edit distance, then at most `likely_rounds` scored by likelihood (see `_likely`): edits are tried at positions
     where, within two letters, `support` sequences disagree with it and as many as `share` of them (the reads' own
     errors alone rarely reach half: on real VNTR read sets, 0 to 0.7 mended the same errors)."""
@@ -308,7 +354,7 @@ def polish(
     var one_each = False
     comptime LETTERS = "ACGT"
     for _ in range(rounds):
-        paths.fill(aligner, current, sequences, members)
+        paths.fill(aligner, current, sequences, members, anchors)
         if paths.total >= previous_total:
             # The last round's edits together cost more than they saved: back to before them, one a segment.
             current = previous^
@@ -320,19 +366,8 @@ def polish(
             continue
         previous_total = paths.total
         var length = len(current)
-        var stride = length + 1
-        # Positions where enough sequences disagree, within two letters.
-        site.resize(stride, False)
-        var needed = max(support, Int(Float64(count) * share + 0.999))
-        var near = 0
-        for i in range(min(2, stride)):
-            near += Int(paths.discord[i])
-        for i in range(stride):
-            if i + 2 < stride:
-                near += Int(paths.discord[i + 2])
-            if i - 3 >= 0:
-                near -= Int(paths.discord[i - 3])
-            site[i] = near >= needed
+        # Positions where enough of the sequences there disagree, within two letters.
+        _sites(paths, support, share, site)
         var mask = RepeatMask(Span(current), REPEAT_K, REPEAT_DISTANCE)
         var bounds = _segments(current, paths.discord, mask)
         # The edits taken: letters start ..< end replaced by `edit_text`.
@@ -371,6 +406,10 @@ def polish(
             var columns = e - s + 1
             var c_last = columns - 1
             for k in range(count):
+                # A read anchored at one end votes only in the segments its alignment spans whole: past its end
+                # every consensus letter would cost it, and it would vote them deleted.
+                if paths.span_start[k] > s or paths.span_end[k] < e:
+                    continue
                 ref seq = sequences[members[k]]
                 var kb = k * paths.stride
                 var first = Int(paths.enter[kb + s])
@@ -555,7 +594,7 @@ def polish(
         for m in marks:
             for q in range(max(0, m - 2 * SEGMENT), min(len(current) + 1, m + 2 * SEGMENT)):
                 dirty[q] = True
-    return _likely(current^, sequences, members, likely_rounds, support, share)
+    return _likely(current^, sequences, members, likely_rounds, support, share, anchors)
 
 
 comptime MAX_COPYING = 0.7
@@ -571,11 +610,11 @@ def _log(x: Float64) -> Float64:
     return log(x) if x > 0 else -1e300
 
 
-def _sites(paths: _Paths, count: Int, support: Int, share: Float64, mut site: List[Bool]):
-    """Per consensus boundary: whether, within two letters, `support` sequences disagree and `share` of them."""
+def _sites(paths: _Paths, support: Int, share: Float64, mut site: List[Bool]):
+    """Per consensus boundary: whether, within two letters, `support` sequences disagree and `share` of those whose
+    alignments span it."""
     var stride = paths.stride
     site.resize(stride, False)
-    var needed = max(support, Int(Float64(count) * share + 0.999))
     var near = 0
     for i in range(min(2, stride)):
         near += Int(paths.discord[i])
@@ -584,7 +623,7 @@ def _sites(paths: _Paths, count: Int, support: Int, share: Float64, mut site: Li
             near += Int(paths.discord[i + 2])
         if i - 3 >= 0:
             near -= Int(paths.discord[i - 3])
-        site[i] = near >= needed
+        site[i] = near >= max(support, Int(Float64(paths.cover[i]) * share + 0.999))
 
 
 def _likely(
@@ -594,6 +633,7 @@ def _likely(
     rounds: Int,
     support: Int,
     share: Float64,
+    anchors: List[Int],
 ) raises -> List[UInt8]:
     """The edits of `polish`, scored by the sequences' summed log-likelihood instead of their edit distance.
 
@@ -628,22 +668,22 @@ def _likely(
     var dirty = List[Bool](length=len(current) + 1, fill=True)
     comptime LETTERS = "ACGT"
     for _ in range(rounds):
-        paths.fill(aligner, current, sequences, members)
+        paths.fill(aligner, current, sequences, members, anchors)
         if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
             break
         var length = len(current)
         # The model's rates, each kept within [1e-4, 0.3].
-        var letters = Float64(max(1, length * count))
+        var letters = Float64(max(1, paths.spanned))
         var pd = min(0.3, max(1e-4, Float64(paths.deleted) / letters))
         var ps = min(0.3, max(1e-4, Float64(paths.substituted) / Float64(max(1, paths.matched + paths.substituted))))
-        var per_slot = Float64(paths.inserted) / Float64((length + 1) * count)
+        var per_slot = Float64(paths.inserted) / Float64(max(1, paths.spanned + count))
         var pi = min(0.3, max(1e-4, per_slot / (1.0 + per_slot)))
         var stay = pi / 4.0
         var leave = 1.0 - pi
         var kept = 1.0 - pd
         var right = 1.0 - ps
         var wrong = ps / 3.0
-        _sites(paths, count, support, share, site)
+        _sites(paths, support, share, site)
         var mask = RepeatMask(Span(current), REPEAT_K, REPEAT_DISTANCE)
         var bounds = _segments(current, paths.discord, mask)
         var edit_start = List[Int]()
@@ -682,6 +722,8 @@ def _likely(
             forward_scale.resize(columns, 0.0)
             backward_scale.resize(columns, 0.0)
             for k in range(count):
+                if paths.span_start[k] > s or paths.span_end[k] < e:
+                    continue
                 ref seq = sequences[members[k]]
                 var kb = k * paths.stride
                 var first = Int(paths.enter[kb + s])

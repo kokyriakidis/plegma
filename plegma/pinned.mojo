@@ -5,7 +5,7 @@ whole graph times the sequence; where the chain finds no pins, the one window is
 
 from .alphabet import encode_base
 from .graph import Graph
-from .kernel import GLOBAL, SINK, SOURCE, GraphAlignment, Scoring, Topology, Workspace
+from .kernel import GLOBAL, PREFIX, SINK, SOURCE, SUFFIX, GraphAlignment, Scoring, Topology, Workspace
 from .pins import Pins, pins
 
 
@@ -156,10 +156,13 @@ def align_pinned(
     mut row_of: List[Int],
     mut scratch: WindowScratch,
     mut workspace: Workspace,
+    mode: Int = GLOBAL,
 ) raises -> GraphAlignment:
-    """`query` aligned globally to the graph through the pins of its alignment to the consensus path (the heaviest
-    bundle): a pin whose letters agree anchors that query letter to its path node, and between consecutive anchors
-    the kernel aligns the query's letters to the nodes between their nodes. `row_of` holds a slot per node."""
+    """`query` aligned to the graph through the pins of its alignment to the consensus path (the heaviest bundle): a
+    pin whose letters agree anchors that query letter to its path node, and between consecutive anchors the kernel
+    aligns the query's letters to the nodes between their nodes. `mode` (`GLOBAL`, `PREFIX` or `SUFFIX`) is the
+    alignment's as a whole: the first window starts as it does, the last ends as it does, those between are global.
+    `row_of` holds a slot per node."""
     var path = graph.heaviest_path(topology.order)
     var letters = List[UInt8](capacity=len(path))
     for node in path:
@@ -198,8 +201,13 @@ def align_pinned(
             # No nodes between the anchors: the query's letters there are inserted.
             if len(nodes) > 0:
                 var window = Span(query)[q0 + 1 : q1]
+                var window_mode = GLOBAL
+                if mode == SUFFIX and r0 < 0:
+                    window_mode = SUFFIX
+                elif mode == PREFIX and r1 >= len(path):
+                    window_mode = PREFIX
                 var got = workspace.align(
-                    graph, topology, nodes, left, right, window, scoring, row_of, GLOBAL, window_b, 0.0
+                    graph, topology, nodes, left, right, window, scoring, row_of, window_mode, window_b, 0.0
                 )
                 for j in range(len(got.nodes)):
                     aligned[q0 + 1 + j] = got.nodes[j]

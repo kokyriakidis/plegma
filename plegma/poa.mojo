@@ -1,0 +1,405 @@
+"""Partial order alignment of a set of reads, as `plegma poa` runs it, reads anchored at both ends or at one.
+
+A local assembly between two anchors has reads of three kinds: reads that span both anchors (`BOTH`), and reads
+fixed at one anchor only, the left (`LEFT`, starting at the left anchor and ending inside the gap) or the right
+(`RIGHT`). The spanning reads build the graph first (each pinned to the consensus so far and aligned between the
+pins, `pinned.align_pinned`, or to the whole graph); then the left reads, each aligned from the graph's start to any
+node (`kernel.PREFIX`: whatever passes a sink is new sequence the graph grows by), and the right reads, from any node
+to the graph's end (`kernel.SUFFIX`). Their consensus runs from the spanning reads' start to their end, every read
+weighing the edges (`Graph.heaviest_path_spanning`).
+
+With no spanning read each side is assembled on its own: the left reads into a graph of their own, the longest
+first, its consensus followed from the left anchor while most reads go on (`Graph.heaviest_path`); the right reads
+likewise from the right anchor backwards (`Graph.heaviest_path_backward`). With both sides the two consensus
+sequences are joined where they overlap, at a pin of minimap2's chain between them (or, without one, a short
+overlap karan finds between their ends); the graph is then rebuilt on the joined sequence, every read aligned to it
+as anchored. With one side only (a telomere) its consensus is the assembly, one-directional. Memory follows the
+adaptive band in every mode: the reads' length times the band, not times each other.
+"""
+
+from karan import Aligner, Costs, Mode
+
+from .graph import Graph
+from .kernel import (
+    BOTH,
+    GLOBAL,
+    LEFT,
+    PREFIX,
+    RIGHT,
+    SINK,
+    SOURCE,
+    SUFFIX,
+    GraphAlignment,
+    Scoring,
+    Topology,
+    Workspace,
+)
+from .order import guide_order
+from .pinned import WindowScratch, align_pinned
+from .pins import pins
+
+
+comptime INPUT_ORDER = 0
+comptime GUIDE_ORDER = 1
+comptime LONGEST_FIRST = 2
+
+comptime JOIN_ENDS = 2000
+"""Without pins between the two sides' consensus sequences, their last and first this many letters are aligned for an
+overlap."""
+comptime JOIN_LEAST = 30
+"""The fewest letters such an overlap aligns."""
+
+
+struct PoaOptions(Copyable, Movable):
+    """How `poa` aligns: the kernel's `mode` (`GLOBAL`, or abPOA's `LOCAL` and `EXTENSION` for spanning reads),
+    its `scoring` and band, the spanning reads' `order`, whether each read is pinned to the consensus (`seeded`) and
+    whether a read scoring poorly is tried reverse-complemented (`strand`, spanning reads only)."""
+
+    var mode: Int
+    var scoring: Scoring
+    var band_b: Int
+    var band_f: Float64
+    var order: Int
+    var seeded: Bool
+    var strand: Bool
+    var min_cover: Int
+    """A one-directional assembly (reads fixed at one anchor, none spanning) stops where fewer reads go on."""
+
+    def __init__(out self):
+        self.mode = GLOBAL
+        self.scoring = Scoring()
+        self.band_b = 10
+        self.band_f = 0.01
+        self.order = GUIDE_ORDER
+        self.seeded = True
+        self.strand = False
+        self.min_cover = 3
+
+
+struct Poa(Movable):
+    """What `poa` made: the graph; `shown`, the paths to output (a starting MSA's rows, then every read's, in input
+    order); `spanning`, the reads (input indices) a consensus of all of them may be polished against; and, when any
+    read is anchored at one end, `consensus` (one sequence, or the two sides' when they could not be joined),
+    otherwise empty: the caller takes the graph's own."""
+
+    var graph: Graph
+    var shown: List[Int]
+    var spanning: List[Int]
+    var consensus: List[List[UInt8]]
+
+    def __init__(out self, var graph: Graph, var shown: List[Int], var spanning: List[Int]):
+        self.graph = graph^
+        self.shown = shown^
+        self.spanning = spanning^
+        self.consensus = List[List[UInt8]]()
+
+    def parts(
+        deinit self,
+        mut graph: Graph,
+        mut shown: List[Int],
+        mut spanning: List[Int],
+        mut consensus: List[List[UInt8]],
+    ):
+        """The graph, `shown`, `spanning` and `consensus`, taken apart into those."""
+        graph = self.graph^
+        shown = self.shown^
+        spanning = self.spanning^
+        consensus = self.consensus^
+
+
+struct _Aligner(Movable):
+    """One read at a time into a graph: the scratch the kernel and the pinned windows reuse."""
+
+    var row_of: List[Int]
+    var scratch: WindowScratch
+    var workspace: Workspace
+
+    def __init__(out self):
+        self.row_of = List[Int]()
+        self.scratch = WindowScratch()
+        self.workspace = Workspace()
+
+    def align(mut self, graph: Graph, seq: List[UInt8], options: PoaOptions, mode: Int) raises -> GraphAlignment:
+        """`seq` aligned to `graph` in `mode` (`options.mode` for a spanning read; `PREFIX` or `SUFFIX`)."""
+        var topology = Topology(graph)
+        self.row_of.resize(len(graph), -1)
+        if options.seeded and (mode == GLOBAL or mode == PREFIX or mode == SUFFIX):
+            return align_pinned(
+                graph,
+                topology,
+                seq,
+                options.scoring,
+                options.band_b,
+                options.band_f,
+                self.row_of,
+                self.scratch,
+                self.workspace,
+                mode,
+            )
+        return self.workspace.align(
+            graph,
+            topology,
+            topology.order,
+            SOURCE,
+            SINK,
+            Span(seq),
+            options.scoring,
+            self.row_of,
+            mode,
+            options.band_b,
+            options.band_f,
+        )
+
+
+def poa(
+    mut names: List[String],
+    mut seqs: List[List[UInt8]],
+    anchors: List[Int],
+    options: PoaOptions,
+    var start: Graph,
+) raises -> Poa:
+    """The POA of `seqs` (`names` theirs), each anchored as `anchors` says (`BOTH`, `LEFT` or `RIGHT`), into
+    `start` (a graph made from an existing MSA, or empty). With `options.strand` a spanning read that scores poorly
+    may be reverse-complemented (it and its name then change in `seqs` and `names`)."""
+    var spanning = List[Int]()
+    var left = List[Int]()
+    var right = List[Int]()
+    for r in range(len(seqs)):
+        if anchors[r] == LEFT:
+            left.append(r)
+        elif anchors[r] == RIGHT:
+            right.append(r)
+        else:
+            spanning.append(r)
+    var shown = List[Int]()
+    var starting = len(start.paths)
+    for p in range(starting):
+        shown.append(p)
+    var path_of = List[Int](length=len(seqs), fill=-1)
+    var aligner = _Aligner()
+    var graph = start^
+    if len(spanning) > 0 or len(graph.paths) > 0:
+        _add_spanning(graph, names, seqs, _ordered(seqs, spanning, options.order), options, path_of, aligner)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, right), options, SUFFIX, path_of, aligner)
+        for r in range(len(seqs)):
+            shown.append(path_of[r])
+        var out = Poa(graph^, shown^, spanning^)
+        if len(left) + len(right) > 0:
+            # The starting MSA's rows and the spanning reads end the consensus.
+            var members = List[Int]()
+            for p in range(starting):
+                members.append(p)
+            for r in out.spanning:
+                members.append(path_of[r])
+            out.consensus.append(
+                _letters(out.graph, out.graph.heaviest_path_spanning(Topology(out.graph).order, members))
+            )
+        return out^
+    # No read spans both anchors: each side on its own, then joined.
+    var parts = List[List[UInt8]]()
+    if len(left) > 0:
+        var side = _one_side(names, seqs, left, options, PREFIX)
+        parts.append(_letters(side[0], side[0].heaviest_path(Topology(side[0]).order, side[1])))
+    if len(right) > 0:
+        var side = _one_side(names, seqs, right, options, SUFFIX)
+        parts.append(_letters(side[0], side[0].heaviest_path_backward(Topology(side[0]).order, side[1])))
+    if len(parts) == 2:
+        var joined = _join(parts[0], parts[1])
+        if len(joined) > 0:
+            parts.clear()
+            parts.append(joined^)
+    elif len(left) > 0:
+        _trim(parts[0], seqs, left, options.min_cover, True)
+    else:
+        _trim(parts[0], seqs, right, options.min_cover, False)
+    # The graph every read is aligned into: on the joined sequence, or on the one side's.
+    _ = graph.add("plegma_backbone", Span(parts[0]))
+    if len(parts) == 1:
+        _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, right), options, SUFFIX, path_of, aligner)
+    else:
+        # Not joined: the left reads on the left side's sequence; the right reads beside it, on their own.
+        _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
+        var order = _longest_first(seqs, right)
+        if len(order) > 0:
+            path_of[order[0]] = graph.add(names[order[0]], Span(seqs[order[0]]))
+            for k in range(1, len(order)):
+                var r = order[k]
+                var found = aligner.align(graph, seqs[r], options, SUFFIX)
+                path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+    for r in range(len(seqs)):
+        shown.append(path_of[r])
+    var out = Poa(graph^, shown^, spanning^)
+    out.consensus = parts^
+    return out^
+
+
+def _add_spanning(
+    mut graph: Graph,
+    mut names: List[String],
+    mut seqs: List[List[UInt8]],
+    order: List[Int],
+    options: PoaOptions,
+    mut path_of: List[Int],
+    mut aligner: _Aligner,
+) raises:
+    """The spanning reads in `order`, each aligned to the whole graph (or between pins) and fused into it."""
+    for r in order:
+        if len(graph) == 0:
+            path_of[r] = graph.add(names[r], Span(seqs[r]))
+            continue
+        var found = aligner.align(graph, seqs[r], options, options.mode)
+        if options.strand:
+            # abPOA's rule: a score under a third of the best a match run of the shorter length could earn.
+            var floor = Int(options.scoring.match_score) * min(len(seqs[r]), len(graph.paths[0])) // 3
+            if found.score < floor:
+                var flipped = _reverse_complement(seqs[r])
+                var other = aligner.align(graph, flipped, options, options.mode)
+                if other.score > found.score:
+                    seqs[r] = flipped^
+                    found = other^
+                    names[r] += "_reverse_complement"
+        path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+
+
+def _add_anchored(
+    mut graph: Graph,
+    names: List[String],
+    seqs: List[List[UInt8]],
+    order: List[Int],
+    options: PoaOptions,
+    mode: Int,
+    mut path_of: List[Int],
+    mut aligner: _Aligner,
+) raises:
+    """The reads in `order`, anchored at one end (`mode` `PREFIX` for the left, `SUFFIX` for the right), each
+    aligned and fused into the graph; letters past the graph's end (or before its start) join it as new nodes."""
+    for r in order:
+        var found = aligner.align(graph, seqs[r], options, mode)
+        path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+
+
+def _one_side(
+    names: List[String], seqs: List[List[UInt8]], reads: List[Int], options: PoaOptions, mode: Int
+) raises -> Tuple[Graph, List[Int]]:
+    """The graph of one side's reads alone: the longest first, the rest anchored as `mode` says; with its paths."""
+    var graph = Graph()
+    var order = _longest_first(seqs, reads)
+    var paths = List[Int]()
+    var aligner = _Aligner()
+    for k in range(len(order)):
+        var r = order[k]
+        if k == 0:
+            paths.append(graph.add(names[r], Span(seqs[r])))
+            continue
+        var found = aligner.align(graph, seqs[r], options, mode)
+        paths.append(graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes))
+    return (graph^, paths^)
+
+
+def _trim(mut consensus: List[UInt8], seqs: List[List[UInt8]], reads: List[Int], least: Int, from_left: Bool):
+    """A one-directional consensus cut where fewer than `least` reads go on: from the left anchor (`from_left`) past
+    the `least`-th longest read's end, else before its start from the right anchor. The reads' lengths stand for their
+    reach, as they all start (or end) at the anchor."""
+    if least <= 1 or len(reads) < least:
+        return
+    var lengths = List[Int]()
+    for r in reads:
+        lengths.append(len(seqs[r]))
+    sort(lengths)
+    var reach = lengths[len(lengths) - least]
+    if reach >= len(consensus):
+        return
+    if from_left:
+        consensus.resize(reach, 0)
+    else:
+        var kept = List[UInt8](capacity=reach)
+        for i in range(len(consensus) - reach, len(consensus)):
+            kept.append(consensus[i])
+        consensus = kept^
+
+
+def _join(left: List[UInt8], right: List[UInt8]) raises -> List[UInt8]:
+    """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end:
+    at the middle pin of minimap2's chain between them, or else by an overlap karan finds between `left`'s last
+    and `right`'s first `JOIN_ENDS` letters; empty when they do not overlap."""
+    var found = pins(left, right)
+    if len(found.r) > 0:
+        var m = len(found.r) // 2
+        var out = List[UInt8](capacity=found.r[m] + len(right) - found.q[m])
+        for i in range(found.r[m]):
+            out.append(left[i])
+        for j in range(found.q[m], len(right)):
+            out.append(right[j])
+        return out^
+    var a_start = max(0, len(left) - JOIN_ENDS)
+    var a = List[UInt8](capacity=len(left) - a_start)
+    for i in range(a_start, len(left)):
+        a.append(left[i])
+    var b = List[UInt8](capacity=min(len(right), JOIN_ENDS))
+    for j in range(min(len(right), JOIN_ENDS)):
+        b.append(right[j])
+    var mode = Mode.ends_free(reference_start=len(a), query_end=len(b)).with_match_score(1)
+    var aligner = Aligner()
+    var got = aligner.align(Span(a), Span(b), Costs.edit(), mode)
+    if got.reference_end != len(a) or got.query_start != 0 or got.query_end < JOIN_LEAST or got.score < JOIN_LEAST // 2:
+        return List[UInt8]()
+    var out = List[UInt8](capacity=len(left) + len(right) - got.query_end)
+    for i in range(len(left)):
+        out.append(left[i])
+    for j in range(got.query_end, len(right)):
+        out.append(right[j])
+    return out^
+
+
+def _ordered(seqs: List[List[UInt8]], reads: List[Int], order: Int) raises -> List[Int]:
+    """`reads` in input order, abPOA's guide order or longest first."""
+    if order == GUIDE_ORDER and len(reads) > 1:
+        var subset = List[List[UInt8]]()
+        for r in reads:
+            subset.append(seqs[r].copy())
+        var out = List[Int]()
+        for k in guide_order(subset):
+            out.append(reads[k])
+        return out^
+    if order == LONGEST_FIRST:
+        return _longest_first(seqs, reads)
+    return reads.copy()
+
+
+def _longest_first(seqs: List[List[UInt8]], reads: List[Int]) -> List[Int]:
+    """`reads` longest first, input order among equals."""
+    var keys = List[UInt64]()
+    for r in reads:
+        keys.append((UInt64((1 << 32) - len(seqs[r])) << 32) | UInt64(r))
+    sort(keys)
+    var out = List[Int](capacity=len(keys))
+    for key in keys:
+        out.append(Int(key & 0xFFFFFFFF))
+    return out^
+
+
+def _letters(graph: Graph, path: List[Int]) -> List[UInt8]:
+    var out = List[UInt8](capacity=len(path))
+    for node in path:
+        out.append(graph.bases[node])
+    return out^
+
+
+def _reverse_complement(seq: List[UInt8]) -> List[UInt8]:
+    var out = List[UInt8](capacity=len(seq))
+    for i in reversed(range(len(seq))):
+        var c = seq[i]
+        var lower = c | 0x20
+        if lower == UInt8(ord("a")):
+            out.append(UInt8(ord("T")))
+        elif lower == UInt8(ord("c")):
+            out.append(UInt8(ord("G")))
+        elif lower == UInt8(ord("g")):
+            out.append(UInt8(ord("C")))
+        elif lower == UInt8(ord("t")) or lower == UInt8(ord("u")):
+            out.append(UInt8(ord("A")))
+        else:
+            out.append(c)
+    return out^

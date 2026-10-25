@@ -3,7 +3,19 @@ from std.testing import assert_equal, assert_true, TestSuite
 from karan import Costs, distance
 
 from plegma.graph import Graph
-from plegma.kernel import EXTENSION, GLOBAL, LOCAL, SINK, SOURCE, Scoring, Topology, Workspace, align_to_graph
+from plegma.kernel import (
+    EXTENSION,
+    GLOBAL,
+    LOCAL,
+    PREFIX,
+    SINK,
+    SOURCE,
+    SUFFIX,
+    Scoring,
+    Topology,
+    Workspace,
+    align_to_graph,
+)
 
 
 def _random(n: Int, seed: Int) -> String:
@@ -184,6 +196,41 @@ def test_a_long_deletion_reaches_the_end() raises:
     var found = align_to_graph(graph, topology, query.as_bytes(), Scoring(), GLOBAL, -1)
     assert_equal(len(found.nodes), 400)
     assert_equal(found.score, _score_from_cost(path, query, Scoring()))
+
+
+def test_prefix_and_suffix_modes_place_partial_reads() raises:
+    """A read fixed at the graph's start ends anywhere, its letters past a sink inserted (an overhang); one fixed at
+    the end starts anywhere, its letters before a source inserted."""
+    var path = _random(3000, 47)
+    var graph = Graph()
+    _ = graph.add("path", path.as_bytes())
+    var topology = Topology(graph)
+    var bytes = path.as_bytes()
+    # An exact prefix: letter j on node j.
+    var head = List[UInt8](bytes[0:1200])
+    var found = align_to_graph(graph, topology, Span(head), Scoring(), PREFIX)
+    for j in range(len(head)):
+        assert_equal(found.nodes[j], j)
+    # Past the end: the path's letters on its nodes, the overhang inserted.
+    var long = List[UInt8](bytes[0:3000])
+    long.extend(List[UInt8](_random(200, 53).as_bytes()))
+    found = align_to_graph(graph, topology, Span(long), Scoring(), PREFIX)
+    for j in range(3000):
+        assert_equal(found.nodes[j], j)
+    for j in range(3000, 3200):
+        assert_equal(found.nodes[j], -1)
+    # An exact suffix: letter j on node 1800 + j; before the start, an overhang inserted.
+    var tail = List[UInt8](bytes[1800:3000])
+    found = align_to_graph(graph, topology, Span(tail), Scoring(), SUFFIX)
+    for j in range(len(tail)):
+        assert_equal(found.nodes[j], 1800 + j)
+    var early = List[UInt8](_random(150, 59).as_bytes())
+    early.extend(List[UInt8](bytes[0:3000]))
+    found = align_to_graph(graph, topology, Span(early), Scoring(), SUFFIX)
+    for j in range(150):
+        assert_equal(found.nodes[j], -1)
+    for j in range(3000):
+        assert_equal(found.nodes[150 + j], j)
 
 
 def main() raises:

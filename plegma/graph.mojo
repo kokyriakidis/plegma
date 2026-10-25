@@ -272,6 +272,66 @@ struct Graph(Movable, Sized):
                 weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
         return self._bundle(order, starts, ends, weight)
 
+    def heaviest_path_spanning(self, order: List[Int], spanning: List[Int]) -> List[Int]:
+        """`heaviest_path` from where the paths `spanning` start to where they end, every path weighing the edges:
+        the reads anchored at one end only add their votes inside without ending the consensus where they stop."""
+        var count = len(self.bases)
+        var starts = List[Int](length=count, fill=0)
+        var ends = List[Int](length=count, fill=0)
+        for p in spanning:
+            ref path = self.paths[p]
+            if len(path) > 0:
+                starts[Int(path[0])] += 1
+                ends[Int(path[len(path) - 1])] += 1
+        return self._bundle(order, starts, ends, self.edge_weight)
+
+    def heaviest_path_backward(self, order: List[Int], members: List[Int]) -> List[Int]:
+        """`heaviest_path` over the paths `members` walked from the end: from a virtual sink to a virtual source,
+        each node preceded by its heaviest in-edge, the source's edge weighing the members that start there (so the
+        consensus starts where most of them do). For reads anchored at the graph's end alone."""
+        var count = len(self.bases)
+        var starts = List[Int](length=count, fill=0)
+        var ends = List[Int](length=count, fill=0)
+        var weight = List[Int32](length=len(self.edge_to), fill=0)
+        for p in members:
+            ref path = self.paths[p]
+            if len(path) == 0:
+                continue
+            starts[Int(path[0])] += 1
+            ends[Int(path[len(path) - 1])] += 1
+            for k in range(len(path) - 1):
+                weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
+        var score = List[Int](length=count, fill=0)
+        var before = List[Int](length=count, fill=-1)
+        for node in order:
+            var best_weight = starts[node] if starts[node] > 0 else -1
+            var best_score = 0
+            var choice = -1
+            var e = Int(self.first_in[node])
+            while e >= 0:
+                var p = Int(self.edge_from[e])
+                var w = Int(weight[e])
+                if w > 0 and (w > best_weight or (w == best_weight and score[p] >= best_score)):
+                    best_weight = w
+                    best_score = score[p]
+                    choice = p
+                e = Int(self.next_in[e])
+            before[node] = choice
+            score[node] = max(best_weight, 0) + (score[choice] if choice >= 0 else 0)
+        var at = -1
+        for k in reversed(range(len(order))):
+            var node = order[k]
+            if ends[node] > 0 and (
+                at < 0 or ends[node] > ends[at] or (ends[node] == ends[at] and score[node] > score[at])
+            ):
+                at = node
+        var path = List[Int]()
+        while at >= 0:
+            path.append(at)
+            at = before[at]
+        path.reverse()
+        return path^
+
     def _bundle(self, order: List[Int], starts: List[Int], ends: List[Int], weight: List[Int32]) -> List[Int]:
         var count = len(self.bases)
         var score = List[Int](length=count, fill=0)
