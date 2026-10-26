@@ -67,6 +67,14 @@ def _neg[dt: DType]() -> Scalar[dt]:
         return Scalar[dt](-(1 << 29))
 
 
+comptime REBASE = 1024
+"""A row of 16-bit scores moves to a base of its own when its best passes this, up or down."""
+comptime REBASED_SPAN = 1025
+"""The widest row 16-bit lanes take with bases (a band of 512 a side): a reachable cell then stays a few thousand
+from its row's best, far from the floor (insertions along the row cost some 2 a letter, deletions across the band
+some 3 a row)."""
+
+
 @inline(.always)
 def _banded(mode: Int) -> Bool:
     """Whether `mode` runs in the adaptive band: those that use every query letter."""
@@ -244,6 +252,10 @@ struct Workspace(Movable):
     var pred_at: List[Int]
     var preds: List[Int]
     var keys: List[UInt64]
+    var base_of: List[Int]
+    """Per row, the score its stored scores are relative to (16-bit lanes; 0 in 32-bit ones)."""
+    var shifted: List[UInt8]
+    """A predecessor row's scores moved to this row's base, when the two differ."""
 
     def __init__(out self):
         self.profile = List[UInt8]()
@@ -264,6 +276,8 @@ struct Workspace(Movable):
         self.pred_at = List[Int]()
         self.preds = List[Int]()
         self.keys = List[UInt64]()
+        self.base_of = List[Int]()
+        self.shifted = List[UInt8]()
 
     def align(
         mut self,
@@ -285,11 +299,16 @@ struct Workspace(Movable):
         as many a vector) when every score the alignment can reach fits them (on shasta2's local assemblies the
         same alignments as 32-bit lanes and 2% faster, narrow rows too)."""
         var m = len(query)
-        var reach = band_b + Int(band_f * Float64(m)) if band_b >= 0 and _banded(mode) else m + 1
-        if _fits_16_bits(scoring, m, len(nodes)):
-            return self._align[DType.int16](
-                graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f
+        var banded = band_b >= 0 and _banded(mode)
+        var reach = band_b + Int(band_f * Float64(m)) if banded else m + 1
+        # 16-bit lanes when every score fits them, or, banded, when the band is narrow enough that a row's scores
+        # kept relative to a base of its own fit them however long the alignment (`REBASED_SPAN`).
+        if _fits_16_bits(scoring, m, len(nodes)) or (banded and 2 * reach + 1 <= REBASED_SPAN):
+            var got = self._align[DType.int16](
+                graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, banded
             )
+            if got.cells >= 0:
+                return got^
         return self._align[DType.int32](
             graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f
         )
@@ -309,10 +328,14 @@ struct Workspace(Movable):
         mode: Int = GLOBAL,
         band_b: Int = 10,
         band_f: Float64 = 0.01,
+        rebase: Bool = False,
     ) raises -> GraphAlignment:
         """`align_to_graph` over `nodes` alone (in topological order): those strictly between node `left` and node
         `right` (`SOURCE` and `SINK` for the graph's ends), the alignment leaving `left` and, globally, reaching
-        `right`. `row_of` is scratch, as long as the graph, every entry -1, and left so."""
+        `right`. `row_of` is scratch, as long as the graph, every entry -1, and left so. With `rebase` (16-bit lanes,
+        banded) each row's scores are kept relative to a base of the row's (`base_of`), moved by the row's best
+        when that passes `REBASE`: the same moves as absolute scores, as no cell an alignment can take is near the
+        lanes' floor; a row wider than `REBASED_SPAN` gives up (`cells` -1) for 32-bit lanes."""
         comptime V = simd_width_of[dt]()
         comptime S = Scalar[dt]
         comptime Vec = SIMD[dt, V]
@@ -411,10 +434,16 @@ struct Workspace(Movable):
             first_row[unsafe_offset=V + j] = S(0) if local or free_start else max(S(-Int(scoring.gap(j))), NEG)
         self.trace.resize(self.hi[0] + 1, _SOURCE)
 
-        var best = S(0) if local else NEG
+        # The best end so far: its absolute score, and whether it is a cell some alignment reaches (above half the
+        # sentinel, as the row stores it). Reached ends beat unreached ones, then the higher score.
+        var best = 0 if local else Int(NEG)
+        var best_ok = local
         var best_row = 0
         var best_col = 0
         var cells = self.hi[0] + 1
+        var rebasing = rebase and dt == DType.int16
+        self.base_of.resize(n + 1, 0)
+        self.base_of[0] = 0
         for r in range(1, n + 1):
             var node = nodes[r - 1]
             self.choice_at[r] = -1
@@ -469,6 +498,15 @@ struct Workspace(Movable):
             self.hi[r] = high
             var span = high - low + 1
             cells += span
+            if rebasing and span > REBASED_SPAN:
+                # A row past what bases keep within 16 bits: the alignment again in 32-bit lanes.
+                for k in range(n):
+                    row_of[nodes[k]] = -1
+                return GraphAlignment(List[Int](), 0, -1, 0)
+            # The row's base: its predecessors' highest (a lower one's scores are moved to it as they are read).
+            var base_r = self.base_of[self.preds[0]]
+            for p in self.preds:
+                base_r = max(base_r, self.base_of[p])
 
             var slot: Int
             if len(self.free) > 0:
@@ -517,6 +555,14 @@ struct Workspace(Movable):
                         .unsafe_bitcast[S]()
                         .unsafe_origin_cast[MutUntrackedOrigin]()
                     )
+                    var delta = self.base_of[p] - base_r
+                    if delta != 0:
+                        self.shifted.resize(unsafe_uninit_length=BYTES * 3 * pstride)
+                        var moved = (
+                            self.shifted.unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
+                        )
+                        _moved[dt](prow, moved, 3 * pstride, S(delta))
+                        prow = moved
                     var ph = prow.unsafe_offset(V)
                     var pd1 = prow.unsafe_offset(pstride + V)
                     var pd2 = prow.unsafe_offset(2 * pstride + V)
@@ -652,9 +698,11 @@ struct Workspace(Movable):
                     h.unsafe_store(at, value)
                     source_of.unsafe_store(at, source | flags)
                     at += V
-            if free_start and low == 0 and h[unsafe_offset=0] < S(0):
+            # Score 0, absolute, in the row's frame.
+            var zero = S(max(Int(NEG), min(-base_r, 30000)))
+            if free_start and low == 0 and h[unsafe_offset=0] < zero:
                 # The alignment may start at this node: the graph before it skipped free.
-                h[unsafe_offset=0] = S(0)
+                h[unsafe_offset=0] = zero
                 source_of[unsafe_offset=0] = (source_of[unsafe_offset=0] & S(~7)) | S(_START)
             # One pass over the row: both gap pieces' insertion scores, then each cell's score, its traceback byte
             # and the row's best. Gaps along the query, left to right, from the scores so far (`h`, before
@@ -745,24 +793,36 @@ struct Workspace(Movable):
                     c[unsafe_offset=3 * at + 1] = UInt8(pick_d1[unsafe_offset=at])
                     c[unsafe_offset=3 * at + 2] = UInt8(pick_d2[unsafe_offset=at])
             if mode == LOCAL or mode == EXTENSION:
-                if row_best > best:
-                    best = row_best
+                if _beats(Int(row_best), base_r, best, best_ok, Int(NEG)):
+                    best = Int(row_best) + base_r
+                    best_ok = Int(row_best) >= Int(NEG) // 2
                     best_row = r
                     best_col = row_left
             elif mode == PREFIX:
                 # Every query letter used, at any node; at a sink, the letters left free.
-                if high == m and h[unsafe_offset=m - low] > best:
-                    best = h[unsafe_offset=m - low]
+                if high == m and _beats(Int(h[unsafe_offset=m - low]), base_r, best, best_ok, Int(NEG)):
+                    best = Int(h[unsafe_offset=m - low]) + base_r
+                    best_ok = Int(h[unsafe_offset=m - low]) >= Int(NEG) // 2
                     best_row = r
                     best_col = m
-                if ends_here and row_best > best:
-                    best = row_best
+                if ends_here and _beats(Int(row_best), base_r, best, best_ok, Int(NEG)):
+                    best = Int(row_best) + base_r
+                    best_ok = Int(row_best) >= Int(NEG) // 2
                     best_row = r
                     best_col = row_right
-            elif ends_here and high == m and h[unsafe_offset=m - low] > best:
-                best = h[unsafe_offset=m - low]
+            elif ends_here and high == m and _beats(Int(h[unsafe_offset=m - low]), base_r, best, best_ok, Int(NEG)):
+                best = Int(h[unsafe_offset=m - low]) + base_r
+                best_ok = Int(h[unsafe_offset=m - low]) >= Int(NEG) // 2
                 best_row = r
                 best_col = m
+            # A row whose best has moved far from its base moves to a new one (its scores less that best).
+            var shift = 0
+            if rebasing and Int(row_best) >= Int(NEG) // 2 and (Int(row_best) > REBASE or Int(row_best) < -REBASE):
+                shift = Int(row_best)
+                _rebased[dt](h, span, S(shift))
+                _rebased[dt](d1, span, S(shift))
+                _rebased[dt](d2, span, S(shift))
+            self.base_of[r] = base_r + shift
             peak = max(peak, live_bytes + self.trace.capacity() + self.choices.capacity() + self.aux.capacity())
             # Rows no successor still needs give their memory back.
             for p in self.preds:
@@ -776,12 +836,18 @@ struct Workspace(Movable):
 
         if mode == GLOBAL or mode == SUFFIX:
             var start_row = self.pool[self.slot_of[0] if self.slot_of[0] >= 0 else 0].unsafe_ptr().unsafe_bitcast[S]()
-            if direct and self.slot_of[0] >= 0 and self.hi[0] == m and start_row[unsafe_offset=V + m] > best:
-                best = start_row[unsafe_offset=V + m]
+            if (
+                direct
+                and self.slot_of[0] >= 0
+                and self.hi[0] == m
+                and _beats(Int(start_row[unsafe_offset=V + m]), 0, best, best_ok, Int(NEG))
+            ):
+                best = Int(start_row[unsafe_offset=V + m])
+                best_ok = best >= Int(NEG) // 2
                 best_row = 0
                 best_col = m
             # Scores near the sentinel are cells nothing reaches.
-            if best < NEG // 2:
+            if not best_ok:
                 for r in range(n):
                     row_of[nodes[r]] = -1
                 if banded and w < width:
@@ -821,7 +887,7 @@ struct Workspace(Movable):
                     state = 0
         for k in range(n):
             row_of[nodes[k]] = -1
-        return GraphAlignment(aligned^, Int(best), cells, peak)
+        return GraphAlignment(aligned^, best, cells, peak)
 
 
 def align_between(
@@ -875,6 +941,54 @@ def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut r
     for key in keys:
         var p = Int(graph.edge_from[Int(key & 0xFFFFFFFF)])
         rows.append(0 if p == left else row_of[p])
+
+
+@inline(.always)
+def _beats(score: Int, base: Int, best: Int, best_ok: Bool, neg: Int) -> Bool:
+    """Whether a cell storing `score` in a row on `base` beats the best end so far: a reached cell (above half the
+    sentinel, `neg`) beats an unreached one, then the higher absolute score."""
+    var ok = score >= neg // 2
+    if ok != best_ok:
+        return ok
+    return score + base > best
+
+
+@inline(.always)
+def _moved[
+    dt: DType
+](source: MutPointer[Scalar[dt], _], into: MutPointer[Scalar[dt], _], count: Int, delta: Scalar[dt]):
+    """`count` scores from `source` into `into`, each plus `delta` (a lower base's to a higher one's: delta <= 0),
+    cells at the sentinel kept at it."""
+    comptime V = simd_width_of[dt]()
+    comptime Vec = SIMD[dt, V]
+    var neg = Vec(_neg[dt]())
+    var i = 0
+    while i + V <= count:
+        var v = source.unsafe_load[width=V](i)
+        into.unsafe_store(i, v.le(neg).select(neg, _floor(v + Vec(delta))))
+        i += V
+    while i < count:
+        var v = source[unsafe_offset=i]
+        into[unsafe_offset=i] = _neg[dt]() if v <= _neg[dt]() else _floor(v + delta)
+        i += 1
+
+
+@inline(.always)
+def _rebased[dt: DType](row: MutPointer[Scalar[dt], _], span: Int, shift: Scalar[dt]):
+    """Cells 0 ..< span of `row` less `shift` (the row moving to a base `shift` higher), cells at the sentinel kept
+    at it."""
+    comptime V = simd_width_of[dt]()
+    comptime Vec = SIMD[dt, V]
+    var neg = Vec(_neg[dt]())
+    var i = 0
+    while i + V <= span:
+        var v = row.unsafe_load[width=V](i)
+        row.unsafe_store(i, v.le(neg).select(neg, _floor(v - Vec(shift))))
+        i += V
+    while i < span:
+        var v = row[unsafe_offset=i]
+        row[unsafe_offset=i] = _neg[dt]() if v <= _neg[dt]() else _floor(v - shift)
+        i += 1
 
 
 @inline(.always)
