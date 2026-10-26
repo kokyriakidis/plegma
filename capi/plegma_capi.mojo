@@ -67,6 +67,22 @@ def _write_error(message: String, error: OptionalPointer[UInt8, MutUntrackedOrig
     out[unsafe_offset=n] = 0
 
 
+comptime _POLISH_ROUNDS = 0
+comptime _LIKELY_ROUNDS = 1
+comptime _PINNED = 2
+comptime _MIN_COVER = 3
+"""plegma_options' fields, int32 each, at these places."""
+
+
+@export
+def plegma_options_init(settings: Pointer[Int32, MutUntrackedOrigin]) abi("C"):
+    var defaults = ConsensusOptions()
+    settings[unsafe_offset=_POLISH_ROUNDS] = Int32(defaults.polish_rounds)
+    settings[unsafe_offset=_LIKELY_ROUNDS] = Int32(defaults.likely_rounds)
+    settings[unsafe_offset=_PINNED] = Int32(1) if defaults.poa.seeded else Int32(0)
+    settings[unsafe_offset=_MIN_COVER] = Int32(defaults.poa.min_cover)
+
+
 @export
 def plegma_model_load(
     path: Bytes, error: OptionalPointer[UInt8, MutUntrackedOrigin], error_size: Int
@@ -103,8 +119,7 @@ def plegma_consensus(
     anchors: OptionalPointer[Int32, MutUntrackedOrigin],
     strands: OptionalPointer[Int32, MutUntrackedOrigin],
     model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
-    polish_rounds: Int32,
-    likely_rounds: Int32,
+    settings: OptionalPointer[Int32, MutUntrackedOrigin],
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
     var result = Result()
     try:
@@ -126,8 +141,13 @@ def plegma_consensus(
             var strand = Int(strands.value()[unsafe_offset=r]) if strands else STRAND_UNKNOWN
             strand_of.append(strand if strand == 0 or strand == 1 else STRAND_UNKNOWN)
         var options = ConsensusOptions()
-        options.polish_rounds = Int(polish_rounds)
-        options.likely_rounds = Int(likely_rounds)
+        if settings:
+            # plegma_options: its int32 fields in order.
+            var at = settings.value()
+            options.polish_rounds = Int(at[unsafe_offset=_POLISH_ROUNDS])
+            options.likely_rounds = Int(at[unsafe_offset=_LIKELY_ROUNDS])
+            options.poa.seeded = at[unsafe_offset=_PINNED] != 0
+            options.poa.min_cover = Int(at[unsafe_offset=_MIN_COVER])
         if model:
             result.parts = consensus(seqs, anchor_of, strand_of, options, model.value()[])
         else:

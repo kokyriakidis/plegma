@@ -24,8 +24,20 @@ enum { PLEGMA_ANCHOR_BOTH = 0, PLEGMA_ANCHOR_LEFT = 1, PLEGMA_ANCHOR_RIGHT = 2 }
  * (both strands' probabilities weigh half each). */
 enum { PLEGMA_STRAND_FORWARD = 0, PLEGMA_STRAND_REVERSE = 1, PLEGMA_STRAND_UNKNOWN = 2 };
 
-/* plegma poa's default polishing rounds (-P 50,20). */
-enum { PLEGMA_POLISH_ROUNDS = 50, PLEGMA_LIKELY_ROUNDS = 20 };
+/* How plegma_consensus runs, plegma poa's options: rounds of polishing by edit distance, then by likelihood
+ * (-P 50,20); each read pinned to the consensus so far as minimap2 pins an alignment, the alignment only between the
+ * pins (-S, 1), or aligned to the whole graph (-N, 0); a one-directional assembly stops where fewer than min_cover
+ * reads go on (-c 5). Pins pay on long, divergent sequences (a pangenome's alleles); on a local assembly's reads of
+ * one place they only cost (shasta2's chr21: 2.4 times the time, the same consensus), so a local assembler turns
+ * them off. plegma_options_init sets plegma poa's defaults. */
+typedef struct plegma_options {
+    int32_t polish_rounds;
+    int32_t likely_rounds;
+    int32_t pinned;
+    int32_t min_cover;
+} plegma_options;
+
+void plegma_options_init(plegma_options* options);
 
 typedef struct plegma_model plegma_model;
 typedef struct plegma_result plegma_result;
@@ -38,12 +50,12 @@ void plegma_model_free(plegma_model* model);
 
 /* The consensus of `count` reads: read i is sequences[i] (A, C, G, T; lower case taken as upper), lengths[i] long,
  * fixed as anchors[i] says (NULL: all PLEGMA_ANCHOR_BOTH), on strand strands[i] (NULL: all unknown). With a model
- * every homopolymer run takes its most likely length (plegma poa -H). Never NULL; free it with plegma_result_free.
- * One part, polished; two (the left and the right side, unpolished) when no read spans both anchors and the two
- * sides could not be joined. */
+ * every homopolymer run takes its most likely length (plegma poa -H). options NULL: plegma poa's defaults. Never
+ * NULL; free it with plegma_result_free. One part, polished; two (the left and the right side, unpolished) when no
+ * read spans both anchors and the two sides could not be joined. */
 plegma_result* plegma_consensus(size_t count, const uint8_t* const* sequences, const size_t* lengths,
                                 const int32_t* anchors, const int32_t* strands, const plegma_model* model,
-                                int32_t polish_rounds, int32_t likely_rounds);
+                                const plegma_options* options);
 
 /* The result's parts (0 on failure); part i's letters (valid until the result is freed) and their count; the
  * failure's message, or NULL. */

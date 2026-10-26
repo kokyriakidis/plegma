@@ -59,14 +59,27 @@ as messages (C) or `std::runtime_error` (C++), never an abort.
 plegma::Model model = plegma::Model::load("HomopolymerModel-ONT-R10.4.1-sup5.0.0-2026-09-28.csv");
 std::vector<plegma::Read> reads = {{spanning, plegma::Anchor::Both, plegma::Strand::Forward},
                                    {fixedLeft, plegma::Anchor::Left, plegma::Strand::Reverse}};
-std::vector<std::string> parts = plegma::consensus(reads, &model);   // parts[0]: the consensus
+std::vector<std::string> parts = plegma::consensus(reads, &model, plegma::Options().pinned(false));
 ```
+
+`plegma_options` (C) or `plegma::Options` (C++) carries `plegma poa`'s options: polishing rounds (`-P`), pinning
+(`-S`; off is `-N`) and `-c`. A local assembler of one place's reads turns pinning off: there the pins only cost
+time (shasta2's chr21: the same consensus in 2.4 times less).
 
 Link with `-Lbuild -lplegma -Wl,-rpath,<plegma>/build`; the library finds the Mojo runtime it needs (in plegma's
 pixi environment) by its own run path. `pixi run test-capi` tests it (threads sharing a model included).
 shasta2's Plegma local assembly method uses it when configured with `-DPLEGMA_DIR=<plegma checkout>`
-(github.com/kokyriakidis/shasta2, branch la7-dump): in its chr21 assembly the same sequence as running the
-command per local assembly, in 3:01 rather than 7:30 (a third of the CPU).
+(github.com/kokyriakidis/shasta2, branch la7-dump). On its HG002 chr21 assembly (the Final graph reassembled, lassen
+against HG002 v1.1):
+
+| consensus | errors | wall | CPU | peak memory |
+|---|---|---|---|---|
+| abPOA (shasta2's default) | 11,302 | 1:10 | 263 s | 3.7 GB |
+| shasta2's msa1 repair | 7,353 | 0:42 | 279 s | 3.6 GB |
+| plegma (library, `-H`, unpinned) | 6,750 | 0:40 | 292 s | 3.1 GB |
+
+Per local assembly, in one process, on 2,093 of them: abPOA (spanning reads, as shasta2 runs it) 31.0 s and a 6.0 GB
+peak; plegma on the same reads 8.6 s and 131 MB; plegma on every read with the model 15.6 s and 158 MB.
 
 The library (`plegma/__init__.mojo` lists its API) holds both: the graph and its whole-graph aligner
 (`plegma/kernel.mojo`), consensus polishing (optionally with a `HomopolymerModel`), and `on_reference` with minimap2's

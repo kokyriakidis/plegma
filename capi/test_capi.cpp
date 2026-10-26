@@ -1,4 +1,4 @@
-// Tests of plegma's C/C++ API (pixi run test-capi). With arguments, `test_capi [-H model.csv] file.fa...` instead
+// Tests of plegma's C/C++ API (pixi run test-capi). With arguments, `test_capi [-H model.csv] [-N] file.fa...` instead
 // prints each file's consensus as `plegma poa -r 0 [-H model.csv] file.fa` writes it (one FASTA record per part, the
 // reads' anchor= and strand= header words read), to check the library against the command.
 #include "plegma.hpp"
@@ -147,15 +147,25 @@ int main(int argc, char** argv)
     if (argc > 1) {
         // The library's consensus of each file, as plegma poa -r 0 writes it.
         std::unique_ptr<plegma::Model> model;
+        plegma::Options options;
         int first = 1;
-        if (std::string(argv[1]) == "-H" and argc > 2) {
-            model = std::make_unique<plegma::Model>(plegma::Model::load(argv[2]));
-            first = 3;
+        while (first < argc and argv[first][0] == '-') {
+            std::string flag = argv[first];
+            if (flag == "-H" and first + 1 < argc) {
+                model = std::make_unique<plegma::Model>(plegma::Model::load(argv[first + 1]));
+                first += 2;
+            } else if (flag == "-N") {
+                options.pinned(false);
+                first += 1;
+            } else {
+                std::cerr << "test_capi: unknown option " << flag << std::endl;
+                return 2;
+            }
         }
         for (int a = first; a < argc; a++) {
             std::vector<std::string> storage;
             std::vector<plegma::Read> reads = readFasta(argv[a], storage);
-            std::vector<std::string> parts = plegma::consensus(reads, model.get());
+            std::vector<std::string> parts = plegma::consensus(reads, model.get(), options);
             if (parts.size() == 1) {
                 std::cout << ">Consensus_sequence\n" << parts[0] << "\n";
             } else {
@@ -236,6 +246,19 @@ int main(int argc, char** argv)
         }
         for (std::thread& thread : threads) thread.join();
         check(alone == together, "8 threads sharing a model agree with one");
+    }
+
+    // Options: unpinned gives the same consensus here; no polishing gives the bundle as it is.
+    {
+        Case c = makeCase(rng, 3000);
+        std::vector<std::string> pinned = plegma::consensus(c.reads(), &toy);
+        std::vector<std::string> unpinned = plegma::consensus(c.reads(), &toy, plegma::Options().pinned(false));
+        check(pinned == unpinned, "unpinned agrees with pinned on reads of one place");
+        plegma_options defaults;
+        plegma_options_init(&defaults);
+        check(defaults.polish_rounds == 50 and defaults.likely_rounds == 20 and defaults.pinned == 1 and
+                  defaults.min_cover == 5,
+              "plegma_options_init sets plegma poa's defaults");
     }
 
     // Edge cases: no reads; one read.

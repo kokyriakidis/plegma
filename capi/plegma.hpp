@@ -4,7 +4,7 @@
 //
 //     plegma::Model model = plegma::Model::load("HomopolymerModel-ONT-R10.4.1-sup5.0.0-2026-09-28.csv");
 //     std::vector<plegma::Read> reads = {{"ACGT...", plegma::Anchor::Both, plegma::Strand::Forward}, ...};
-//     std::vector<std::string> parts = plegma::consensus(reads, &model);
+//     std::vector<std::string> parts = plegma::consensus(reads, &model, plegma::Options().pinned(false));
 #pragma once
 
 #include "plegma.h"
@@ -32,10 +32,16 @@ struct Read {
     Strand strand = Strand::Unknown;
 };
 
-// plegma poa's polishing rounds: by edit distance, then by likelihood (-P 50,20).
+// plegma poa's options (plegma_options in plegma.h): polishing rounds by edit distance, then by likelihood (-P);
+// each read pinned to the consensus so far (-S) or aligned to the whole graph (-N: pinned false, what a local
+// assembler wants); where a one-directional assembly stops (-c). Default: plegma poa's.
 struct Options {
-    std::int32_t polishRounds = PLEGMA_POLISH_ROUNDS;
-    std::int32_t likelyRounds = PLEGMA_LIKELY_ROUNDS;
+    plegma_options values;
+    Options() { plegma_options_init(&values); }
+    Options& polishRounds(std::int32_t rounds) { values.polish_rounds = rounds; return *this; }
+    Options& likelyRounds(std::int32_t rounds) { values.likely_rounds = rounds; return *this; }
+    Options& pinned(bool pinned) { values.pinned = pinned ? 1 : 0; return *this; }
+    Options& minCover(std::int32_t cover) { values.min_cover = cover; return *this; }
 };
 
 // A homopolymer model (shasta2's csv), read-only once made.
@@ -92,7 +98,7 @@ inline std::vector<std::string> consensus(const std::vector<Read>& reads, const 
     }
     std::unique_ptr<plegma_result, void (*)(plegma_result*)> result(
         plegma_consensus(reads.size(), sequences.data(), lengths.data(), anchors.data(), strands.data(),
-                         model ? model->get() : nullptr, options.polishRounds, options.likelyRounds),
+                         model ? model->get() : nullptr, &options.values),
         plegma_result_free);
     if (const char* error = plegma_result_error(result.get())) {
         throw std::runtime_error(std::string("plegma: ") + error);
