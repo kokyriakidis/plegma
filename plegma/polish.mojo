@@ -440,6 +440,25 @@ def polish(
                 var kb = k * paths.stride
                 var first = Int(paths.enter[kb + s])
                 var last = Int(paths.enter[kb + e]) if e < length else Int(paths.leave[kb + length])
+                if not free_start and not free_end and _same(seq, first, last, current, s, e):
+                    # The read spells the segment exactly: every one-letter edit costs it one (a letter substituted
+                    # by itself nothing) and a unit of p letters deleted or copied p (a string and itself with one
+                    # such edit are exactly that far apart), so its votes need no dynamic programming.
+                    for c in range(columns):
+                        var i = s + c
+                        if i >= top or not site[i]:
+                            continue
+                        var row = c * SLOTS
+                        for x in range(4):
+                            gains[row + x] -= 1
+                        if i < e:
+                            gains[row + 4] -= 1
+                            var own = _code(current[i])
+                            for x in range(4):
+                                gains[row + 5 + x] -= Int32(0) if x == own else Int32(1)
+                    for b in range(len(block_at)):
+                        block_gain[b] -= Int32(block_period[b])
+                    continue
                 bands.fill(paths, k, s, e, first, last)
                 # Forward: column c at read offset j, the distance of consensus s ..< s + c to read first ..< j.
                 forward.resize(bands.start[columns], INF)
@@ -732,6 +751,17 @@ def _runs(
             out.append(consensus[s])
         s = e
     return out^
+
+
+@always_inline
+def _same(seq: List[UInt8], first: Int, last: Int, consensus: List[UInt8], s: Int, e: Int) -> Bool:
+    """Whether read letters first ..< last are consensus letters s ..< e exactly."""
+    if last - first != e - s:
+        return False
+    for t in range(e - s):
+        if seq[first + t] != consensus[s + t]:
+            return False
+    return True
 
 
 comptime MAX_COPYING = 0.7
