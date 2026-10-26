@@ -49,7 +49,7 @@ poa options:
     -s          ambiguous strand: a sequence scoring poorly is tried reverse-complemented, the better kept
     -i FILE     start from the graph of an existing MSA (FASTA, rows with '-')
     -c INT      a one-directional assembly (reads fixed at one anchor, none spanning) stops where fewer reads
-                go on [3]
+                go on [5]
                 A read's anchor is a word of its FASTA header: anchor=both (the default: it spans the local assembly's
                 two anchors), anchor=left or anchor=right (fixed at that anchor only, ending inside the gap). With
                 reads of both sides and none spanning, each side is assembled and the two joined where they overlap.
@@ -111,7 +111,7 @@ struct Options(Copyable, Movable):
         self.progressive = True
         self.strand = False
         self.seeded = True
-        self.min_cover = 3
+        self.min_cover = 5
         self.start_msa = String()
         self.flanks = String()
         self.threads = 1

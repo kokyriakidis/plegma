@@ -38,10 +38,13 @@ the first or last pinned window takes the read's mode. The consensus runs betwee
 With no spanning read each side is assembled alone, the longest read first: the left consensus followed forward
 while most reads go on (`Graph.heaviest_path`), the right one backward (`Graph.heaviest_path_backward`). Both sides:
 joined at the middle pin of minimap2's chain between them (`pins.pins`), or a short karan overlap of their ends; the
-graph is rebuilt on the joined sequence. One side: its consensus cut where fewer than `-c` reads reach (a
+graph is rebuilt on the joined sequence. One side: its consensus cut where fewer than `-c` reads (5) reach (a
 one-directional assembly). Polishing aligns each read as it is anchored (`polish`'s `anchors`: karan's `PREFIX` or
 `SUFFIX`, or the consensus inside a longer read's prefix or suffix), counts disagreement against the reads covering
-each position, and lets a read vote only in the segments its alignment spans whole.
+each position, and lets a read with a free end vote on the letters it covers: in its forward and backward matrices
+the consensus before its start and after its end costs nothing, and an edit there costs it nothing either. The
+likelihood stage, which does not model free ends, leaves a segment some read covers only part of to the edit
+distance.
 
 ## `plegma ref`: the MSA anchored on a reference
 

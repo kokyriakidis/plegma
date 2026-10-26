@@ -78,7 +78,9 @@ struct PoaOptions(Copyable, Movable):
         self.order = GUIDE_ORDER
         self.seeded = True
         self.strand = False
-        self.min_cover = 3
+        # Where five reads at 10% error agree a one-directional consensus errs about 0.2 times a kb; past it, with
+        # three, about 1 (simulated telomeres, experiments/msa/anchored.py).
+        self.min_cover = 5
 
 
 struct Poa(Movable):
@@ -313,16 +315,16 @@ def _one_side(
 
 
 def _trim(mut consensus: List[UInt8], seqs: List[List[UInt8]], reads: List[Int], least: Int, from_left: Bool):
-    """A one-directional consensus cut where fewer than `least` reads go on: from the left anchor (`from_left`) past
-    the `least`-th longest read's end, else before its start from the right anchor. The reads' lengths stand for their
-    reach, as they all start (or end) at the anchor."""
-    if least <= 1 or len(reads) < least:
+    """A one-directional consensus cut where fewer than `least` reads go on (or, with fewer reads than that, where the
+    first of them stops): from the left anchor (`from_left`) past the `least`-th longest read's end, else before its
+    start from the right anchor. The reads' lengths stand for their reach, as they all start (or end) at the anchor."""
+    if least <= 1 or len(reads) == 0:
         return
     var lengths = List[Int]()
     for r in reads:
         lengths.append(len(seqs[r]))
     sort(lengths)
-    var reach = lengths[len(lengths) - least]
+    var reach = lengths[len(lengths) - min(least, len(lengths))]
     if reach >= len(consensus):
         return
     if from_left:

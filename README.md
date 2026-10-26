@@ -25,7 +25,7 @@ the graph as GFA (`-r`):
   Reads of a local assembly may be fixed at one anchor only (`anchor=left` or `anchor=right` in their FASTA
   headers, `plegma/poa.mojo`): aligned from the graph's start to anywhere (or from anywhere to its end), whatever
   passes the graph's end growing it; with no read spanning both anchors each side is assembled and the two joined
-  where they overlap, or one side alone stops where fewer than `-c` reads go on (a telomere). The consensus is
+  where they overlap, or one side alone stops where fewer than `-c` reads (5) go on (a telomere). The consensus is
   polished against every read as it is anchored. On simulated local assemblies (`experiments/msa/anchored.py`) it
   reproduces 5 kb truths exactly in 0.2 s and 20 MB, where pericles (theseus-lib's consensus branch), which needs a
   spanning read, takes 17 to 63 s and its majority vote leaves 4 to 29 errors.

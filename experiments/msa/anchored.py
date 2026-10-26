@@ -8,13 +8,14 @@ usage: python3 -I experiments/msa/anchored.py <work dir> <plegma> <pericles> <ka
 Each case is a truth of L letters (random, a tandem array of 30 copies of a 40-letter unit, 3% apart, in its middle)
 and reads of it at an error rate (substitutions, insertions and deletions alike): `both` reads span it whole, `left`
 reads start at its start and end at a random place past 30% of it, `right` reads end at its end and start before 70%
-of it. Scenarios: many_both (10 both, 5 left, 5 right), few_both (1, 10, 10), no_both (0, 10, 10) and left_only (0, 15,
-0: a telomere, one-directional). plegma reads each read's anchor from its header (`anchor=both|left|right`); pericles
+of it. Scenarios: many_both (10 both, 5 left, 5 right), few_both (1, 10, 10), no_both (0, 10, 10), left_only (0, 15,
+0: a telomere, one-directional) and right_only (0, 0, 15: the other end's). plegma reads each read's anchor from its header (`anchor=both|left|right`); pericles
 from its own (`> reversed ends_free weight drop lag`: both 0 0 1 0 0, left 0 1 1 0 0, right 1 1 1 0 0), its first read
 spanning and the spanning reads first, as it requires; it cannot run a case with none.
 
 Each consensus is scored by its edit distance to the truth (karan); a one-directional one (left_only) against the
-truth's best prefix (`--mode prefix`), with its length beside the truth's. Prints per case and tool the errors, the
+truth's best prefix (`--mode prefix`), right_only against its best suffix (`--mode suffix`), with its length beside the
+truth's. Prints per case and tool the errors, the
 time and the peak memory, then totals per scenario.
 """
 import os
@@ -22,9 +23,11 @@ import random
 import re
 import subprocess
 import sys
+import zlib
 from multiprocessing import Pool
 
-SCENARIOS = {"many_both": (10, 5, 5), "few_both": (1, 10, 10), "no_both": (0, 10, 10), "left_only": (0, 15, 0)}
+SCENARIOS = {"many_both": (10, 5, 5), "few_both": (1, 10, 10), "no_both": (0, 10, 10), "left_only": (0, 15, 0),
+             "right_only": (0, 0, 15)}
 LENGTHS = [5000, 20000, 50000]
 RATES = [0.05, 0.10]
 SEEDS = [1, 2]
@@ -57,7 +60,8 @@ def truth_of(rng, length):
 
 
 def make_case(path, scenario, length, rate, seed):
-    rng = random.Random(hash((scenario, length, rate, seed)) & 0xFFFFFFFF)
+    # A checksum, not hash(): Python salts string hashes per process, and the cases must be the same every run.
+    rng = random.Random(zlib.crc32(("%s %d %.2f %d" % (scenario, length, rate, seed)).encode()))
     truth = truth_of(rng, length)
     n_both, n_left, n_right = SCENARIOS[scenario]
     reads = []
@@ -122,7 +126,7 @@ def errors(truth_path, cons, mode, tmp):
 def run_case(task):
     path, scenario = task
     truth_path = path + ".truth.fa"
-    mode = "prefix" if scenario == "left_only" else "global"
+    mode = {"left_only": "prefix", "right_only": "suffix"}.get(scenario, "global")
     rows = []
     got = timed([PLEGMA, "poa", "-r", "0", path + ".fa"], path + ".plegma.out")
     if got:

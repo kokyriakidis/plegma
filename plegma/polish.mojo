@@ -440,6 +440,9 @@ def polish(
                         forward[at + j - lo] = v
                     if free_start and first >= lo and first <= bands.high[c + 1]:
                         forward[at + first - lo] = 0
+                    # The read used up: the consensus after its end is free, so its cost stays as it was.
+                    if free_end and last >= lo and last <= bands.high[c + 1]:
+                        forward[at + last - lo] = min(forward[at + last - lo], bands.at(forward, c, last))
                 # Backward: column c at read offset j, the distance of consensus s + c ..< e to read j ..< last.
                 backward.resize(bands.start[columns], INF)
                 for j in range(bands.low[c_last], bands.high[c_last] + 1):
@@ -455,6 +458,9 @@ def polish(
                             if j + 1 <= hi:
                                 v = min(v, backward[at + j + 1 - lo] + 1)
                             v = min(v, bands.at(backward, c + 1, j + 1) + Int32(1 if seq[j] != letter else 0))
+                        # Not yet started: the consensus before the read's start is free.
+                        if free_start and j == first:
+                            v = min(v, bands.at(backward, c + 1, j))
                         backward[at + j - lo] = v
                         if free_end and j == last:
                             backward[at + j - lo] = 0
@@ -493,13 +499,29 @@ def polish(
                                 through = min(through, t)
                                 if code < 4:
                                     through_by[code] = min(through_by[code], t)
+                    # A letter inserted or substituted where the read has ended (or not yet begun) costs it nothing:
+                    # the path through this column with the read used up (or not yet read), the consensus there free.
+                    var unread = INF
+                    var unread_next = INF
+                    if free_end and last >= lo and last <= hi:
+                        var f = forward[at + last - lo]
+                        unread = f + backward[at + last - lo]
+                        if i < e:
+                            unread_next = f + bands.at(backward, c + 1, last)
+                    if free_start and first >= lo and first <= hi:
+                        var f = forward[at + first - lo]
+                        unread = min(unread, f + backward[at + first - lo])
+                        if i < e:
+                            unread_next = min(unread_next, f + bands.at(backward, c + 1, first))
                     var row = c * SLOTS
                     for x in range(4):
-                        gains[row + x] += base - min(kept + 1, min(inserted + 1, inserted_by[x]))
+                        gains[row + x] += base - min(min(kept + 1, unread), min(inserted + 1, inserted_by[x]))
                     if i < e:
                         gains[row + 4] += base - deleted
                         for x in range(4):
-                            gains[row + 5 + x] += base - min(deleted + 1, min(through + 1, through_by[x]))
+                            gains[row + 5 + x] += base - min(
+                                min(deleted + 1, unread_next), min(through + 1, through_by[x])
+                            )
                 # Whole units: deleted, forward at i - p against backward at i; copied, forward at i carried
                 # through the p letters again, then against backward at i.
                 for b in range(len(block_at)):
@@ -521,6 +543,9 @@ def polish(
                             var letter = current[s + c - p + t]
                             for j in range(lo, wide + 1):
                                 var v = copied[j - lo] + 1
+                                # Copied letters past the read's end cost it nothing.
+                                if free_end and j == last:
+                                    v = copied[j - lo]
                                 if j > lo:
                                     v = min(v, copied[j - 1 - lo] + Int32(1 if seq[j - 1] != letter else 0))
                                     v = min(v, ahead[j - 1 - lo] + 1)
@@ -736,6 +761,15 @@ def _likely(
             block_gain.resize(len(block_at), 0.0)
             for b in range(len(block_gain)):
                 block_gain[b] = 0.0
+            # A read the segment holds only part of (anchored at one end, ending or starting inside) has no
+            # likelihood here: the segment is left to the edit distance, which frees its end, rather than to the
+            # reads spanning it alone, whose own errors would win.
+            var partial = False
+            for k in range(count):
+                var overlaps = paths.span_end[k] > s and paths.span_start[k] < e
+                partial = partial or (overlaps and (paths.span_start[k] > s or paths.span_end[k] < e))
+            if partial:
+                continue
             var columns = e - s + 1
             var c_last = columns - 1
             forward_scale.resize(columns, 0.0)
