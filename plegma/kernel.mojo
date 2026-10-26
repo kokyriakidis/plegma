@@ -337,8 +337,13 @@ struct Workspace(Movable):
         # The workspace's arrays, sized to this alignment; whatever an earlier one left is overwritten before use.
         self.profile.resize(BYTES * (5 * width + V), 0)
         var profile = self.profile.unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
-        for k in range(5 * width + V):
+        var k = 0
+        while k + V <= 5 * width + V:
+            profile.unsafe_store(k, Vec(S(-Int(scoring.mismatch))))
+            k += V
+        while k < 5 * width + V:
             profile[unsafe_offset=k] = S(-Int(scoring.mismatch))
+            k += 1
         self.lo.resize(n + 1, 0)
         self.hi.resize(n + 1, 0)
         self.trace_at.resize(n + 1, 0)
@@ -360,10 +365,10 @@ struct Workspace(Movable):
             self.free.append(slot)
 
         # The query self.profile: what letter j - 1 scores against A, C, G, T or N, at [code * width + j].
-        for code in range(4):
-            for j in range(1, width):
-                if Int(encode_base(query[j - 1])) == code:
-                    profile[unsafe_offset=code * width + j] = S(Int(scoring.match_score))
+        for j in range(1, width):
+            var code = Int(encode_base(query[j - 1]))
+            if code < 4:
+                profile[unsafe_offset=code * width + j] = S(Int(scoring.match_score))
 
         # Row 0 is the left end before every source; row r is node order[r - 1].
         # Live score rows: H, then the two deletion states, each over the row's band.
@@ -705,12 +710,8 @@ struct Workspace(Movable):
             _fill[dt](d1.unsafe_offset(span), V)
             _fill[dt](d2.unsafe_offset(span), V)
             self.trace.resize(unsafe_uninit_length=tbase + span)
-            var row_left = low
-            while h[unsafe_offset=row_left - low] != row_best:
-                row_left += 1
-            var row_right = high
-            while h[unsafe_offset=row_right - low] != row_best:
-                row_right -= 1
+            var row_left = low + _first_equal[dt](h, span, row_best)
+            var row_right = low + _last_equal[dt](h, span, row_best)
             self.left_best[r] = row_left
             self.right_best[r] = row_right
             if multi:
@@ -853,6 +854,39 @@ def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut r
     for key in keys:
         var p = Int(graph.edge_from[Int(key & 0xFFFFFFFF)])
         rows.append(0 if p == left else row_of[p])
+
+
+@inline(.always)
+def _first_equal[dt: DType](h: MutPointer[Scalar[dt], _], span: Int, value: Scalar[dt]) -> Int:
+    """The first of cells 0 ..< span of `h` holding `value` (one does), a vector at a time."""
+    comptime V = simd_width_of[dt]()
+    var lane = iota[dt, V]()
+    var at = 0
+    while at + V <= span:
+        var hit = h.unsafe_load[width=V](at).eq(SIMD[dt, V](value))
+        if hit.reduce_or():
+            return at + Int(hit.select(lane, SIMD[dt, V](Scalar[dt](V))).reduce_min())
+        at += V
+    while h[unsafe_offset=at] != value:
+        at += 1
+    return at
+
+
+@inline(.always)
+def _last_equal[dt: DType](h: MutPointer[Scalar[dt], _], span: Int, value: Scalar[dt]) -> Int:
+    """The last of cells 0 ..< span of `h` holding `value` (one does), a vector at a time from the right."""
+    comptime V = simd_width_of[dt]()
+    var lane = iota[dt, V]()
+    var at = span - V
+    while at >= 0:
+        var hit = h.unsafe_load[width=V](at).eq(SIMD[dt, V](value))
+        if hit.reduce_or():
+            return at + Int(hit.select(lane, SIMD[dt, V](Scalar[dt](-1))).reduce_max())
+        at -= V
+    var k = min(span, at + V) - 1
+    while h[unsafe_offset=k] != value:
+        k -= 1
+    return k
 
 
 @inline(.always)

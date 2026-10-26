@@ -385,10 +385,16 @@ def _add_spanning(
     mut path_of: List[Int],
     mut aligner: _Aligner,
 ) raises:
-    """The spanning reads in `order`, each aligned to the whole graph (or between pins) and fused into it."""
+    """The spanning reads in `order`, each aligned to the whole graph (or between pins) and fused into it; a read
+    the same as one before it fused along that one's path (`_twin`)."""
+    var seen = Dict[String, Int]()
     for r in order:
         if len(graph) == 0:
             path_of[r] = graph.add(names[r], Span(seqs[r]))
+            if not options.strand:
+                seen[String(unsafe_from_utf8=seqs[r])] = r
+            continue
+        if not options.strand and _twin(graph, names, seqs, r, seen, path_of):
             continue
         var found = aligner.align(graph, seqs[r], options, options.mode)
         if options.strand:
@@ -402,6 +408,30 @@ def _add_spanning(
                     found = other^
                     names[r] += "_reverse_complement"
         path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+        if not options.strand:
+            seen[String(unsafe_from_utf8=seqs[r])] = r
+
+
+def _twin(
+    mut graph: Graph,
+    names: List[String],
+    seqs: List[List[UInt8]],
+    r: Int,
+    seen: Dict[String, Int],
+    mut path_of: List[Int],
+) raises -> Bool:
+    """Read `r` fused along the path of an earlier read with the same letters (in `seen`), if there is one: aligning
+    it again would find that path, every letter matched (a local assembler's reads repeat often: on shasta2's chr21
+    a third of them, the shorter ones)."""
+    var key = String(unsafe_from_utf8=seqs[r])
+    var twin = seen.get(key, -1)
+    if twin < 0:
+        return False
+    var nodes = List[Int](capacity=len(seqs[r]))
+    for node in graph.paths[path_of[twin]]:
+        nodes.append(Int(node))
+    path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), nodes)
+    return True
 
 
 def _add_anchored(
@@ -418,9 +448,13 @@ def _add_anchored(
     """The reads in `order`, anchored at one end (`mode` `PREFIX` for the left, `SUFFIX` for the right), each
     aligned and fused into the graph; letters past the graph's end (or before its start) join it as new nodes.
     `anchors`: the paths whose ends are the anchors (the spanning reads, or the assembled backbone)."""
+    var seen = Dict[String, Int]()
     for r in order:
+        if _twin(graph, names, seqs, r, seen, path_of):
+            continue
         var found = aligner.align(graph, seqs[r], options, mode, anchors)
         path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+        seen[String(unsafe_from_utf8=seqs[r])] = r
 
 
 def _between(graph: Graph, anchors: List[Int], mode: Int) -> List[Bool]:

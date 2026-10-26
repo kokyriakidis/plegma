@@ -105,6 +105,7 @@ struct _Paths(Movable):
         sequences: List[List[UInt8]],
         members: List[Int],
         anchors: List[Int],
+        weights: List[Int] = List[Int](),
     ) raises:
         """Every member aligned to the consensus: whole (`anchors` empty, or `BOTH`), or, a read anchored at one end,
         against a prefix (`LEFT`) or a suffix (`RIGHT`) of it. A path outside its alignment's span stays at its
@@ -129,6 +130,8 @@ struct _Paths(Movable):
         self.deleted = 0
         self.copying = 0
         for k in range(count):
+            # A member standing for `weights[k]` reads alike counts that many times.
+            var w = weights[k] if len(weights) > 0 else 1
             ref seq = sequences[members[k]]
             var anchor = anchors[members[k]] if len(anchors) > 0 else 0
             var mode = Mode.GLOBAL
@@ -152,37 +155,37 @@ struct _Paths(Movable):
                 )
                 if other:
                     found = other.take()
-            self.total += found.cost
+            self.total += w * found.cost
             var runs = cigar_runs(found.cigar)
             var base = k * self.stride
             var i = found.reference_start
             var j = found.query_start
             self.span_start[k] = i
             self.span_end[k] = found.reference_end
-            self.spanned += found.reference_end - found.reference_start
+            self.spanned += w * (found.reference_end - found.reference_start)
             for b in range(i + 1):
                 self.enter[base + b] = Int32(j)
                 self.leave[base + b] = Int32(j)
             for r in range(len(runs.ops)):
                 var op = runs.ops[r]
                 if op == INSERTION:
-                    self.inserted += runs.counts[r]
+                    self.inserted += w * runs.counts[r]
                 elif op == DELETION:
-                    self.deleted += runs.counts[r]
+                    self.deleted += w * runs.counts[r]
                 elif op == MATCH:
-                    self.matched += runs.counts[r]
+                    self.matched += w * runs.counts[r]
                 else:
-                    self.substituted += runs.counts[r]
+                    self.substituted += w * runs.counts[r]
                 for _ in range(runs.counts[r]):
                     if op == INSERTION:
                         if (i > 0 and seq[j] == consensus[i - 1]) or (i < length and seq[j] == consensus[i]):
-                            self.copying += 1
-                        self.discord[i] += 1
+                            self.copying += w
+                        self.discord[i] += Int32(w)
                         j += 1
                         continue
                     self.leave[base + i] = Int32(j)
                     if op != MATCH:
-                        self.discord[i] += 1
+                        self.discord[i] += Int32(w)
                     if op != DELETION:
                         j += 1
                     i += 1
@@ -192,7 +195,7 @@ struct _Paths(Movable):
                 self.enter[base + b] = Int32(j)
                 self.leave[base + b] = Int32(j)
             for b in range(self.span_start[k], i + 1):
-                self.cover[b] += 1
+                self.cover[b] += Int32(w)
 
 
 struct _Bands(Movable):
@@ -347,9 +350,15 @@ def polish(
     model loaded, every run of two letters or more then takes its most likely length (`_runs`), each sequence on its
     strand in `strands` (0, 1 or `STRAND_UNKNOWN`; all unknown when empty)."""
     var current = consensus.copy()
-    var count = len(members)
-    if count == 0:
+    if len(members) == 0:
         return current^
+    # The edit rounds count reads with the same letters and anchor once, weighed by how many they are (a local
+    # assembler's reads repeat often); their sums are integers, the same either way. The likelihood rounds take
+    # every read, their sums in floating point.
+    var unique = List[Int]()
+    var weight = List[Int]()
+    _groups(sequences, members, anchors, unique, weight)
+    var count = len(unique)
     var aligner = Aligner()
     var paths = _Paths()
     var bands = _Bands()
@@ -373,7 +382,7 @@ def polish(
     comptime LETTERS = "ACGT"
     var unchecked = False
     for _ in range(rounds):
-        paths.fill(aligner, current, sequences, members, anchors)
+        paths.fill(aligner, current, sequences, unique, anchors, weight)
         unchecked = False
         if paths.total >= previous_total:
             # The last round's edits together cost more than they saved: back to before them. Once, then taken one
@@ -436,7 +445,8 @@ def polish(
                     continue
                 var free_start = paths.span_start[k] > s
                 var free_end = paths.span_end[k] < e
-                ref seq = sequences[members[k]]
+                ref seq = sequences[unique[k]]
+                var wk = Int32(weight[k])
                 var kb = k * paths.stride
                 var first = Int(paths.enter[kb + s])
                 var last = Int(paths.enter[kb + e]) if e < length else Int(paths.leave[kb + length])
@@ -450,14 +460,14 @@ def polish(
                             continue
                         var row = c * SLOTS
                         for x in range(4):
-                            gains[row + x] -= 1
+                            gains[row + x] -= wk
                         if i < e:
-                            gains[row + 4] -= 1
+                            gains[row + 4] -= wk
                             var own = _code(current[i])
                             for x in range(4):
-                                gains[row + 5 + x] -= Int32(0) if x == own else Int32(1)
+                                gains[row + 5 + x] -= Int32(0) if x == own else wk
                     for b in range(len(block_at)):
-                        block_gain[b] -= Int32(block_period[b])
+                        block_gain[b] -= wk * Int32(block_period[b])
                     continue
                 bands.fill(paths, k, s, e, first, last)
                 # Forward: column c at read offset j, the distance of consensus s ..< s + c to read first ..< j.
@@ -552,12 +562,12 @@ def polish(
                             unread_next = min(unread_next, f + bands.at(backward, c + 1, first))
                     var row = c * SLOTS
                     for x in range(4):
-                        gains[row + x] += base - min(min(kept + 1, unread), min(inserted + 1, inserted_by[x]))
+                        gains[row + x] += wk * (base - min(min(kept + 1, unread), min(inserted + 1, inserted_by[x])))
                     if i < e:
-                        gains[row + 4] += base - deleted
+                        gains[row + 4] += wk * (base - deleted)
                         for x in range(4):
-                            gains[row + 5 + x] += base - min(
-                                min(deleted + 1, unread_next), min(through + 1, through_by[x])
+                            gains[row + 5 + x] += wk * (
+                                base - min(min(deleted + 1, unread_next), min(through + 1, through_by[x]))
                             )
                 # Whole units: deleted, forward at i - p against backward at i; copied, forward at i carried
                 # through the p letters again, then against backward at i.
@@ -590,7 +600,7 @@ def polish(
                             swap(copied, ahead)
                         for j in range(lo, hi + 1):
                             best = min(best, copied[j - lo] + backward[bands.start[c] + j - lo])
-                    block_gain[b] += base - best
+                    block_gain[b] += wk * (base - best)
             # This segment's best edits: far apart, or the best alone inside a tandem repeat (or after a round
             # whose edits clashed).
             var alone = one_each or mask.covers(s, e)
@@ -671,7 +681,7 @@ def polish(
                 dirty[q] = True
     if unchecked:
         # The last round's edits, past the rounds allowed, kept only if they gained.
-        paths.fill(aligner, current, sequences, members, anchors)
+        paths.fill(aligner, current, sequences, unique, anchors, weight)
         if paths.total >= previous_total:
             current = previous^
     var out = _likely(current^, sequences, members, likely_rounds, support, share, anchors)
@@ -751,6 +761,24 @@ def _runs(
             out.append(consensus[s])
         s = e
     return out^
+
+
+def _groups(
+    sequences: List[List[UInt8]], members: List[Int], anchors: List[Int], mut unique: List[Int], mut weight: List[Int]
+) raises:
+    """`members` grouped by letters and anchor: the first of each group in `unique` (in the order they come), how
+    many it stands for in `weight`."""
+    var at = Dict[String, Int]()
+    for r in members:
+        var anchor = anchors[r] if len(anchors) > 0 else 0
+        var key = String(anchor) + ":" + String(unsafe_from_utf8=sequences[r])
+        var k = at.get(key, -1)
+        if k < 0:
+            at[key] = len(unique)
+            unique.append(r)
+            weight.append(1)
+        else:
+            weight[k] += 1
 
 
 @always_inline
