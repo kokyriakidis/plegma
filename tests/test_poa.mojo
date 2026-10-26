@@ -42,7 +42,7 @@ def _slice(seq: List[UInt8], start: Int, end: Int) -> List[UInt8]:
 
 
 def _assembled(
-    truth: List[UInt8], n_both: Int, n_left: Int, n_right: Int, rate: Float64, overhang: Int = 0
+    truth: List[UInt8], n_both: Int, n_left: Int, n_right: Int, rate: Float64, overhang: Int = 0, pinned: Bool = True
 ) raises -> List[UInt8]:
     """The polished consensus of reads of `truth`: `n_both` spanning it, `n_left` fixed at its start, `n_right` at
     its end; with `overhang`, the one-sided reads run that many letters past the far end instead (into sequence
@@ -69,7 +69,9 @@ def _assembled(
         seqs.append(_mutated(piece, rate))
         names.append(String(t"r{k}"))
         anchors.append(anchor)
-    var made = poa(names, seqs, anchors, PoaOptions(), Graph())
+    var options = PoaOptions()
+    options.seeded = pinned
+    var made = poa(names, seqs, anchors, options, Graph())
     # Every read is in the graph and its row spells it.
     var rows = made.graph.msa()
     for k in range(len(seqs)):
@@ -105,6 +107,15 @@ def test_reads_past_the_far_anchor_do_not_extend_the_consensus() raises:
     seed(103)
     var truth = _random(3000)
     var consensus = _assembled(truth, 3, 8, 8, 0.05, overhang=330)
+    assert_true(distance(String(unsafe_from_utf8=consensus), String(unsafe_from_utf8=truth)) <= 3)
+
+
+def test_reads_past_the_far_anchor_unpinned() raises:
+    # The same, each read aligned to the whole graph: the left reads' letters past the end join the graph after it,
+    # and the right reads still end at the right anchor, not at the end of those letters.
+    seed(103)
+    var truth = _random(3000)
+    var consensus = _assembled(truth, 3, 8, 8, 0.05, overhang=330, pinned=False)
     assert_true(distance(String(unsafe_from_utf8=consensus), String(unsafe_from_utf8=truth)) <= 3)
 
 

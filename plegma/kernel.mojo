@@ -152,7 +152,7 @@ struct GraphAlignment(Movable):
 
 struct Topology(Movable):
     """The graph's nodes in topological order, each node's rank, and the length of its remaining path along
-    the heaviest out-edges (abPOA's band diagonal)."""
+    the heaviest out-edges (abPOA's band diagonal); or the same over a part of the graph (`allowed`)."""
 
     var order: List[Int]
     var rank: List[Int]
@@ -173,6 +173,33 @@ struct Topology(Movable):
                 var s = Int(graph.edge_to[e])
                 var weight = graph.edge_weight[e]
                 if weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > self.remaining[node]):
+                    best_weight = weight
+                    self.remaining[node] = self.remaining[s] + 1
+                e = Int(graph.next_out[e])
+
+    def __init__(out self, graph: Graph, allowed: List[Bool]) raises:
+        """Over the nodes `allowed` alone: they in topological order (`order`), and each one's remaining path
+        through them alone; every node's rank in the whole graph."""
+        self.rank = graph.node_order()
+        var n = len(self.rank)
+        var full = List[Int](length=n, fill=0)
+        for node in range(n):
+            full[self.rank[node]] = node
+        self.order = List[Int]()
+        for node in full:
+            if allowed[node]:
+                self.order.append(node)
+        self.remaining = List[Int](length=n, fill=0)
+        for r in reversed(range(len(self.order))):
+            var node = self.order[r]
+            var best_weight = Int32(-1)
+            var e = Int(graph.first_out[node])
+            while e >= 0:
+                var s = Int(graph.edge_to[e])
+                var weight = graph.edge_weight[e]
+                if allowed[s] and (
+                    weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > self.remaining[node])
+                ):
                     best_weight = weight
                     self.remaining[node] = self.remaining[s] + 1
                 e = Int(graph.next_out[e])
@@ -400,7 +427,9 @@ struct Workspace(Movable):
                 ends_here = ends_here or s == right
                 e = Int(graph.next_out[e])
             if right == SINK:
-                ends_here = graph.out_degree[node] == 0
+                # A sink of the nodes aligned to: none of its successors among them (the graph's own sinks when
+                # aligning to all of it).
+                ends_here = self.waiting[r] == 0
             var low = width
             var high = -1
             var left = width

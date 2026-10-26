@@ -141,10 +141,29 @@ struct _Aligner(Movable):
         self.scratch = WindowScratch()
         self.workspace = Workspace()
 
-    def align(mut self, graph: Graph, seq: List[UInt8], options: PoaOptions, mode: Int) raises -> GraphAlignment:
-        """`seq` aligned to `graph` in `mode` (`options.mode` for a spanning read; `PREFIX` or `SUFFIX`)."""
-        var topology = Topology(graph)
+    def align(
+        mut self, graph: Graph, seq: List[UInt8], options: PoaOptions, mode: Int, anchors: List[Int] = List[Int]()
+    ) raises -> GraphAlignment:
+        """`seq` aligned to `graph` in `mode` (`options.mode` for a spanning read; `PREFIX` or `SUFFIX`). With
+        `anchors` (paths) and not pinned, a read anchored at one end is aligned to the part of the graph between
+        their ends alone (`_between`)."""
         self.row_of.resize(len(graph), -1)
+        if not options.seeded and len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX):
+            var part = Topology(graph, _between(graph, anchors, mode))
+            return self.workspace.align(
+                graph,
+                part,
+                part.order,
+                SOURCE,
+                SINK,
+                Span(seq),
+                options.scoring,
+                self.row_of,
+                mode,
+                options.band_b,
+                options.band_f,
+            )
+        var topology = Topology(graph)
         if options.seeded and (mode == GLOBAL or mode == PREFIX or mode == SUFFIX):
             return align_pinned(
                 graph,
@@ -214,17 +233,33 @@ def poa(
             foreign = _foreign(core, seqs, spanning, left, right)
         var kept_left = _without(left, foreign)
         var kept_right = _without(right, foreign)
-        _add_anchored(graph, names, seqs, _longest_first(seqs, kept_left), options, PREFIX, path_of, aligner)
-        _add_anchored(graph, names, seqs, _longest_first(seqs, kept_right), options, SUFFIX, path_of, aligner)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, kept_left), options, PREFIX, path_of, aligner, members)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, kept_right), options, SUFFIX, path_of, aligner, members)
         var consensus = List[List[UInt8]]()
         if len(left) + len(right) > 0:
             consensus.append(_letters(graph, graph.heaviest_path_spanning(Topology(graph).order, members)))
         # Another copy's reads in the graph too (the MSA shows every read), once the consensus is taken.
         _add_anchored(
-            graph, names, seqs, _longest_first(seqs, _without(left, kept_left)), options, PREFIX, path_of, aligner
+            graph,
+            names,
+            seqs,
+            _longest_first(seqs, _without(left, kept_left)),
+            options,
+            PREFIX,
+            path_of,
+            aligner,
+            members,
         )
         _add_anchored(
-            graph, names, seqs, _longest_first(seqs, _without(right, kept_right)), options, SUFFIX, path_of, aligner
+            graph,
+            names,
+            seqs,
+            _longest_first(seqs, _without(right, kept_right)),
+            options,
+            SUFFIX,
+            path_of,
+            aligner,
+            members,
         )
         for r in range(len(seqs)):
             shown.append(path_of[r])
@@ -252,11 +287,11 @@ def poa(
     # The graph every read is aligned into: on the joined sequence, or on the one side's.
     _ = graph.add("plegma_backbone", Span(parts[0]))
     if len(parts) == 1:
-        _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
-        _add_anchored(graph, names, seqs, _longest_first(seqs, right), options, SUFFIX, path_of, aligner)
+        var backbone: List[Int] = [0]
+        _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner, backbone)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, right), options, SUFFIX, path_of, aligner, backbone)
         # The consensus again from the graph every read voted in, between the assembled sequence's ends (its path one
         # vote among the reads'): the reads mend what joining or one side's graph got wrong.
-        var backbone: List[Int] = [0]
         parts[0] = _letters(
             graph, graph.heaviest_path_spanning(Topology(graph).order, backbone, len(left) > 0 and len(right) > 0)
         )
@@ -378,12 +413,45 @@ def _add_anchored(
     mode: Int,
     mut path_of: List[Int],
     mut aligner: _Aligner,
+    anchors: List[Int] = List[Int](),
 ) raises:
     """The reads in `order`, anchored at one end (`mode` `PREFIX` for the left, `SUFFIX` for the right), each
-    aligned and fused into the graph; letters past the graph's end (or before its start) join it as new nodes."""
+    aligned and fused into the graph; letters past the graph's end (or before its start) join it as new nodes.
+    `anchors`: the paths whose ends are the anchors (the spanning reads, or the assembled backbone)."""
     for r in order:
-        var found = aligner.align(graph, seqs[r], options, mode)
+        var found = aligner.align(graph, seqs[r], options, mode, anchors)
         path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+
+
+def _between(graph: Graph, anchors: List[Int], mode: Int) -> List[Bool]:
+    """The nodes a read anchored at one end may align to: for a right read (`SUFFIX`) those an end of the paths
+    `anchors` can still be reached from, for a left read (`PREFIX`) those reachable from a start of them. A read
+    fixed at one anchor may run past the other (a local assembler cuts it to the gap's estimated length and a
+    margin), and its letters past the graph's end join it as new nodes after the end: aligned to the whole graph,
+    a right read would have to end at their end, the anchor no longer a sink (and a left read start at the new
+    nodes before the start)."""
+    var n = len(graph)
+    var allowed = List[Bool](length=n, fill=False)
+    var work = List[Int]()
+    for p in anchors:
+        ref path = graph.paths[p]
+        if len(path) == 0:
+            continue
+        var node = Int(path[len(path) - 1]) if mode == SUFFIX else Int(path[0])
+        if not allowed[node]:
+            allowed[node] = True
+            work.append(node)
+    # Backwards from the ends (a right read), forwards from the starts (a left read).
+    while len(work) > 0:
+        var node = work.pop()
+        var e = Int(graph.first_in[node]) if mode == SUFFIX else Int(graph.first_out[node])
+        while e >= 0:
+            var other = Int(graph.edge_from[e]) if mode == SUFFIX else Int(graph.edge_to[e])
+            if not allowed[other]:
+                allowed[other] = True
+                work.append(other)
+            e = Int(graph.next_in[e]) if mode == SUFFIX else Int(graph.next_out[e])
+    return allowed^
 
 
 def _one_side(
