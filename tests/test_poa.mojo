@@ -108,6 +108,40 @@ def test_reads_past_the_far_anchor_do_not_extend_the_consensus() raises:
     assert_true(distance(String(unsafe_from_utf8=consensus), String(unsafe_from_utf8=truth)) <= 3)
 
 
+def test_another_copys_one_sided_reads_get_no_vote() raises:
+    # Five spanning reads of the truth, two left reads of it, and eight left reads of another copy (2% of its letters
+    # substituted), outvoting them: the consensus is the truth's all the same.
+    seed(107)
+    var truth = _random(2000)
+    var other = truth.copy()
+    var letters = "ACGT".as_bytes()
+    for i in range(0, len(other), 50):
+        other[i] = letters[(Int(random_ui64(1, 3)) + Int(_code(other[i]))) % 4]
+    var seqs = List[List[UInt8]]()
+    var names = List[String]()
+    var anchors = List[Int]()
+    for k in range(15):
+        if k >= 5 and k < 13:
+            seqs.append(_mutated(other, 0.01))
+        else:
+            seqs.append(_mutated(truth, 0.01))
+        names.append(String(t"r{k}"))
+        anchors.append(BOTH if k < 5 else LEFT)
+    var made = poa(names, seqs, anchors, PoaOptions(), Graph())
+    assert_equal(len(made.foreign), 8)
+    for r in made.foreign:
+        assert_true(r >= 5 and r < 13)
+    assert_true(distance(String(unsafe_from_utf8=made.consensus[0]), String(unsafe_from_utf8=truth)) <= 3)
+
+
+def _code(letter: UInt8) -> Int:
+    if letter == UInt8(ord("A")):
+        return 0
+    if letter == UInt8(ord("C")):
+        return 1
+    return 2 if letter == UInt8(ord("G")) else 3
+
+
 def test_one_side_assembles_a_prefix_where_reads_agree() raises:
     seed(101)
     var truth = _random(3000)

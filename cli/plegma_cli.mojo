@@ -184,6 +184,8 @@ struct Aligned(Movable):
     var polish_with: List[Int]
     var anchors: List[Int]
     var consensus: List[List[UInt8]]
+    var foreign: List[Int]
+    """Reads anchored at one end that are another copy's (`Poa.foreign`): not polished against."""
 
     def __init__(out self, var graph: Graph, var shown: List[Int], var rows: List[String]):
         self.graph = graph^
@@ -192,6 +194,7 @@ struct Aligned(Movable):
         self.polish_with = List[Int]()
         self.anchors = List[Int]()
         self.consensus = List[List[UInt8]]()
+        self.foreign = List[Int]()
 
     def __init__(out self, var made: Poa):
         self.graph = Graph()
@@ -200,7 +203,10 @@ struct Aligned(Movable):
         self.polish_with = List[Int]()
         self.anchors = List[Int]()
         self.consensus = List[List[UInt8]]()
-        made^.parts(self.graph, self.shown, self.polish_with, self.consensus)
+        self.foreign = List[Int]()
+        var foreign = List[Int]()
+        made^.parts(self.graph, self.shown, self.polish_with, self.consensus, foreign)
+        self.foreign = foreign^
 
 
 def _poa(input: String, mut names: List[String], mut seqs: List[List[UInt8]], options: Options) raises -> Aligned:
@@ -224,9 +230,14 @@ def _poa(input: String, mut names: List[String], mut seqs: List[List[UInt8]], op
     var anchors = _anchors(input, len(seqs))
     var out = Aligned(poa(names, seqs, anchors, settings, start^))
     if len(out.consensus) > 0:
-        # Reads anchored at one end: the consensus polished against every read, each aligned as it is anchored.
+        # Reads anchored at one end: the consensus polished against every read, each aligned as it is anchored, but
+        # another copy's.
         out.polish_with.clear()
+        var f = 0
         for r in range(len(seqs)):
+            if f < len(out.foreign) and out.foreign[f] == r:
+                f += 1
+                continue
             out.polish_with.append(r)
         out.anchors = anchors^
     return out^

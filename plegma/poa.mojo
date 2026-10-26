@@ -6,7 +6,10 @@ fixed at one anchor only, the left (`LEFT`, starting at the left anchor and endi
 pins, `pinned.align_pinned`, or to the whole graph); then the left reads, each aligned from the graph's start to any
 node (`kernel.PREFIX`: whatever passes a sink is new sequence the graph grows by), and the right reads, from any node
 to the graph's end (`kernel.SUFFIX`). Their consensus runs from the spanning reads' start to their end, every read
-weighing the edges (`Graph.heaviest_path_spanning`).
+weighing the edges (`Graph.heaviest_path_spanning`). A read fixed at one anchor only may be another copy's (a
+tandem repeat's or the other haplotype's, sharing the one anchor and so missing the other): with spanning reads
+enough, one much further from their consensus than any of them is (`_foreign`) gets no vote; it joins the graph after
+the consensus is taken, and the caller leaves it out of polishing (`Poa.foreign`).
 
 With no spanning read each side is assembled on its own: the left reads into a graph of their own, the longest
 first, its consensus followed from the left anchor while most reads go on (`Graph.heaviest_path`); the right reads
@@ -17,7 +20,7 @@ as anchored. With one side only (a telomere) its consensus is the assembly, one-
 adaptive band in every mode: the reads' length times the band, not times each other.
 """
 
-from karan import Aligner, Costs, Mode
+from karan import Aligner, Alignment, Costs, Mode
 
 from .graph import Graph
 from .kernel import (
@@ -54,6 +57,13 @@ comptime JOIN_IDENTITY = 0.75
 comptime JOIN_EDIT = 19
 """What an edit costs in that overlap, a match earning 1."""
 
+comptime FOREIGN_SPANNING = 3
+"""The fewest spanning reads whose consensus a read anchored at one end is checked against (`_foreign`)."""
+comptime FOREIGN_RATIO = 1.5
+comptime FOREIGN_SLACK = 3
+"""A read anchored at one end is another copy's when its edit distance to the spanning reads' consensus passes
+`FOREIGN_RATIO` times the worst spanning read's rate over the letters it covers, plus `FOREIGN_SLACK`."""
+
 
 struct PoaOptions(Copyable, Movable):
     """How `poa` aligns: the kernel's `mode` (`GLOBAL`, or abPOA's `LOCAL` and `EXTENSION` for spanning reads),
@@ -85,20 +95,23 @@ struct PoaOptions(Copyable, Movable):
 
 struct Poa(Movable):
     """What `poa` made: the graph; `shown`, the paths to output (a starting MSA's rows, then every read's, in input
-    order); `spanning`, the reads (input indices) a consensus of all of them may be polished against; and, when any
-    read is anchored at one end, `consensus` (one sequence, or the two sides' when they could not be joined),
-    otherwise empty: the caller takes the graph's own."""
+    order); `spanning`, the reads (input indices) a consensus of all of them may be polished against; when any read
+    is anchored at one end, `consensus` (one sequence, or the two sides' when they could not be joined), otherwise
+    empty: the caller takes the graph's own; and `foreign`, the reads anchored at one end that are another copy's,
+    left out of the consensus (and to be left out of its polishing)."""
 
     var graph: Graph
     var shown: List[Int]
     var spanning: List[Int]
     var consensus: List[List[UInt8]]
+    var foreign: List[Int]
 
     def __init__(out self, var graph: Graph, var shown: List[Int], var spanning: List[Int]):
         self.graph = graph^
         self.shown = shown^
         self.spanning = spanning^
         self.consensus = List[List[UInt8]]()
+        self.foreign = List[Int]()
 
     def parts(
         deinit self,
@@ -106,12 +119,14 @@ struct Poa(Movable):
         mut shown: List[Int],
         mut spanning: List[Int],
         mut consensus: List[List[UInt8]],
+        mut foreign: List[Int],
     ):
-        """The graph, `shown`, `spanning` and `consensus`, taken apart into those."""
+        """The graph, `shown`, `spanning`, `consensus` and `foreign`, taken apart into those."""
         graph = self.graph^
         shown = self.shown^
         spanning = self.spanning^
         consensus = self.consensus^
+        foreign = self.foreign^
 
 
 struct _Aligner(Movable):
@@ -187,21 +202,35 @@ def poa(
     var graph = start^
     if len(spanning) > 0 or len(graph.paths) > 0:
         _add_spanning(graph, names, seqs, _ordered(seqs, spanning, options.order), options, path_of, aligner)
-        _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
-        _add_anchored(graph, names, seqs, _longest_first(seqs, right), options, SUFFIX, path_of, aligner)
+        # The starting MSA's rows and the spanning reads end the consensus.
+        var members = List[Int]()
+        for p in range(starting):
+            members.append(p)
+        for r in spanning:
+            members.append(path_of[r])
+        var foreign = List[Int]()
+        if len(spanning) >= FOREIGN_SPANNING and len(left) + len(right) > 0:
+            var core = _letters(graph, graph.heaviest_path_spanning(Topology(graph).order, members))
+            foreign = _foreign(core, seqs, spanning, left, right)
+        var kept_left = _without(left, foreign)
+        var kept_right = _without(right, foreign)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, kept_left), options, PREFIX, path_of, aligner)
+        _add_anchored(graph, names, seqs, _longest_first(seqs, kept_right), options, SUFFIX, path_of, aligner)
+        var consensus = List[List[UInt8]]()
+        if len(left) + len(right) > 0:
+            consensus.append(_letters(graph, graph.heaviest_path_spanning(Topology(graph).order, members)))
+        # Another copy's reads in the graph too (the MSA shows every read), once the consensus is taken.
+        _add_anchored(
+            graph, names, seqs, _longest_first(seqs, _without(left, kept_left)), options, PREFIX, path_of, aligner
+        )
+        _add_anchored(
+            graph, names, seqs, _longest_first(seqs, _without(right, kept_right)), options, SUFFIX, path_of, aligner
+        )
         for r in range(len(seqs)):
             shown.append(path_of[r])
         var out = Poa(graph^, shown^, spanning^)
-        if len(left) + len(right) > 0:
-            # The starting MSA's rows and the spanning reads end the consensus.
-            var members = List[Int]()
-            for p in range(starting):
-                members.append(p)
-            for r in out.spanning:
-                members.append(path_of[r])
-            out.consensus.append(
-                _letters(out.graph, out.graph.heaviest_path_spanning(Topology(out.graph).order, members))
-            )
+        out.consensus = consensus^
+        out.foreign = foreign^
         return out^
     # No read spans both anchors: each side on its own, then joined.
     var parts = List[List[UInt8]]()
@@ -250,6 +279,65 @@ def poa(
         shown.append(path_of[r])
     var out = Poa(graph^, shown^, spanning^)
     out.consensus = parts^
+    return out^
+
+
+def _foreign(
+    core: List[UInt8], seqs: List[List[UInt8]], spanning: List[Int], left: List[Int], right: List[Int]
+) raises -> List[Int]:
+    """The reads of `left` and `right` (anchored at the left or the right end) another copy's: further from `core`,
+    the spanning reads' consensus, than `FOREIGN_RATIO` times the worst spanning read's rate over the letters each
+    covers, plus `FOREIGN_SLACK`. Edit distances; a one-sided read's as the polisher aligns it."""
+    var aligner = Aligner()
+    var worst = 0.0
+    for r in spanning:
+        var found = aligner.align(Span(core), Span(seqs[r]), Costs.edit(), Mode.GLOBAL)
+        worst = max(worst, Float64(found.cost) / Float64(max(1, len(core))))
+    var out = List[Int]()
+    for r in left:
+        if _far(aligner, core, seqs[r], True, worst):
+            out.append(r)
+    for r in right:
+        if _far(aligner, core, seqs[r], False, worst):
+            out.append(r)
+    sort(out)
+    return out^
+
+
+def _far(mut aligner: Aligner, core: List[UInt8], seq: List[UInt8], left: Bool, worst: Float64) raises -> Bool:
+    """Whether `seq`, anchored at `core`'s start (`left`) or end, is further from it than `_foreign` allows."""
+    var found = _one_sided(aligner, core, seq, left)
+    var covered = found.reference_end - found.reference_start
+    return Float64(found.cost) > FOREIGN_RATIO * worst * Float64(covered) + Float64(FOREIGN_SLACK)
+
+
+def _one_sided(mut aligner: Aligner, consensus: List[UInt8], seq: List[UInt8], left: Bool) raises -> Alignment:
+    """`seq`, anchored at the consensus's start (`left`) or end, against it: ending inside it (the whole read against
+    a prefix, or a suffix) or past it (the whole consensus against a prefix of the read, or a suffix, the rest free),
+    the cheaper."""
+    var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), Mode.PREFIX if left else Mode.SUFFIX)
+    if len(consensus) - len(seq) < found.cost:
+        var past = Mode.ends_free(query_end=len(seq)) if left else Mode.ends_free(query_start=len(seq))
+        var other = aligner.align(Span(consensus), Span(seq), Costs.edit(), past, max_cost=found.cost - 1)
+        if other:
+            found = other.take()
+    return found^
+
+
+def _without(reads: List[Int], drop: List[Int]) -> List[Int]:
+    """`reads` but those in `drop` (sorted)."""
+    var out = List[Int]()
+    for r in reads:
+        var lo = 0
+        var hi = len(drop)
+        while lo < hi:
+            var mid = (lo + hi) // 2
+            if drop[mid] < r:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo == len(drop) or drop[lo] != r:
+            out.append(r)
     return out^
 
 
