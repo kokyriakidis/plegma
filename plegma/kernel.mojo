@@ -296,25 +296,27 @@ struct Workspace(Movable):
         mode: Int = GLOBAL,
         band_b: Int = 10,
         band_f: Float64 = 0.01,
+        band_max: Int = -1,
     ) raises -> GraphAlignment:
         """`align_to_graph` over `nodes` alone (in topological order): those strictly between node `left` and node
         `right` (`SOURCE` and `SINK` for the graph's ends), the alignment leaving `left` and, globally, reaching
-        `right`. `row_of` is scratch, as long as the graph, every entry -1, and left so. In 16-bit lanes (twice
+        `right`. The band reaches `b + f m` letters either side, at most `band_max` (none when negative). `row_of`
+        is scratch, as long as the graph, every entry -1, and left so. In 16-bit lanes (twice
         as many a vector) when every score the alignment can reach fits them (on shasta2's local assemblies the
         same alignments as 32-bit lanes and 2% faster, narrow rows too)."""
         var m = len(query)
         var banded = band_b >= 0 and _banded(mode)
-        var reach = band_b + Int(band_f * Float64(m)) if banded else m + 1
+        var reach = _reach(band_b, band_f, band_max, m) if banded else m + 1
         # 16-bit lanes when every score fits them, or, banded, when the band is narrow enough that a row's scores
         # kept relative to a base of its own fit them however long the alignment (`REBASED_SPAN`).
         if _fits_16_bits(scoring, m, len(nodes)) or (banded and 2 * reach + 1 <= REBASED_SPAN):
             var got = self._align[DType.int16](
-                graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, banded
+                graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max, banded
             )
             if got.cells >= 0:
                 return got^
         return self._align[DType.int32](
-            graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f
+            graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max
         )
 
     def _align[
@@ -332,6 +334,7 @@ struct Workspace(Movable):
         mode: Int = GLOBAL,
         band_b: Int = 10,
         band_f: Float64 = 0.01,
+        band_max: Int = -1,
         rebase: Bool = False,
     ) raises -> GraphAlignment:
         """`align_to_graph` over `nodes` alone (in topological order): those strictly between node `left` and node
@@ -351,7 +354,7 @@ struct Workspace(Movable):
         var m = len(query)
         var width = m + 1
         var banded = band_b >= 0 and _banded(mode)
-        var w = band_b + Int(band_f * Float64(m)) if banded else width
+        var w = _reach(band_b, band_f, band_max, m) if banded else width
         var convex = scoring.convex()
         var gap1 = S(Int(scoring.open1 + scoring.extend1))
         var gap2 = S(Int(scoring.open2 + scoring.extend2))
@@ -884,6 +887,7 @@ struct Workspace(Movable):
                 for r in range(n):
                     row_of[nodes[r]] = -1
                 if banded and w < width:
+                    # Wider, and uncapped: the band missed the end.
                     return self.align(
                         graph, topology, nodes, left, right, query, scoring, row_of, mode, 2 * band_b + 10, 2 * band_f
                     )
@@ -987,6 +991,14 @@ def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut r
     for key in keys:
         var p = Int(graph.edge_from[Int(key & 0xFFFFFFFF)])
         rows.append(0 if p == left else row_of[p])
+
+
+@inline(.always)
+def _reach(band_b: Int, band_f: Float64, band_max: Int, m: Int) -> Int:
+    """The band's reach either side for a query of `m` letters: `band_b + band_f m`, at most `band_max` when that is
+    not negative."""
+    var reach = band_b + Int(band_f * Float64(m))
+    return min(reach, band_max) if band_max >= 0 else reach
 
 
 @inline(.always)

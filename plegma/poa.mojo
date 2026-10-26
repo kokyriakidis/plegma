@@ -66,6 +66,14 @@ comptime FOREIGN_SLACK = 3
 `FOREIGN_RATIO` times the worst spanning read's rate over the letters it covers, plus `FOREIGN_SLACK`."""
 
 
+comptime BAND_MAX = 64
+"""The adaptive band's reach at most, either side. abPOA's b + f L grows with the read (310 letters at 30 kb), but
+the band also follows the best cells and the diagonal of the graph's remaining path, which carry a long read's
+drift. Capped at 64, shasta2's long local assemblies take 2.6 times fewer cells and its chr21 assembly is byte for
+byte the same (as at 32 and 100); the alignments in an MSA may place a gap elsewhere (237 of 36,082 rows over 2,093
+local assemblies). Pinned windows (`align_pinned`) keep abPOA's band."""
+
+
 struct PoaOptions(Copyable, Movable):
     """How `poa` aligns: the kernel's `mode` (`GLOBAL`, or abPOA's `LOCAL` and `EXTENSION` for spanning reads),
     its `scoring` and band, the spanning reads' `order`, whether each read is pinned to the consensus (`seeded`) and
@@ -75,6 +83,8 @@ struct PoaOptions(Copyable, Movable):
     var scoring: Scoring
     var band_b: Int
     var band_f: Float64
+    var band_max: Int
+    """The band's reach at most, either side (none when negative): `BAND_MAX`."""
     var order: Int
     var seeded: Bool
     var strand: Bool
@@ -86,6 +96,7 @@ struct PoaOptions(Copyable, Movable):
         self.scoring = Scoring()
         self.band_b = 10
         self.band_f = 0.01
+        self.band_max = BAND_MAX
         self.order = GUIDE_ORDER
         self.seeded = True
         self.strand = False
@@ -163,6 +174,7 @@ struct _Aligner(Movable):
                 mode,
                 options.band_b,
                 options.band_f,
+                options.band_max,
             )
         var topology = Topology(graph)
         if options.seeded and (mode == GLOBAL or mode == PREFIX or mode == SUFFIX):
@@ -190,6 +202,7 @@ struct _Aligner(Movable):
             mode,
             options.band_b,
             options.band_f,
+            options.band_max,
         )
 
 

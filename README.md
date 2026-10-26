@@ -75,13 +75,26 @@ against HG002 v1.1):
 | consensus | errors | wall | CPU | peak memory |
 |---|---|---|---|---|
 | abPOA (shasta2's default) | 11,302 | 0:34 | 249 s | 3.7-4.0 GB |
-| plegma (library, `-H`, unpinned) | 6,750 | 0:31 | 223 s | 3.2 GB |
+| plegma (library, `-H`, unpinned) | 6,750 | 0:21 | 133 s | 2.3 GB |
 
-(shasta2's msa1 repair: 7,353 errors.) Both timed twice in the same state of the machine, 10 threads.
+(shasta2's msa1 repair: 7,353 errors.) Each timed twice, 10 threads, on an otherwise idle machine.
 
-Per local assembly, in one process, on 2,093 of them: abPOA (spanning reads, as shasta2 runs it) 30.9 s and a 6.0 GB
-peak; plegma on the same reads 5.9 s and 131 MB (under 1 kb, level: 1.96 against 1.97 s); plegma on every read
-with the model 11.2 s and 158 MB.
+Per local assembly, in one process, on 2,093 of them (every 17th that reaches a consensus method), routed as shasta2's
+default routes them (abPOA with 6 or more spanning reads up to 5 kb, theseus otherwise), plegma on every read with
+the model:
+
+| shasta2's default sends it to | local assemblies | shasta2's default | plegma |
+|---|---|---|---|
+| abPOA | 1,638 | 7.96 s | 3.83 s |
+| theseus, spanning reads (over 5 kb) | 22 | 2.43 s | 2.22 s |
+| theseus, every read (under 6 spanning) | 433 | 0.164 s | 0.157 s |
+| total | 2,093 | 10.55 s | 6.21 s |
+
+On abPOA's own input for all 2,093 (spanning reads alone), abPOA takes 30.7 s and a 6.0 GB peak.
+
+`plegma poa`'s band is abPOA's adaptive band, `b + f L` letters either side of the row's best cells and of the
+graph's remaining path, capped at 64 letters (`-B`; a negative value leaves it uncapped, as abPOA). The cap leaves
+shasta2's chr21 assembly byte for byte the same and its long local assemblies take 2.6 times fewer cells.
 
 The library (`plegma/__init__.mojo` lists its API) holds both: the graph and its whole-graph aligner
 (`plegma/kernel.mojo`), consensus polishing (optionally with a `HomopolymerModel`), and `on_reference` with minimap2's

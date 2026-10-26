@@ -198,6 +198,46 @@ def test_a_long_deletion_reaches_the_end() raises:
     assert_equal(found.score, _score_from_cost(path, query, Scoring()))
 
 
+def test_a_capped_band_keeps_the_alignment() raises:
+    """The band capped (`band_max`) far below abPOA's b + f L on a 3 kb read: the same score as the uncapped band in
+    fewer cells, and a deletion of most of a long path still found, the band following the path's diagonal."""
+    var base = _random(3000, 71)
+    var graph = Graph()
+    _ = graph.add("s0", base.as_bytes())
+    for k in range(1, 5):
+        var next = _mutated(base, 9, 700 + k)
+        var topology = Topology(graph)
+        var found = align_to_graph(graph, topology, next.as_bytes(), Scoring(), GLOBAL)
+        _ = graph.fuse_nodes(String(t"s{k}"), next.as_bytes(), found.nodes)
+    var letters = List[UInt8](_mutated(base, 8, 800).as_bytes())
+    var query = List[UInt8](letters[0:1500])
+    query.extend(List[UInt8](letters[1540 : len(letters)]))
+    var topology = Topology(graph)
+    var row_of = List[Int](length=len(graph), fill=-1)
+    var workspace = Workspace()
+    var capped = workspace.align(
+        graph, topology, topology.order, SOURCE, SINK, Span(query), Scoring(), row_of, GLOBAL, 10, 0.01, 16
+    )
+    var uncapped = workspace.align(
+        graph, topology, topology.order, SOURCE, SINK, Span(query), Scoring(), row_of, GLOBAL, 10, 0.01, -1
+    )
+    assert_equal(capped.score, uncapped.score)
+    assert_true(capped.cells < uncapped.cells)
+
+    var path = _random(12000, 43)
+    var ends = List[UInt8](path.as_bytes()[0:200])
+    ends.extend(List[UInt8](path.as_bytes()[11800:12000]))
+    var line = Graph()
+    _ = line.add("path", path.as_bytes())
+    var order = Topology(line)
+    var rows = List[Int](length=len(line), fill=-1)
+    var found = workspace.align(
+        line, order, order.order, SOURCE, SINK, Span(ends), Scoring(), rows, GLOBAL, 10, 0.01, 16
+    )
+    assert_equal(len(found.nodes), 400)
+    assert_equal(found.score, _score_from_cost(path, String(unsafe_from_utf8=ends), Scoring()))
+
+
 def test_prefix_and_suffix_modes_place_partial_reads() raises:
     """A read fixed at the graph's start ends anywhere, its letters past a sink inserted (an overhang); one fixed at
     the end starts anywhere, its letters before a source inserted."""

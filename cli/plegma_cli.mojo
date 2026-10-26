@@ -17,7 +17,7 @@ from plegma.clusters import cluster_rows
 from plegma.graph import GAP, Graph
 from plegma.homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology
-from plegma.poa import BOTH, GUIDE_ORDER, INPUT_ORDER, LEFT, LONGEST_FIRST, RIGHT, Poa, PoaOptions, poa
+from plegma.poa import BAND_MAX, BOTH, GUIDE_ORDER, INPUT_ORDER, LEFT, LONGEST_FIRST, RIGHT, Poa, PoaOptions, poa
 from plegma.polish import polish
 from plegma.reference import on_reference
 
@@ -40,6 +40,7 @@ poa options:
                 a g-long gap costs min{O1+g*E1, O2+g*E2} (convex); O2 0: O1+g*E1 (affine); O1 0: g*E1 (linear)
     -b INT      adaptive band: extra band b [10]; < 0 disables the band
     -f FLOAT    adaptive band: extra band f [0.01]: b+f*L letters either side, L the sequence's length
+    -B INT      adaptive band: at most INT letters either side [64]; < 0 no cap (abPOA's band)
     -p          progressive: abPOA's guide order, most similar minimizer multisets first [the default]
     -L          the sequences longest first instead
     -n          the sequences in input order instead
@@ -88,6 +89,7 @@ struct Options(Copyable, Movable):
     var scoring: Scoring
     var band_b: Int
     var band_f: Float64
+    var band_max: Int
     var longest_first: Bool
     var progressive: Bool
     var strand: Bool
@@ -111,6 +113,7 @@ struct Options(Copyable, Movable):
         self.scoring = Scoring()
         self.band_b = 10
         self.band_f = 0.01
+        self.band_max = BAND_MAX
         self.longest_first = False
         # The guide order and the pins by default: on the read sets the same consensus as the input order unpinned,
         # on chr20's allele sets better MSAs, on its largest VNTRs several times faster.
@@ -250,6 +253,7 @@ def _poa(input: String, mut names: List[String], mut seqs: List[List[UInt8]], op
     settings.scoring = options.scoring
     settings.band_b = options.band_b
     settings.band_f = options.band_f
+    settings.band_max = options.band_max
     settings.order = GUIDE_ORDER if options.progressive else (LONGEST_FIRST if options.longest_first else INPUT_ORDER)
     settings.seeded = options.seeded
     settings.strand = options.strand
@@ -603,6 +607,9 @@ def main() raises:
             i += 1
         elif a == "-f" and not reference:
             options.band_f = Float64(_value(args, i))
+            i += 1
+        elif a == "-B" and not reference:
+            options.band_max = Int(_value(args, i))
             i += 1
         elif a == "-L" and not reference:
             options.longest_first = True
