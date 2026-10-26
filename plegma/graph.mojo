@@ -272,9 +272,12 @@ struct Graph(Movable, Sized):
                 weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
         return self._bundle(order, starts, ends, weight)
 
-    def heaviest_path_spanning(self, order: List[Int], spanning: List[Int]) -> List[Int]:
+    def heaviest_path_spanning(self, order: List[Int], spanning: List[Int], bounded: Bool = True) -> List[Int]:
         """`heaviest_path` from where the paths `spanning` start to where they end, every path weighing the edges:
-        the reads anchored at one end only add their votes inside without ending the consensus where they stop."""
+        the reads anchored at one end only add their votes inside without ending the consensus where they stop.
+        `bounded`: never past the last of the paths `spanning` end at, however many reads go on (a read fixed at one
+        anchor may run past the other: a local assembler cuts it to the gap's estimated length and a margin);
+        otherwise the reads going on past their ends carry the walk on (an assembly from one anchor alone)."""
         var count = len(self.bases)
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
@@ -283,7 +286,7 @@ struct Graph(Movable, Sized):
             if len(path) > 0:
                 starts[Int(path[0])] += 1
                 ends[Int(path[len(path) - 1])] += 1
-        return self._bundle(order, starts, ends, self.edge_weight)
+        return self._bundle(order, starts, ends, self.edge_weight, bounded)
 
     def heaviest_path_backward(self, order: List[Int], members: List[Int]) -> List[Int]:
         """`heaviest_path` over the paths `members` walked from the end: from a virtual sink to a virtual source,
@@ -332,19 +335,29 @@ struct Graph(Movable, Sized):
         path.reverse()
         return path^
 
-    def _bundle(self, order: List[Int], starts: List[Int], ends: List[Int], weight: List[Int32]) -> List[Int]:
+    def _bundle(
+        self, order: List[Int], starts: List[Int], ends: List[Int], weight: List[Int32], bounded: Bool = False
+    ) -> List[Int]:
         var count = len(self.bases)
         var score = List[Int](length=count, fill=0)
         var next = List[Int](length=count, fill=-1)
+        # `bounded`: only nodes an end can still be reached from (all of them otherwise).
+        var reaches = List[Bool](length=count, fill=not bounded)
         for k in reversed(range(len(order))):
             var node = order[k]
             var best_weight = ends[node] if ends[node] > 0 else -1
             var best_score = 0
             var choice = -1
+            if ends[node] > 0:
+                reaches[node] = True
             var e = Int(self.first_out[node])
             while e >= 0:
                 var s = Int(self.edge_to[e])
                 var w = Int(weight[e])
+                if reaches[s]:
+                    reaches[node] = True
+                else:
+                    w = 0
                 if w > 0 and (w > best_weight or (w == best_weight and score[s] >= best_score)):
                     best_weight = w
                     best_score = score[s]

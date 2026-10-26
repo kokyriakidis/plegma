@@ -228,7 +228,9 @@ def poa(
         # The consensus again from the graph every read voted in, between the assembled sequence's ends (its path one
         # vote among the reads'): the reads mend what joining or one side's graph got wrong.
         var backbone: List[Int] = [0]
-        parts[0] = _letters(graph, graph.heaviest_path_spanning(Topology(graph).order, backbone))
+        parts[0] = _letters(
+            graph, graph.heaviest_path_spanning(Topology(graph).order, backbone, len(left) > 0 and len(right) > 0)
+        )
         # One side alone: the reads going on past the cut carry the walk past it again.
         if len(right) == 0:
             _trim(parts[0], seqs, left, options.min_cover, True)

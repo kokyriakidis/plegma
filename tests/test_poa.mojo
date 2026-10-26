@@ -41,13 +41,18 @@ def _slice(seq: List[UInt8], start: Int, end: Int) -> List[UInt8]:
     return out^
 
 
-def _assembled(truth: List[UInt8], n_both: Int, n_left: Int, n_right: Int, rate: Float64) raises -> List[UInt8]:
+def _assembled(
+    truth: List[UInt8], n_both: Int, n_left: Int, n_right: Int, rate: Float64, overhang: Int = 0
+) raises -> List[UInt8]:
     """The polished consensus of reads of `truth`: `n_both` spanning it, `n_left` fixed at its start, `n_right` at
-    its end."""
+    its end; with `overhang`, the one-sided reads run that many letters past the far end instead (into sequence
+    beyond it), as a local assembler cuts them."""
     var seqs = List[List[UInt8]]()
     var names = List[String]()
     var anchors = List[Int]()
     var length = len(truth)
+    var before = _random(overhang)
+    var after = _random(overhang)
     for k in range(n_both + n_left + n_right):
         var anchor = BOTH if k < n_both else (LEFT if k < n_both + n_left else RIGHT)
         var start = 0
@@ -56,7 +61,12 @@ def _assembled(truth: List[UInt8], n_both: Int, n_left: Int, n_right: Int, rate:
             end = Int(random_ui64(UInt64(length * 3 // 10), UInt64(length * 95 // 100)))
         elif anchor == RIGHT:
             start = Int(random_ui64(UInt64(length // 20), UInt64(length * 7 // 10)))
-        seqs.append(_mutated(_slice(truth, start, end), rate))
+        var piece = _slice(truth, start, end)
+        if overhang > 0 and anchor == LEFT:
+            piece = truth + after.copy()
+        elif overhang > 0 and anchor == RIGHT:
+            piece = before + truth.copy()
+        seqs.append(_mutated(piece, rate))
         names.append(String(t"r{k}"))
         anchors.append(anchor)
     var made = poa(names, seqs, anchors, PoaOptions(), Graph())
@@ -86,6 +96,15 @@ def test_no_spanning_read_joins_the_two_sides() raises:
     seed(97)
     var truth = _random(3000)
     var consensus = _assembled(truth, 0, 10, 10, 0.05)
+    assert_true(distance(String(unsafe_from_utf8=consensus), String(unsafe_from_utf8=truth)) <= 3)
+
+
+def test_reads_past_the_far_anchor_do_not_extend_the_consensus() raises:
+    # More one-sided reads than spanning ones, each running past the far anchor: the consensus still ends where the
+    # spanning reads do.
+    seed(103)
+    var truth = _random(3000)
+    var consensus = _assembled(truth, 3, 8, 8, 0.05, overhang=330)
     assert_true(distance(String(unsafe_from_utf8=consensus), String(unsafe_from_utf8=truth)) <= 3)
 
 

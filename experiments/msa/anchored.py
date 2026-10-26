@@ -9,7 +9,8 @@ Each case is a truth of L letters (random, a tandem array of 30 copies of a 40-l
 and reads of it at an error rate (substitutions, insertions and deletions alike): `both` reads span it whole, `left`
 reads start at its start and end at a random place past 30% of it, `right` reads end at its end and start before 70%
 of it. Scenarios: many_both (10 both, 5 left, 5 right), few_both (1, 10, 10), no_both (0, 10, 10), left_only (0, 15,
-0: a telomere, one-directional) and right_only (0, 0, 15: the other end's). plegma reads each read's anchor from its header (`anchor=both|left|right`); pericles
+0: a telomere, one-directional), right_only (0, 0, 15: the other end's) and overhang (5, 10, 10, the one-sided reads
+cut as shasta2's LocalAssembly7 cuts them: 0.1 L + 30 letters past the far anchor, into the sequence beyond it). plegma reads each read's anchor from its header (`anchor=both|left|right`); pericles
 from its own (`> reversed ends_free weight drop lag`: both 0 0 1 0 0, left 0 1 1 0 0, right 1 1 1 0 0), its first read
 spanning and the spanning reads first, as it requires; it cannot run a case with none.
 
@@ -27,7 +28,7 @@ import zlib
 from multiprocessing import Pool
 
 SCENARIOS = {"many_both": (10, 5, 5), "few_both": (1, 10, 10), "no_both": (0, 10, 10), "left_only": (0, 15, 0),
-             "right_only": (0, 0, 15)}
+             "right_only": (0, 0, 15), "overhang": (5, 10, 10)}
 LENGTHS = [5000, 20000, 50000]
 RATES = [0.05, 0.10]
 SEEDS = [1, 2]
@@ -67,6 +68,15 @@ def make_case(path, scenario, length, rate, seed):
     reads = []
     for _ in range(n_both):
         reads.append(("both", mutated(rng, truth, rate)))
+    if scenario == "overhang":
+        margin = int(0.1 * length) + 30
+        before = "".join(rng.choice("ACGT") for _ in range(margin))
+        after = "".join(rng.choice("ACGT") for _ in range(margin))
+        for _ in range(n_left):
+            reads.append(("left", mutated(rng, truth + after, rate)))
+        for _ in range(n_right):
+            reads.append(("right", mutated(rng, before + truth, rate)))
+        n_left = n_right = 0
     for _ in range(n_left):
         end = rng.randint(int(0.3 * length), int(0.95 * length))
         reads.append(("left", mutated(rng, truth[:end], rate)))
