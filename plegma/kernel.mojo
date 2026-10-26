@@ -345,7 +345,9 @@ struct Workspace(Movable):
             live_bytes += self.pool[slot].capacity()
         var peak = 0
 
-        self.hi[0] = min(m, w) if banded else m
+        # Row 0, before every source: a read anchored at the graph's end alone may begin with any number of letters
+        # the graph does not hold (free), so all of it there; a single row.
+        self.hi[0] = min(m, w) if banded and not free_start else m
         var base_remaining = topology.remaining[right] + 1 if right >= 0 else 0
         # Each row's predecessor rows, heaviest edge first; row 0, the left end, waits for those it feeds.
         for r in range(1, n + 1):
@@ -416,6 +418,14 @@ struct Workspace(Movable):
                 # No end to reach: the band follows the best cells.
                 low = max(low, left - w)
                 high = min(high, right + w)
+            elif banded and mode == SUFFIX:
+                # Anchored at the end alone: the diagonal the node's remaining path leaves, nothing else. With a free
+                # start the best cells are chance matches of the read's beginning anywhere before its place, and
+                # following them spread the band over the whole read (a 14 kb read against 37,000 nodes: 290 million
+                # cells, not 11 million).
+                var diagonal = m - max(0, topology.remaining[node] - base_remaining)
+                low = max(low, diagonal - w)
+                high = min(high, diagonal + w)
             elif banded:
                 var diagonal = m - max(0, topology.remaining[node] - base_remaining)
                 low = max(low, min(left, diagonal) - w)
