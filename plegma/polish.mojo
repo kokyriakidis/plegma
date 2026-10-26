@@ -26,8 +26,10 @@ from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel
 from .kernel import LEFT, RIGHT
 
 
-comptime BAND = 32
-"""Read letters either side of a sequence's alignment path that its forward and backward matrices span."""
+comptime BAND = 16
+"""Read letters either side of a sequence's alignment path that its forward and backward matrices span. 16 and 32
+gave shasta2's chr21 assembly byte for byte the same (8 one error more), the matrices half as wide: polishing is most
+of a short local assembly's time."""
 comptime SEGMENT = 64
 """Consensus letters a segment spans at least."""
 comptime APART = 64
@@ -39,19 +41,20 @@ comptime INF = Int32(1 << 28)
 comptime SLOTS = 9
 """Per consensus position: insert A, C, G or T before it, delete it, substitute A, C, G or T for it."""
 comptime MAX_PERIOD = 24
-"""Repeat units up to this long are deleted or copied whole (a sequence's band spans the shift)."""
+"""Repeat units up to this long are deleted or copied whole (the two bands a unit apart overlap: 2 `BAND` > it)."""
 
 
 def _code(letter: UInt8) -> Int:
     """A, C, G and T as 0..3 (upper or lower case); 4 for anything else."""
+    # Byte values, not `ord` of a literal: that decodes the literal's UTF-8 each call, in the votes' inner loop.
     var lower = letter | 0x20
-    if lower == UInt8(ord("a")):
+    if lower == 0x61:
         return 0
-    if lower == UInt8(ord("c")):
+    if lower == 0x63:
         return 1
-    if lower == UInt8(ord("g")):
+    if lower == 0x67:
         return 2
-    if lower == UInt8(ord("t")):
+    if lower == 0x74:
         return 3
     return 4
 
@@ -806,8 +809,10 @@ def past_the_end(mut aligner: Aligner, consensus: List[UInt8], seq: List[UInt8],
         Span(seq), Span(consensus), Costs.edit(), Mode.PREFIX if left else Mode.SUFFIX, ties=Ties.LEFT
     )
     var cigar = List[UInt8](capacity=turned.cigar.byte_length())
+    comptime INSERTED = UInt8(ord("I"))
+    comptime DELETED = UInt8(ord("D"))
     for c in turned.cigar.as_bytes():
-        cigar.append(UInt8(ord("D")) if c == UInt8(ord("I")) else (UInt8(ord("I")) if c == UInt8(ord("D")) else c))
+        cigar.append(DELETED if c == INSERTED else (INSERTED if c == DELETED else c))
     return Alignment(
         turned.cost,
         turned.score,

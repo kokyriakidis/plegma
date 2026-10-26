@@ -75,7 +75,7 @@ against HG002 v1.1):
 | consensus | errors | wall | CPU | peak memory |
 |---|---|---|---|---|
 | abPOA (shasta2's default) | 11,302 | 0:34 | 249 s | 3.7-4.0 GB |
-| plegma (library, `-H`, unpinned) | 6,750 | 0:21 | 133 s | 2.3 GB |
+| plegma (library, `-H`, unpinned) | 6,750 | 0:20 | 129 s | 2.3 GB |
 
 (shasta2's msa1 repair: 7,353 errors.) Each timed twice, 10 threads, on an otherwise idle machine.
 
@@ -85,12 +85,14 @@ the model:
 
 | shasta2's default sends it to | local assemblies | shasta2's default | plegma |
 |---|---|---|---|
-| abPOA | 1,638 | 7.96 s | 3.83 s |
-| theseus, spanning reads (over 5 kb) | 22 | 2.43 s | 2.22 s |
-| theseus, every read (under 6 spanning) | 433 | 0.164 s | 0.157 s |
-| total | 2,093 | 10.55 s | 6.21 s |
+| abPOA | 1,638 | 8.10 s | 3.53 s |
+| theseus, spanning reads (over 5 kb) | 22 | 2.42 s | 2.19 s |
+| theseus, every read (under 6 spanning) | 433 | 0.161 s | 0.135 s |
+| total | 2,093 | 10.69 s | 5.86 s |
 
-On abPOA's own input for all 2,093 (spanning reads alone), abPOA takes 30.7 s and a 6.0 GB peak.
+The 1,852 under 1 kb (some 16 reads of 200 letters) take 1.80 s by shasta2's default and 1.74 s by plegma; peak
+memory over all 2,093 is 288 MB against 152 MB. On abPOA's own input for all 2,093 (spanning reads alone), abPOA
+takes 30.7 s and a 6.0 GB peak.
 
 `plegma poa`'s band is abPOA's adaptive band, `b + f L` letters either side of the row's best cells and of the
 graph's remaining path, capped at 64 letters (`-B`; a negative value leaves it uncapped, as abPOA). The cap leaves
