@@ -74,12 +74,14 @@ against HG002 v1.1):
 
 | consensus | errors | wall | CPU | peak memory |
 |---|---|---|---|---|
-| abPOA (shasta2's default) | 11,302 | 1:10 | 263 s | 3.7 GB |
-| shasta2's msa1 repair | 7,353 | 0:42 | 279 s | 3.6 GB |
-| plegma (library, `-H`, unpinned) | 6,750 | 0:40 | 292 s | 3.1 GB |
+| abPOA (shasta2's default) | 11,302 | 0:34 | 249 s | 3.7-4.0 GB |
+| plegma (library, `-H`, unpinned) | 6,750 | 0:31 | 223 s | 3.2 GB |
 
-Per local assembly, in one process, on 2,093 of them: abPOA (spanning reads, as shasta2 runs it) 31.0 s and a 6.0 GB
-peak; plegma on the same reads 8.6 s and 131 MB; plegma on every read with the model 15.6 s and 158 MB.
+(shasta2's msa1 repair: 7,353 errors.) Both timed twice in the same state of the machine, 10 threads.
+
+Per local assembly, in one process, on 2,093 of them: abPOA (spanning reads, as shasta2 runs it) 30.9 s and a 6.0 GB
+peak; plegma on the same reads 5.9 s and 131 MB (under 1 kb, level: 1.96 against 1.97 s); plegma on every read
+with the model 11.2 s and 158 MB.
 
 The library (`plegma/__init__.mojo` lists its API) holds both: the graph and its whole-graph aligner
 (`plegma/kernel.mojo`), consensus polishing (optionally with a `HomopolymerModel`), and `on_reference` with minimap2's
