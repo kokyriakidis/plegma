@@ -17,6 +17,7 @@ possible where both strands have its row.
 """
 
 from std.math import log10
+from std.sys import simd_width_of
 
 comptime HEADER = "base,strand,left,right,n,m,count,probability,logProbabilityDb"
 comptime STRAND_UNKNOWN = 2
@@ -154,6 +155,14 @@ struct HomopolymerModel(Copyable, Movable):
     var present: List[Bool]
     """Whether the row of (base, strand, left, right, n) is in the model, at `_row(...)`."""
     var log_prior: List[Float64]
+    var n_pad: Int
+    """`n_count` rounded up to a vector."""
+    var by_n: List[Float64]
+    """log P(m | n, ...) for every n at once: the row (base, strand, left, right, m) from `_by_n(...)`, n_pad
+    long, each n's value as `_offset` resolves it (its flanks' row, else the `*` row; 0 where neither)."""
+    var start: List[Float64]
+    """Per (base, left, right) and n: log P(n), or -Float64.MAX where n is not possible (not in the model for
+    either strand)."""
 
     def __init__(out self):
         self.n_count = 0
@@ -161,6 +170,9 @@ struct HomopolymerModel(Copyable, Movable):
         self.table = List[Float64]()
         self.present = List[Bool]()
         self.log_prior = List[Float64]()
+        self.n_pad = 0
+        self.by_n = List[Float64]()
+        self.start = List[Float64]()
 
     @staticmethod
     def load(path: String) raises -> HomopolymerModel:
@@ -275,7 +287,32 @@ struct HomopolymerModel(Copyable, Movable):
         for n in range(n_count):
             if prior[n] > 0.0:
                 model.log_prior[n] = 10.0 * log10(prior[n] / total)
+        model._resolve()
         return model^
+
+    def _resolve(mut self):
+        """`by_n` and `start` from `table`, `present` and `log_prior`."""
+        comptime W = simd_width_of[DType.float64]()
+        self.n_pad = (self.n_count + W - 1) // W * W
+        self.by_n = List[Float64](length=4 * 2 * _FLANKS * _FLANKS * self.m_count * self.n_pad, fill=0.0)
+        self.start = List[Float64](length=4 * _FLANKS * _FLANKS * self.n_pad, fill=-Float64.MAX)
+        for base in range(4):
+            for left in range(_FLANKS):
+                for right in range(_FLANKS):
+                    for n in range(self.n_count):
+                        var at0 = self._offset(base, 0, left, right, n)
+                        var at1 = self._offset(base, 1, left, right, n)
+                        if self.log_prior[n] != -Float64.MAX and at0 >= 0 and at1 >= 0:
+                            self.start[((base * _FLANKS + left) * _FLANKS + right) * self.n_pad + n] = self.log_prior[n]
+                        for strand in range(2):
+                            var at = at0 if strand == 0 else at1
+                            if at < 0:
+                                continue
+                            for m in range(self.m_count):
+                                self.by_n[self._by_n(base, strand, left, right, m) + n] = self.table[at + m]
+
+    def _by_n(self, base: Int, strand: Int, left: Int, right: Int, m: Int) -> Int:
+        return ((((base * 2 + strand) * _FLANKS + left) * _FLANKS + right) * self.m_count + m) * self.n_pad
 
     def loaded(self) -> Bool:
         return self.n_count > 0
@@ -298,6 +335,35 @@ struct HomopolymerModel(Copyable, Movable):
         """The run length n most likely given the reads' lengths `lengths` (each on `strands`' strand: 0, 1 or
         `STRAND_UNKNOWN`), `base` between `left` and `right` (0..3, or `FLANK_UNKNOWN`): the n that maximizes
         log P(n) plus the sum of log P(m | n, ...), the shorter on ties; -1 when no n is in the model."""
+        var known = True
+        for strand in strands:
+            known = known and (strand == 0 or strand == 1)
+        if known:
+            # Every n at once, a vector at a time; each n's sum in the reads' order, as below.
+            comptime W = simd_width_of[DType.float64]()
+            var first = ((base * _FLANKS + left) * _FLANKS + right) * self.n_pad
+            var scores = List[Float64](capacity=self.n_pad)
+            for n in range(self.n_pad):
+                scores.append(self.start[first + n])
+            var out = scores.unsafe_ptr()
+            var rows = self.by_n.unsafe_ptr()
+            for k in range(len(lengths)):
+                var row = rows.unsafe_offset(
+                    self._by_n(base, strands[k], left, right, min(lengths[k], self.m_count - 1))
+                )
+                var n = 0
+                while n < self.n_pad:
+                    out.unsafe_store(n, out.unsafe_load[width=W](n) + row.unsafe_load[width=W](n))
+                    n += W
+            var best_n = -1
+            var best_value = -Float64.MAX
+            for n in range(self.n_count):
+                if self.start[first + n] == -Float64.MAX:
+                    continue
+                if scores[n] > best_value:
+                    best_n = n
+                    best_value = scores[n]
+            return best_n
         var best = -1
         var best_score = -Float64.MAX
         for n in range(self.n_count):
