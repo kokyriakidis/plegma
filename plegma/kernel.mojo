@@ -282,12 +282,11 @@ struct Workspace(Movable):
         """`align_to_graph` over `nodes` alone (in topological order): those strictly between node `left` and node
         `right` (`SOURCE` and `SINK` for the graph's ends), the alignment leaving `left` and, globally, reaching
         `right`. `row_of` is scratch, as long as the graph, every entry -1, and left so. In 16-bit lanes (twice
-        as many a vector) when the rows are wide (a band of 64 letters or more either side, or none) and every
-        score the alignment can reach fits them; narrower rows run faster in 32-bit lanes, whose vectors they
-        fill."""
+        as many a vector) when every score the alignment can reach fits them (on shasta2's local assemblies the
+        same alignments as 32-bit lanes and 2% faster, narrow rows too)."""
         var m = len(query)
         var reach = band_b + Int(band_f * Float64(m)) if band_b >= 0 and _banded(mode) else m + 1
-        if reach >= 64 and _fits_16_bits(scoring, m, len(nodes)):
+        if _fits_16_bits(scoring, m, len(nodes)):
             return self._align[DType.int16](
                 graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f
             )
@@ -493,7 +492,7 @@ struct Workspace(Movable):
                     _fill[dt](row.unsafe_offset(third * stride), V)
                     _fill[dt](row.unsafe_offset(third * stride + V + span), V)
             var lanes = span + V  # a vector of slack: the last vector of a row runs whole
-            self.aux.resize(unsafe_uninit_length=BYTES * 10 * lanes)
+            self.aux.resize(unsafe_uninit_length=BYTES * 6 * lanes)
             var flags = self.aux.unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
             var h = row.unsafe_offset(V)
             var d1 = row.unsafe_offset(stride + V)
@@ -504,10 +503,6 @@ struct Workspace(Movable):
             var pick_d1 = flags.unsafe_offset(3 * lanes)
             var pick_d2 = flags.unsafe_offset(4 * lanes)
             var source_of = flags.unsafe_offset(5 * lanes)
-            var f1 = flags.unsafe_offset(6 * lanes)
-            var f2 = flags.unsafe_offset(7 * lanes)
-            var f1x = flags.unsafe_offset(8 * lanes)
-            var f2x = flags.unsafe_offset(9 * lanes)
             var letters = profile.unsafe_offset(Int(encode_base(graph.bases[node])) * width)
             var one = Vec(1)
             var nothing = Vec(0)
@@ -613,7 +608,9 @@ struct Workspace(Movable):
                         value = take2.select(deleted2, value)
                         source = take2.select(Vec(S(_DELETION2)), source)
                     h.unsafe_store(at, value)
-                    source_of.unsafe_store(at, source)
+                    source_of.unsafe_store(
+                        at, source | (x1.unsafe_load[width=V](at) << 3) | (x2.unsafe_load[width=V](at) << 4)
+                    )
                     at += V
 
             else:
@@ -639,7 +636,8 @@ struct Workspace(Movable):
                     var source = take1.select(Vec(S(_DELETION1)), Vec(0))
                     value = take1.select(deleted1, value)
                     d1.unsafe_store(at, deleted1)
-                    x1.unsafe_store(at, extend1.gt(open1).select(one, nothing))
+                    # The deletions' extend flags packed with the move, as the traceback byte holds them.
+                    var flags = extend1.gt(open1).select(one, nothing) << 3
                     if convex:
                         var open2 = from_h - gap2
                         var extend2 = pd2.unsafe_load[width=V](pat) - e2
@@ -648,44 +646,73 @@ struct Workspace(Movable):
                         source = take2.select(Vec(S(_DELETION2)), source)
                         value = take2.select(deleted2, value)
                         d2.unsafe_store(at, deleted2)
-                        x2.unsafe_store(at, extend2.gt(open2).select(one, nothing))
+                        flags = flags | (extend2.gt(open2).select(one, nothing) << 4)
                     else:
                         d2.unsafe_store(at, Vec(NEG))
-                        x2.unsafe_store(at, nothing)
                     h.unsafe_store(at, value)
-                    source_of.unsafe_store(at, source)
+                    source_of.unsafe_store(at, source | flags)
                     at += V
             if free_start and low == 0 and h[unsafe_offset=0] < S(0):
                 # The alignment may start at this node: the graph before it skipped free.
                 h[unsafe_offset=0] = S(0)
-                source_of[unsafe_offset=0] = S(_START)
-            # Gaps along the query, left to right, from those scores: a gap opened after another never beats one
-            # longer gap (with E1 >= E2), so the insertion states need not see each other.
-            # As running maxima: F[k] = max over t < k of (H[t] + e t) - (o + e) - e (k - 1), a prefix maximum
-            # in lane shifts, carried from block to block; a cell extends when its left neighbour's gap, less e,
-            # beats opening from its left neighbour.
-            _gap_scan[dt](h, f1, f1x, span, gap1, e1)
-            if convex:
-                _gap_scan[dt](h, f2, f2x, span, gap2, e2)
-            if not convex:
-                _fill[dt](f2, span)
-                _zero[dt](f2x, span)
-            # Each cell's score, its traceback byte, the row's best.
+                source_of[unsafe_offset=0] = (source_of[unsafe_offset=0] & S(~7)) | S(_START)
+            # One pass over the row: both gap pieces' insertion scores, then each cell's score, its traceback byte
+            # and the row's best. Gaps along the query, left to right, from the scores so far (`h`, before
+            # insertions): a gap opened after another never beats one longer gap (with E1 >= E2), so the insertion
+            # states need not see each other. As running maxima: F[k] = max over t < k of (H[t] + e t) - (o + e) -
+            # e (k - 1), a prefix maximum in lane shifts, carried from block to block; a cell extends when its left
+            # neighbour's gap, less e, beats opening from its left neighbour. The two pieces in one loop run side
+            # by side (their chains are independent) and share the loads and the left neighbours.
             var tbase = len(self.trace)
             self.trace_at[r] = tbase
             self.trace.resize(unsafe_uninit_length=tbase + span + V)
             var bytes = self.trace.unsafe_ptr().unsafe_offset(tbase)
             var best_lanes = Vec(NEG)
             var lane = iota[dt, V]()
+            var first_lane = lane.eq(0)
+            var ramp1 = Vec(e1) * lane
+            var ramp2 = Vec(e2) * lane
+            var opened1 = gap1 - e1
+            var opened2 = gap2 - e2
+            var carry1 = NEG  # the largest h[t] + e1 t of the cells before the block
+            var carry2 = NEG
+            var last_f1 = NEG
+            var last_f2 = NEG
+            var last_h = NEG
             var at = 0
             while at < span:
-                var value = h.unsafe_load[width=V](at)
-                var source = source_of.unsafe_load[width=V](at)
-                var inserted1 = f1.unsafe_load[width=V](at)
+                var here = h.unsafe_load[width=V](at)
+                var left_h = first_lane.select(Vec(last_h), here.shift_right[1]())
+                var e_index1 = ramp1 + Vec(e1 * S(at))
+                var reach1 = _prefix_max(here + e_index1)
+                var before1 = max(first_lane.select(Vec(carry1), reach1.shift_right[1]()), Vec(carry1))
+                var inserted1 = _floor(before1 - opened1 - e_index1)
+                if at == 0:
+                    inserted1 = first_lane.select(Vec(NEG), inserted1)
+                var left_f1 = first_lane.select(Vec(last_f1), inserted1.shift_right[1]())
+                var extends1 = (left_f1 - e1).gt(left_h - gap1).select(one, nothing)
+                carry1 = max(carry1, reach1[V - 1])
+                last_f1 = inserted1[V - 1]
+                var inserted2 = Vec(NEG)
+                var extends2 = nothing
+                if convex:
+                    var e_index2 = ramp2 + Vec(e2 * S(at))
+                    var reach2 = _prefix_max(here + e_index2)
+                    var before2 = max(first_lane.select(Vec(carry2), reach2.shift_right[1]()), Vec(carry2))
+                    inserted2 = _floor(before2 - opened2 - e_index2)
+                    if at == 0:
+                        inserted2 = first_lane.select(Vec(NEG), inserted2)
+                    var left_f2 = first_lane.select(Vec(last_f2), inserted2.shift_right[1]())
+                    extends2 = (left_f2 - e2).gt(left_h - gap2).select(one, nothing)
+                    carry2 = max(carry2, reach2[V - 1])
+                    last_f2 = inserted2[V - 1]
+                last_h = here[V - 1]
+                var value = here
+                var packed = source_of.unsafe_load[width=V](at)
+                var source = packed & Vec(S(7))
                 var take1 = inserted1.gt(value)
                 value = take1.select(inserted1, value)
                 source = take1.select(Vec(S(_INSERTION1)), source)
-                var inserted2 = f2.unsafe_load[width=V](at)
                 var take2 = inserted2.gt(value)
                 value = take2.select(inserted2, value)
                 source = take2.select(Vec(S(_INSERTION2)), source)
@@ -693,13 +720,7 @@ struct Workspace(Movable):
                     var below = value.lt(Vec(0))
                     value = below.select(Vec(0), value)
                     source = below.select(Vec(S(_START)), source)
-                var byte = (
-                    source
-                    | (x1.unsafe_load[width=V](at) << 3)
-                    | (x2.unsafe_load[width=V](at) << 4)
-                    | (f1x.unsafe_load[width=V](at) << 5)
-                    | (f2x.unsafe_load[width=V](at) << 6)
-                )
+                var byte = source | (packed & Vec(S(~7))) | (extends1 << 5) | (extends2 << 6)
                 h.unsafe_store(at, value)
                 bytes.unsafe_store(at, byte.cast[DType.uint8]())
                 best_lanes = max(best_lanes, (lane + S(at)).lt(S(span)).select(value, Vec(NEG)))
@@ -899,47 +920,6 @@ def _prefix_max[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
         comptime if shift < width:
             out = max(out, lane.lt(Scalar[dt](shift)).select(SIMD[dt, width](_neg[dt]()), out.shift_right[shift]()))
     return out
-
-
-@inline(.always)
-def _gap_scan[
-    dt: DType
-](
-    h: MutPointer[Scalar[dt], _],
-    f: MutPointer[Scalar[dt], _],
-    fx: MutPointer[Scalar[dt], _],
-    span: Int,
-    gap: Scalar[dt],
-    e: Scalar[dt],
-):
-    """One gap piece along the query: `f[k] = max(h[k - 1] - gap, f[k - 1] - e)` (`f[0]` unreachable) and
-    `fx[k]` 1 where extending won, from the scores `h` of a row of `span` cells."""
-    comptime V = simd_width_of[dt]()
-    comptime Vec = SIMD[dt, V]
-    comptime NEG = _neg[dt]()
-    var lane = iota[dt, V]()
-    var carry = NEG  # the largest h[t] + e t of the cells before the block
-    var last_f = NEG
-    var last_h = NEG
-    var at = 0
-    while at < span:
-        var here = h.unsafe_load[width=V](at)
-        var index = lane + Scalar[dt](at)
-        var reach = _prefix_max(here + e * index)
-        var before = max(lane.eq(0).select(Vec(carry), reach.shift_right[1]()), Vec(carry))
-        var gaps = _floor(before - gap - e * (index - 1))
-        if at == 0:
-            gaps = lane.eq(0).select(Vec(NEG), gaps)
-        var left_f = lane.eq(0).select(Vec(last_f), gaps.shift_right[1]())
-        var left_h = lane.eq(0).select(Vec(last_h), here.shift_right[1]())
-        f.unsafe_store(at, gaps)
-        fx.unsafe_store(at, (left_f - e).gt(left_h - gap).select(Vec(1), Vec(0)))
-        carry = max(carry, reach[V - 1])
-        last_f = gaps[V - 1]
-        last_h = here[V - 1]
-        at += V
-    _ = last_f
-    _ = last_h
 
 
 @inline(.always)
