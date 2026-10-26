@@ -131,13 +131,26 @@ struct _Paths(Movable):
             ref seq = sequences[members[k]]
             var anchor = anchors[members[k]] if len(anchors) > 0 else 0
             var mode = Mode.GLOBAL
-            # A read anchored at one end inside a prefix (a suffix) of the consensus; one reaching past its end
-            # (start), the consensus inside the read's prefix (suffix), the rest of the read free.
+            # A read anchored at one end ends inside the consensus (the whole read against a prefix of it, or for a
+            # right read a suffix) or past its end (the whole consensus against a prefix of the read, the rest of
+            # the read free): both tried, the cheaper kept. Its length alone does not tell, as a read with
+            # deletions may be the shorter and still reach past the consensus's end.
             if anchor == LEFT:
-                mode = Mode.ends_free(query_end=len(seq)) if len(seq) > length else Mode.PREFIX
+                mode = Mode.PREFIX
             elif anchor == RIGHT:
-                mode = Mode.ends_free(query_start=len(seq)) if len(seq) > length else Mode.SUFFIX
+                mode = Mode.SUFFIX
             var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), mode, ties=Ties.LEFT)
+            # Every consensus letter the read lacks costs the other way at least one: tried only where that could
+            # still win, and searched only as far as the first one's cost.
+            if (anchor == LEFT or anchor == RIGHT) and length - len(seq) < found.cost:
+                var past = Mode.ends_free(query_end=len(seq)) if anchor == LEFT else Mode.ends_free(
+                    query_start=len(seq)
+                )
+                var other = aligner.align(
+                    Span(consensus), Span(seq), Costs.edit(), past, max_cost=found.cost - 1, ties=Ties.LEFT
+                )
+                if other:
+                    found = other.take()
             self.total += found.cost
             var runs = cigar_runs(found.cigar)
             var base = k * self.stride
@@ -644,6 +657,11 @@ comptime MAX_COPYING = 0.7
 """Past this share of inserted letters copying a neighbour, the sequences' indels lengthen and shorten runs (as
 nanopore reads' do), which the pair HMM's uniform insertions misjudge: on such read sets its edits made the
 consensus worse, and `_likely` leaves it as it is. Uniform errors copy a neighbour some 45% of the time."""
+comptime RUN_GAIN = 1.0
+"""A likelihood edit lengthening a run (a letter inserted beside its like, or a one-letter unit copied) gains at
+least this much: on simulated local assemblies 36 of the pair HMM's 38 errors the edit distance would have undone
+were runs it lengthened, and with this floor their errors fell 88 -> 67 (0 and 8 lets every one or none through,
+88 and 118)."""
 comptime MIN_GAIN = 0.01
 """A likelihood edit gains at least this much (natural log, summed over the sequences)."""
 
@@ -667,6 +685,11 @@ def _sites(paths: _Paths, support: Int, share: Float64, mut site: List[Bool]):
         if i - 3 >= 0:
             near -= Int(paths.discord[i - 3])
         site[i] = near >= max(support, Int(Float64(paths.cover[i]) * share + 0.999))
+
+
+def _lengthens_run(consensus: List[UInt8], i: Int, code: Int) -> Bool:
+    """Whether inserting the letter of `code` before consensus letter `i` lengthens a run of it."""
+    return (i > 0 and _code(consensus[i - 1]) == code) or (i < len(consensus) and _code(consensus[i]) == code)
 
 
 def _likely(
@@ -711,6 +734,7 @@ def _likely(
     var dirty = List[Bool](length=len(current) + 1, fill=True)
     comptime LETTERS = "ACGT"
     var before = List[UInt8]()
+    var run_gain = RUN_GAIN
     for _ in range(rounds):
         paths.fill(aligner, current, sequences, members, anchors)
         if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
@@ -952,10 +976,16 @@ def _likely(
                     continue
                 if slot >= 5 and _code(current[s + x // SLOTS]) == slot - 5:
                     continue
+                # A letter lengthening a run only where it gains `RUN_GAIN` or more: the pair HMM's alignments multiply
+                # with a run's length, so it favours runs longer than the reads hold.
+                if slot < 4 and gains[x] < run_gain and _lengthens_run(current, s + x // SLOTS, slot):
+                    continue
                 if gains[x] > best:
                     best = gains[x]
                     best_x = x
             for b in range(len(block_gain)):
+                if block_copy[b] and block_period[b] == 1 and block_gain[b] < run_gain:
+                    continue
                 if block_gain[b] > best:
                     best = block_gain[b]
                     best_x = len(gains) + b
