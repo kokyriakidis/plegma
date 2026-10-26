@@ -134,6 +134,22 @@ def test_another_copys_one_sided_reads_get_no_vote() raises:
     assert_true(distance(String(unsafe_from_utf8=made.consensus[0]), String(unsafe_from_utf8=truth)) <= 3)
 
 
+def test_a_spanning_read_wins_a_tie() raises:
+    # One read on both anchors, one fixed at the right anchor alone that differs from it at three places (a paralog's,
+    # missing the left anchor): one vote each, and the read on both anchors is the surer.
+    seed(109)
+    var truth = _random(400)
+    var other = truth.copy()
+    var letters = "ACGT".as_bytes()
+    for i in [250, 300, 350]:
+        other[i] = letters[(_code(other[i]) + 1) % 4]
+    var seqs: List[List[UInt8]] = [truth.copy(), _slice(other, 150, 400)]
+    var names: List[String] = ["both", "right"]
+    var anchors: List[Int] = [BOTH, RIGHT]
+    var made = poa(names, seqs, anchors, PoaOptions(), Graph())
+    assert_true(made.consensus[0] == truth)
+
+
 def _code(letter: UInt8) -> Int:
     if letter == UInt8(ord("A")):
         return 0

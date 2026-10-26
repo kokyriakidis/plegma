@@ -277,16 +277,25 @@ struct Graph(Movable, Sized):
         the reads anchored at one end only add their votes inside without ending the consensus where they stop.
         `bounded`: never past the last of the paths `spanning` end at, however many reads go on (a read fixed at one
         anchor may run past the other: a local assembler cuts it to the gap's estimated length and a margin);
-        otherwise the reads going on past their ends carry the walk on (an assembly from one anchor alone)."""
+        otherwise the reads going on past their ends carry the walk on (an assembly from one anchor alone). Where the
+        votes tie, the paths `spanning` break the tie: a read on both anchors is the surer of a local assembly (a read
+        fixed at one may be a paralog's, sharing that anchor alone); so every edge weighs its paths times one more than
+        there are paths, plus its paths of `spanning`."""
         var count = len(self.bases)
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
+        var scale = len(self.paths) + 1
+        var weight = List[Int32](capacity=len(self.edge_weight))
+        for w in self.edge_weight:
+            weight.append(w * Int32(scale))
         for p in spanning:
             ref path = self.paths[p]
             if len(path) > 0:
                 starts[Int(path[0])] += 1
-                ends[Int(path[len(path) - 1])] += 1
-        return self._bundle(order, starts, ends, self.edge_weight, bounded)
+                ends[Int(path[len(path) - 1])] += scale + 1
+            for k in range(len(path) - 1):
+                weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
+        return self._bundle(order, starts, ends, weight, bounded)
 
     def heaviest_path_backward(self, order: List[Int], members: List[Int]) -> List[Int]:
         """`heaviest_path` over the paths `members` walked from the end: from a virtual sink to a virtual source,

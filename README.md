@@ -33,7 +33,7 @@ the graph as GFA (`-r`):
   With `-H` (a homopolymer model in shasta2's csv, `plegma/homopolymer.mojo`) every run then takes its most likely
   length given the reads' lengths there, each read on the strand its header gives (`strand=0|1`), as shasta2's msa1
   repair chooses it. In shasta2's local assemblies of HG002 chr21 (its Final graph reassembled with plegma, scored by
-  lassen against HG002 v1.1) it leaves 6750 errors, shasta2's msa1 repair 7353 and its abPOA default 11302.
+  lassen against HG002 v1.1) it leaves 6749 errors, shasta2's msa1 repair 7353 and its abPOA default 11302.
 - **`plegma ref`**: the MSA anchored on the first sequence, the reference (CHM13's allele in a pangenome region): every
   other aligned to it alone at minimap2's asm5 scores, gaps left-normalized, its letters in the reference's columns
   and the runs inserted at one place aligned to each other on the longest, so each sequence's alignment with the

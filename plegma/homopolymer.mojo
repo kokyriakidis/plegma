@@ -53,26 +53,30 @@ struct _Fields:
         self.at = at
         self.end = end
 
-    def _done(mut self, bytes: Span[UInt8, _]) raises:
+    def _done(mut self, bytes: Pointer[UInt8, _]) raises:
         """Past the field's end: a comma, or the line's end on the last field."""
         if self.at < self.end:
-            if bytes[self.at] != UInt8(ord(",")):
+            if bytes[unsafe_offset=self.at] != UInt8(ord(",")):
                 raise Error("homopolymer model: a malformed field")
             self.at += 1
 
-    def flank(mut self, bytes: Span[UInt8, _]) raises -> Int:
+    def flank(mut self, bytes: Pointer[UInt8, _]) raises -> Int:
         if self.at >= self.end:
             raise Error("homopolymer model: a line short of fields")
-        var got = _flank(bytes[self.at])
+        var got = _flank(bytes[unsafe_offset=self.at])
         self.at += 1
         self._done(bytes)
         return got
 
-    def integer(mut self, bytes: Span[UInt8, _]) raises -> Int:
+    def integer(mut self, bytes: Pointer[UInt8, _]) raises -> Int:
         var got = 0
         var digits = 0
-        while self.at < self.end and bytes[self.at] >= UInt8(ord("0")) and bytes[self.at] <= UInt8(ord("9")):
-            got = got * 10 + Int(bytes[self.at] - UInt8(ord("0")))
+        while (
+            self.at < self.end
+            and bytes[unsafe_offset=self.at] >= UInt8(ord("0"))
+            and bytes[unsafe_offset=self.at] <= UInt8(ord("9"))
+        ):
+            got = got * 10 + Int(bytes[unsafe_offset=self.at] - UInt8(ord("0")))
             self.at += 1
             digits += 1
         if digits == 0:
@@ -80,41 +84,59 @@ struct _Fields:
         self._done(bytes)
         return got
 
-    def skip(mut self, bytes: Span[UInt8, _]) raises:
-        while self.at < self.end and bytes[self.at] != UInt8(ord(",")):
+    def skip(mut self, bytes: Pointer[UInt8, _]) raises:
+        while self.at < self.end and bytes[unsafe_offset=self.at] != UInt8(ord(",")):
             self.at += 1
         self._done(bytes)
 
-    def decimal(mut self, bytes: Span[UInt8, _]) raises -> Float64:
+    def decimal(mut self, bytes: Pointer[UInt8, _]) raises -> Float64:
         """A decimal number: a sign, digits, a fraction and an exponent, each optional but the digits."""
         var negative = False
-        if self.at < self.end and (bytes[self.at] == UInt8(ord("-")) or bytes[self.at] == UInt8(ord("+"))):
-            negative = bytes[self.at] == UInt8(ord("-"))
+        if self.at < self.end and (
+            bytes[unsafe_offset=self.at] == UInt8(ord("-")) or bytes[unsafe_offset=self.at] == UInt8(ord("+"))
+        ):
+            negative = bytes[unsafe_offset=self.at] == UInt8(ord("-"))
             self.at += 1
         var value = 0.0
         var digits = 0
-        while self.at < self.end and bytes[self.at] >= UInt8(ord("0")) and bytes[self.at] <= UInt8(ord("9")):
-            value = value * 10.0 + Float64(Int(bytes[self.at] - UInt8(ord("0"))))
+        while (
+            self.at < self.end
+            and bytes[unsafe_offset=self.at] >= UInt8(ord("0"))
+            and bytes[unsafe_offset=self.at] <= UInt8(ord("9"))
+        ):
+            value = value * 10.0 + Float64(Int(bytes[unsafe_offset=self.at] - UInt8(ord("0"))))
             self.at += 1
             digits += 1
-        if self.at < self.end and bytes[self.at] == UInt8(ord(".")):
+        if self.at < self.end and bytes[unsafe_offset=self.at] == UInt8(ord(".")):
             self.at += 1
             var scale = 0.1
-            while self.at < self.end and bytes[self.at] >= UInt8(ord("0")) and bytes[self.at] <= UInt8(ord("9")):
-                value += scale * Float64(Int(bytes[self.at] - UInt8(ord("0"))))
+            while (
+                self.at < self.end
+                and bytes[unsafe_offset=self.at] >= UInt8(ord("0"))
+                and bytes[unsafe_offset=self.at] <= UInt8(ord("9"))
+            ):
+                value += scale * Float64(Int(bytes[unsafe_offset=self.at] - UInt8(ord("0"))))
                 scale *= 0.1
                 self.at += 1
                 digits += 1
         if digits == 0:
             raise Error("homopolymer model: a number expected")
-        if self.at < self.end and (bytes[self.at] == UInt8(ord("e")) or bytes[self.at] == UInt8(ord("E"))):
+        if self.at < self.end and (
+            bytes[unsafe_offset=self.at] == UInt8(ord("e")) or bytes[unsafe_offset=self.at] == UInt8(ord("E"))
+        ):
             self.at += 1
-            var minus = self.at < self.end and bytes[self.at] == UInt8(ord("-"))
-            if self.at < self.end and (bytes[self.at] == UInt8(ord("-")) or bytes[self.at] == UInt8(ord("+"))):
+            var minus = self.at < self.end and bytes[unsafe_offset=self.at] == UInt8(ord("-"))
+            if self.at < self.end and (
+                bytes[unsafe_offset=self.at] == UInt8(ord("-")) or bytes[unsafe_offset=self.at] == UInt8(ord("+"))
+            ):
                 self.at += 1
             var power = 0
-            while self.at < self.end and bytes[self.at] >= UInt8(ord("0")) and bytes[self.at] <= UInt8(ord("9")):
-                power = power * 10 + Int(bytes[self.at] - UInt8(ord("0")))
+            while (
+                self.at < self.end
+                and bytes[unsafe_offset=self.at] >= UInt8(ord("0"))
+                and bytes[unsafe_offset=self.at] <= UInt8(ord("9"))
+            ):
+                power = power * 10 + Int(bytes[unsafe_offset=self.at] - UInt8(ord("0")))
                 self.at += 1
             value *= 10.0 ** Float64(-power if minus else power)
         self._done(bytes)
@@ -174,15 +196,16 @@ struct HomopolymerModel(Copyable, Movable):
                 line_start = next
                 continue
             var fields = _Fields(line_start, line_end)
-            var base = fields.flank(bytes)
-            var strand = fields.integer(bytes)
-            var left = fields.flank(bytes)
-            var right = fields.flank(bytes)
-            var n = fields.integer(bytes)
-            var m = fields.integer(bytes)
-            var count = fields.integer(bytes)
-            fields.skip(bytes)
-            var value = fields.decimal(bytes)
+            var at = bytes.unsafe_ptr()
+            var base = fields.flank(at)
+            var strand = fields.integer(at)
+            var left = fields.flank(at)
+            var right = fields.flank(at)
+            var n = fields.integer(at)
+            var m = fields.integer(at)
+            var count = fields.integer(at)
+            fields.skip(at)
+            var value = fields.decimal(at)
             if fields.at != line_end:
                 raise Error(t"homopolymer model {path}: line {line_number}: 9 fields expected")
             if base == FLANK_UNKNOWN or strand > 1 or n < 2 or not (value <= 0.0):
