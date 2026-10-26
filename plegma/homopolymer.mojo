@@ -144,7 +144,7 @@ struct _Fields:
 
 
 struct HomopolymerModel(Copyable, Movable):
-    """A homopolymer model read from shasta2's csv (`load`); empty (`loaded` false) by default. Log probabilities in
+    """A homopolymer model read from shasta2's csv (`load` a file, `parse` its text); empty (`loaded` false) by default. Log probabilities in
     dB, as the file writes them."""
 
     var n_count: Int
@@ -168,6 +168,13 @@ struct HomopolymerModel(Copyable, Movable):
         var text: String
         with open(path, "r") as f:
             text = f.read()
+        return HomopolymerModel.parse(text, path)
+
+    @staticmethod
+    def parse(text: String, source: String = "text") raises -> HomopolymerModel:
+        """The model in `text`, shasta2's csv (a caller holding it in memory, as shasta2 embeds its models); `source`
+        names it in errors."""
+        var path = source
         var bytes = text.as_bytes()
         var line_start = 0
         var line_number = 0

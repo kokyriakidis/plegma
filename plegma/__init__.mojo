@@ -25,6 +25,10 @@ is implementation and may change.
   anchored `BOTH`, `LEFT` or `RIGHT` (a local assembly's reads: spanning it,
   or fixed at one anchor; with none spanning, each side assembled and the two
   joined, or one side alone, one-directional).
+- One call from reads to consensus: `consensus` under `ConsensusOptions`
+  (what `plegma poa -r 0` writes, with a `HomopolymerModel` as `-H`), the
+  function behind the C API (`capi/plegma.h`, `capi/plegma.hpp`,
+  `build/libplegma.so`) a local assembler calls instead of the command.
 - Order and clusters: `guide_order` (abPOA's progressive order by minimizer
   multiset Jaccard), `cluster_rows` (several consensus sequences, by MSA
   columns where the sequences disagree).
@@ -40,6 +44,7 @@ is implementation and may change.
 
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
 from .clusters import cluster_rows
+from .consensus import ConsensusOptions, consensus
 from .graph import Graph, Runs, cigar_runs
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import (

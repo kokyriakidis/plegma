@@ -46,6 +46,28 @@ the graph as GFA (`-r`):
   0.758 against 0.667, the hard set 0.476 against 0.385). On the largest chr20 VNTRs it is 17-19 times faster than
   abPOA in a tenth to a hundredth of its memory.
 
+## Library API (C and C++)
+
+`pixi run build-capi` builds `build/libplegma.so`, the consensus of a read set as a call: `capi/plegma.h` (C) and
+`capi/plegma.hpp` (C++, header-only over it). A homopolymer model is loaded once (from a file, or from its text in
+memory) and shared by every thread; each call takes the reads with their anchors and strands and returns what
+`plegma poa -r 0 [-H model]` writes, byte for byte (checked on 2,000 of shasta2's local assemblies). Errors come back
+as messages (C) or `std::runtime_error` (C++), never an abort.
+
+```cpp
+#include "plegma.hpp"
+plegma::Model model = plegma::Model::load("HomopolymerModel-ONT-R10.4.1-sup5.0.0-2026-09-28.csv");
+std::vector<plegma::Read> reads = {{spanning, plegma::Anchor::Both, plegma::Strand::Forward},
+                                   {fixedLeft, plegma::Anchor::Left, plegma::Strand::Reverse}};
+std::vector<std::string> parts = plegma::consensus(reads, &model);   // parts[0]: the consensus
+```
+
+Link with `-Lbuild -lplegma -Wl,-rpath,<plegma>/build`; the library finds the Mojo runtime it needs (in plegma's
+pixi environment) by its own run path. `pixi run test-capi` tests it (threads sharing a model included).
+shasta2's Plegma local assembly method uses it when configured with `-DPLEGMA_DIR=<plegma checkout>`
+(github.com/kokyriakidis/shasta2, branch la7-dump): in its chr21 assembly the same sequence as running the
+command per local assembly, in 3:01 rather than 7:30 (a third of the CPU).
+
 The library (`plegma/__init__.mojo` lists its API) holds both: the graph and its whole-graph aligner
 (`plegma/kernel.mojo`), consensus polishing (optionally with a `HomopolymerModel`), and `on_reference` with minimap2's
 pinned alignment.

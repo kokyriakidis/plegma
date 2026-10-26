@@ -35,6 +35,10 @@ build-test-reference = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I 
 test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_homopolymer && ./build/test_pinned && ./build/test_poa && ./build/test_reference", depends-on = ["build-test-poa", "build-test-alphabet", "build-test-deps", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-homopolymer", "build-test-pinned", "build-test-reference"] }
 # The command line, `plegma poa` (abPOA's flags) and `plegma ref`: `pixi run build-cli`, then `build/plegma -h`.
 build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan cli/plegma_cli.mojo -o build/plegma", depends-on = ["prepare"] }
+# The C API (capi/plegma.h, capi/plegma.hpp): build/libplegma.so, and its tests against it.
+build-capi = { cmd = "mojo build --emit shared-lib -D ASSERT=none -I . -I deps/sporos -I deps/karan capi/plegma_capi.mojo -o build/libplegma.so", depends-on = ["prepare"] }
+build-test-capi = { cmd = "c++ -std=c++17 -O2 -Icapi capi/test_capi.cpp -Lbuild -lplegma -Wl,-rpath,$PIXI_PROJECT_ROOT/build -Wl,-rpath,$CONDA_PREFIX/lib -pthread -o build/test_capi", depends-on = ["build-capi"] }
+test-capi = { cmd = "./build/test_capi", depends-on = ["build-test-capi"] }
 # Random inputs through every option combination, every output checked: `pixi run fuzz [cases] [seed]`.
 fuzz = { cmd = "python3 -I experiments/validate/fuzz.py build/plegma build/fuzz", depends-on = ["build-cli"] }
 # The co-optimal letter pairs experiments/chr20/qc_loop.py --coopt scores against.

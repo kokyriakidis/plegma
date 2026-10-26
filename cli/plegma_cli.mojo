@@ -538,6 +538,9 @@ def _run(input: String, options: Options) raises -> String:
     for r in range(len(records)):
         seqs.append(_upper(records.seq(r)))
     var t1 = perf_counter_ns()
+    if len(seqs) == 0:
+        # No sequences: an empty consensus (and nothing else to write).
+        return String(">Consensus_sequence\n\n") if options.result == 0 or options.result == 2 else String()
     var aligned = _ref(names, seqs, options) if options.reference else _poa(input, names, seqs, options)
     var nodes = len(aligned.graph)
     var t2 = perf_counter_ns()
