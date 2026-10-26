@@ -28,7 +28,12 @@ the graph as GFA (`-r`):
   where they overlap, or one side alone stops where fewer than `-c` reads (5) go on (a telomere). The consensus is
   polished against every read as it is anchored. On simulated local assemblies (`experiments/msa/anchored.py`) it
   reproduces 5 kb truths exactly in 0.2 s and 20 MB, where pericles (theseus-lib's consensus branch), which needs a
-  spanning read, takes 17 to 63 s and its majority vote leaves 4 to 29 errors.
+  spanning read, takes 17 to 63 s and its majority vote leaves 4 to 29 errors. A one-sided read much further from the
+  spanning reads' consensus than they are (another copy's, sharing the one anchor) gets no vote.
+  With `-H` (a homopolymer model in shasta2's csv, `plegma/homopolymer.mojo`) every run then takes its most likely
+  length given the reads' lengths there, each read on the strand its header gives (`strand=0|1`), as shasta2's msa1
+  repair chooses it. In shasta2's local assemblies of HG002 chr21 (its Final graph reassembled with plegma, scored by
+  lassen against HG002 v1.1) it leaves 6750 errors, shasta2's msa1 repair 7353 and its abPOA default 11302.
 - **`plegma ref`**: the MSA anchored on the first sequence, the reference (CHM13's allele in a pangenome region): every
   other aligned to it alone at minimap2's asm5 scores, gaps left-normalized, its letters in the reference's columns
   and the runs inserted at one place aligned to each other on the longest, so each sequence's alignment with the
@@ -42,7 +47,8 @@ the graph as GFA (`-r`):
   abPOA in a tenth to a hundredth of its memory.
 
 The library (`plegma/__init__.mojo` lists its API) holds both: the graph and its whole-graph aligner
-(`plegma/kernel.mojo`), consensus polishing, and `on_reference` with minimap2's pinned alignment.
+(`plegma/kernel.mojo`), consensus polishing (optionally with a `HomopolymerModel`), and `on_reference` with minimap2's
+pinned alignment.
 
 ## Building
 

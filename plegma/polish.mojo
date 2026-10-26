@@ -22,6 +22,7 @@ from karan import Aligner, Costs, Mode, Ties
 
 from .alphabet import encode_base
 from .graph import DELETION, INSERTION, MATCH, cigar_runs
+from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel
 from .kernel import LEFT, RIGHT
 
 
@@ -334,13 +335,17 @@ def polish(
     share: Float64 = 0.5,
     likely_rounds: Int = 20,
     anchors: List[Int] = List[Int](),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+    strands: List[Int] = List[Int](),
 ) raises -> List[UInt8]:
     """`consensus` polished against the `members` of `sequences` (each aligned whole, or, with `anchors` per
     sequence, a read anchored at one end against a prefix or a suffix of it), for at most `rounds` rounds of edits
     scored by
     edit distance, then at most `likely_rounds` scored by likelihood (see `_likely`): edits are tried at positions
     where, within two letters, `support` sequences disagree with it and as many as `share` of them (the reads' own
-    errors alone rarely reach half: on real VNTR read sets, 0 to 0.7 mended the same errors)."""
+    errors alone rarely reach half: on real VNTR read sets, 0 to 0.7 mended the same errors). With a `homopolymers`
+    model loaded, every run of two letters or more then takes its most likely length (`_runs`), each sequence on its
+    strand in `strands` (0, 1 or `STRAND_UNKNOWN`; all unknown when empty)."""
     var current = consensus.copy()
     var count = len(members)
     if count == 0:
@@ -650,7 +655,83 @@ def polish(
         paths.fill(aligner, current, sequences, members, anchors)
         if paths.total >= previous_total:
             current = previous^
-    return _likely(current^, sequences, members, likely_rounds, support, share, anchors)
+    var out = _likely(current^, sequences, members, likely_rounds, support, share, anchors)
+    if homopolymers.loaded():
+        out = _runs(out^, sequences, members, anchors, homopolymers, strands)
+    return out^
+
+
+def _runs(
+    var consensus: List[UInt8],
+    sequences: List[List[UInt8]],
+    members: List[Int],
+    anchors: List[Int],
+    model: HomopolymerModel,
+    strands: List[Int],
+) raises -> List[UInt8]:
+    """Every run of two letters or more in `consensus` at its most likely length under `model`, given the length of
+    the run each member reports: the read's letters aligned to the run and inserted at its two ends, with the letters
+    like it next to them; a read with another letter inside the run, or not reaching past both its ends (anchored at
+    one end), does not vote (as shasta2's msa1 repair votes: the reads with the run's symbol in its column)."""
+    var length = len(consensus)
+    var aligner = Aligner()
+    var paths = _Paths()
+    paths.fill(aligner, consensus, sequences, members, anchors)
+    var out = List[UInt8](capacity=length + length // 8)
+    var lengths = List[Int]()
+    var on = List[Int]()
+    var s = 0
+    while s < length:
+        var e = s + 1
+        while e < length and consensus[e] == consensus[s]:
+            e += 1
+        var base = _code(consensus[s])
+        if e - s < 2 or base > 3:
+            for i in range(s, e):
+                out.append(consensus[i])
+            s = e
+            continue
+        var left = _code(consensus[s - 1]) if s > 0 else FLANK_UNKNOWN
+        var right = _code(consensus[e]) if e < length else FLANK_UNKNOWN
+        # A read votes when its alignment spans the run and a letter either side of it (where there is one).
+        var need_start = s - 1 if s > 0 else 0
+        var need_end = e + 1 if e < length else length
+        lengths.clear()
+        on.clear()
+        for k in range(len(members)):
+            if paths.span_start[k] > need_start or paths.span_end[k] < need_end:
+                continue
+            ref seq = sequences[members[k]]
+            var kb = k * paths.stride
+            var a = Int(paths.enter[kb + s])
+            var b = Int(paths.leave[kb + e])
+            # Letters unlike the run at its ends are the flanks' (inserted there, or the run's ends substituted).
+            while a < b and _code(seq[a]) != base:
+                a += 1
+            while b > a and _code(seq[b - 1]) != base:
+                b -= 1
+            var pure = True
+            for j in range(a, b):
+                pure = pure and _code(seq[j]) == base
+            if not pure:
+                continue
+            if a < b:
+                while a > 0 and _code(seq[a - 1]) == base:
+                    a -= 1
+                while b < len(seq) and _code(seq[b]) == base:
+                    b += 1
+            lengths.append(b - a)
+            var r = members[k]
+            on.append(strands[r] if r < len(strands) else STRAND_UNKNOWN)
+        var n = e - s
+        if len(lengths) > 0:
+            var best = model.most_likely(base, left, right, lengths, on)
+            if best >= 2:
+                n = best
+        for _ in range(n):
+            out.append(consensus[s])
+        s = e
+    return out^
 
 
 comptime MAX_COPYING = 0.7

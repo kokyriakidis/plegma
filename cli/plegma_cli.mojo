@@ -15,6 +15,7 @@ from sporos import read_fasta
 
 from plegma.clusters import cluster_rows
 from plegma.graph import GAP, Graph
+from plegma.homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology
 from plegma.poa import BOTH, GUIDE_ORDER, INPUT_ORDER, LEFT, LONGEST_FIRST, RIGHT, Poa, PoaOptions, poa
 from plegma.polish import polish
@@ -53,6 +54,10 @@ poa options:
                 A read's anchor is a word of its FASTA header: anchor=both (the default: it spans the local assembly's
                 two anchors), anchor=left or anchor=right (fixed at that anchor only, ending inside the gap). With
                 reads of both sides and none spanning, each side is assembled and the two joined where they overlap.
+    -H FILE     a homopolymer model (shasta2's csv, conf/HomopolymerModel-*.csv): after polishing, every run of two
+                letters or more takes its most likely length given the reads' lengths there (shasta2's msa1 repair),
+                each read on the strand its header says: strand=0 (as the consensus runs) or strand=1 (reverse-
+                complemented to it); both weighed alike without
 
 ref options:
     -F FILE     the reference's flanks (FASTA: left, then right): each alignment to the reference pinned as minimap2
@@ -97,6 +102,7 @@ struct Options(Copyable, Movable):
     var min_freq: Float64
     var polish_rounds: Int
     var likely_rounds: Int
+    var homopolymers: HomopolymerModel
     var verbose: Bool
 
     def __init__(out self, reference: Bool):
@@ -121,6 +127,7 @@ struct Options(Copyable, Movable):
         self.min_freq = 0.25
         self.polish_rounds = 50
         self.likely_rounds = 20
+        self.homopolymers = HomopolymerModel()
         self.verbose = False
 
 
@@ -172,6 +179,30 @@ def _anchors(path: String, count: Int) raises -> List[Int]:
     return out^
 
 
+def _strands(path: String, count: Int) raises -> List[Int]:
+    """Each record's strand from its FASTA header: `strand=0` or `strand=1` among the words after its name;
+    `STRAND_UNKNOWN` without one, for a FASTQ file or headers past `count`."""
+    var out = List[Int](length=count, fill=STRAND_UNKNOWN)
+    var text: String
+    with open(path, "r") as f:
+        text = f.read()
+    if text.byte_length() == 0 or text.as_bytes()[0] != UInt8(ord(">")):
+        return out^
+    var k = 0
+    for line in text.split("\n"):
+        if line.byte_length() == 0 or line.as_bytes()[0] != UInt8(ord(">")):
+            continue
+        if k >= count:
+            break
+        for word in line.split():
+            if word == "strand=0":
+                out[k] = 0
+            elif word == "strand=1":
+                out[k] = 1
+        k += 1
+    return out^
+
+
 struct Aligned(Movable):
     """What either command made of a file, for the outputs: the graph, its paths in output order (`shown`: a starting
     MSA's rows, then every record in input order), the MSA's rows in that order when the command made them, the
@@ -183,6 +214,7 @@ struct Aligned(Movable):
     var rows: List[String]
     var polish_with: List[Int]
     var anchors: List[Int]
+    var strands: List[Int]
     var consensus: List[List[UInt8]]
     var foreign: List[Int]
     """Reads anchored at one end that are another copy's (`Poa.foreign`): not polished against."""
@@ -193,6 +225,7 @@ struct Aligned(Movable):
         self.rows = rows^
         self.polish_with = List[Int]()
         self.anchors = List[Int]()
+        self.strands = List[Int]()
         self.consensus = List[List[UInt8]]()
         self.foreign = List[Int]()
 
@@ -202,6 +235,7 @@ struct Aligned(Movable):
         self.rows = List[String]()
         self.polish_with = List[Int]()
         self.anchors = List[Int]()
+        self.strands = List[Int]()
         self.consensus = List[List[UInt8]]()
         self.foreign = List[Int]()
         var foreign = List[Int]()
@@ -229,6 +263,8 @@ def _poa(input: String, mut names: List[String], mut seqs: List[List[UInt8]], op
         start = Graph.from_msa(msa.names, rows)
     var anchors = _anchors(input, len(seqs))
     var out = Aligned(poa(names, seqs, anchors, settings, start^))
+    if options.homopolymers.loaded():
+        out.strands = _strands(input, len(seqs))
     if len(out.consensus) > 0:
         # Reads anchored at one end: the consensus polished against every read, each aligned as it is anchored, but
         # another copy's.
@@ -313,7 +349,8 @@ def _consensus(
         for node in aligned.graph.heaviest_path(Topology(aligned.graph).order, paths):
             letters.append(aligned.graph.bases[node])
         consensus = String(unsafe_from_utf8=letters)
-    if (options.polish_rounds == 0 and options.likely_rounds == 0) or options.mode != GLOBAL:
+    var rounds = options.polish_rounds > 0 or options.likely_rounds > 0 or options.homopolymers.loaded()
+    if not rounds or options.mode != GLOBAL:
         return consensus
     # A starting MSA's rows come first in `shown`; past them, member m is input record m - first.
     var first = len(aligned.shown) - len(seqs)
@@ -324,7 +361,13 @@ def _consensus(
     if len(records) == 0:
         return consensus
     var polished = polish(
-        List[UInt8](consensus.as_bytes()), seqs, records, options.polish_rounds, likely_rounds=options.likely_rounds
+        List[UInt8](consensus.as_bytes()),
+        seqs,
+        records,
+        options.polish_rounds,
+        likely_rounds=options.likely_rounds,
+        homopolymers=options.homopolymers,
+        strands=aligned.strands,
     )
     return String(unsafe_from_utf8=polished)
 
@@ -349,7 +392,7 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
         # (when one sequence); two sides that could not be joined, each apart.
         if len(aligned.consensus) == 1:
             var letters = aligned.consensus[0].copy()
-            var polishing = options.polish_rounds > 0 or options.likely_rounds > 0
+            var polishing = options.polish_rounds > 0 or options.likely_rounds > 0 or options.homopolymers.loaded()
             if polishing and options.mode == GLOBAL and len(aligned.polish_with) > 0:
                 letters = polish(
                     letters,
@@ -358,6 +401,8 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
                     options.polish_rounds,
                     likely_rounds=options.likely_rounds,
                     anchors=aligned.anchors,
+                    homopolymers=options.homopolymers,
+                    strands=aligned.strands,
                 )
             text.write(">Consensus_sequence\n", StringSlice(unsafe_from_utf8=Span(letters)), "\n")
         else:
@@ -576,6 +621,9 @@ def main() raises:
             i += 1
         elif a == "-i" and not reference:
             options.start_msa = _value(args, i)
+            i += 1
+        elif a == "-H" and not reference:
+            options.homopolymers = HomopolymerModel.load(_value(args, i))
             i += 1
         # ref's own.
         elif a == "-F" and reference:

@@ -18,7 +18,9 @@ is implementation and may change.
   kernel only between them), over `window_nodes` with a `WindowScratch`.
 - Consensus polishing: `polish` (one-letter and whole-repeat-unit edits kept
   while they lower the sequences' summed edit distance to the consensus, then
-  while they raise its likelihood under a pair HMM).
+  while they raise its likelihood under a pair HMM), optionally with a
+  `HomopolymerModel` (shasta2's empirical run-length error model, `load`ed
+  from its csv): every run then at its most likely length given the reads'.
 - The POA of a read set: `poa` -> `Poa` under `PoaOptions`, each read
   anchored `BOTH`, `LEFT` or `RIGHT` (a local assembly's reads: spanning it,
   or fixed at one anchor; with none spanning, each side assembled and the two
@@ -39,6 +41,7 @@ is implementation and may change.
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
 from .clusters import cluster_rows
 from .graph import Graph, Runs, cigar_runs
+from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import (
     BOTH,
     EXTENSION,
