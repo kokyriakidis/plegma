@@ -11,6 +11,7 @@ at nodes with several predecessors three more (which predecessor each move came 
 """
 
 from std.math import iota
+from std.memory import bitcast
 from std.sys import simd_width_of, size_of
 
 from .alphabet import encode_base
@@ -53,7 +54,7 @@ comptime _START = UInt8(5)
 comptime _SOURCE = UInt8(7)
 comptime _D1_EXTENDS = UInt8(8)
 comptime _D2_EXTENDS = UInt8(16)
-comptime _F1_EXTENDS = UInt8(32)
+comptime _F1_EXTENDS = UInt8(32)  # the insertion flags: whether the next cell's gap extends this one's
 comptime _F2_EXTENDS = UInt8(64)
 
 
@@ -254,6 +255,8 @@ struct Workspace(Movable):
     var keys: List[UInt64]
     var base_of: List[Int]
     """Per row, the score its stored scores are relative to (16-bit lanes; 0 in 32-bit ones)."""
+    var reach_of: List[Int]
+    """Per row (PREFIX), the most any cell after it can score through it (absolute)."""
     var shifted: List[UInt8]
     """A predecessor row's scores moved to this row's base, when the two differ."""
 
@@ -277,6 +280,7 @@ struct Workspace(Movable):
         self.preds = List[Int]()
         self.keys = List[UInt64]()
         self.base_of = List[Int]()
+        self.reach_of = List[Int]()
         self.shifted = List[UInt8]()
 
     def align(
@@ -442,6 +446,19 @@ struct Workspace(Movable):
         var best_col = 0
         var cells = self.hi[0] + 1
         var rebasing = rebase and dt == DType.int16
+        # PREFIX: the alignment may end at any node, so rows go on past the read's end. Each row's bound, its cells'
+        # scores plus a match for every query letter left (`reach_of`, absolute): once no row still feeding others
+        # can reach past the best end, nothing after can beat it, and the rows stop (`open`: those rows).
+        var stopping = mode == PREFIX
+        self.reach_of.resize(n + 1, 0)
+        var open = List[Int]()
+        if stopping:
+            var top = Int(NEG)
+            for j in range(self.hi[0] + 1):
+                top = max(top, Int(first_row[unsafe_offset=V + j]) + Int(scoring.match_score) * (m - j))
+            self.reach_of[0] = top
+            if self.waiting[0] > 0:
+                open.append(0)
         self.base_of.resize(n + 1, 0)
         self.base_of[0] = 0
         for r in range(1, n + 1):
@@ -716,45 +733,43 @@ struct Workspace(Movable):
             self.trace.resize(unsafe_uninit_length=tbase + span + V)
             var bytes = self.trace.unsafe_ptr().unsafe_offset(tbase)
             var best_lanes = Vec(NEG)
+            var reach_lanes = Vec(NEG)
+            var per_letter = S(Int(scoring.match_score))
             var lane = iota[dt, V]()
             var first_lane = lane.eq(0)
-            var ramp1 = Vec(e1) * lane
-            var ramp2 = Vec(e2) * lane
             var opened1 = gap1 - e1
             var opened2 = gap2 - e2
-            var carry1 = NEG  # the largest h[t] + e1 t of the cells before the block
-            var carry2 = NEG
-            var last_f1 = NEG
-            var last_f2 = NEG
-            var last_h = NEG
+            # The largest h[t] + e t of the cells before the block, in every lane (no scalar goes back into a vector).
+            var carry1 = Vec(NEG)
+            var carry2 = Vec(NEG)
+            # Each lane's cell, and it times e1, e2 and a match, a block on at a time.
+            var cell = lane
+            var e_index1 = Vec(e1) * lane
+            var e_index2 = Vec(e2) * lane
+            var letters_on = Vec(per_letter) * lane
+            var ends = Vec(S(span))
             var at = 0
             while at < span:
+                # The maximum over t <= k, not t < k: t = k adds a gap of no letters, h[k] - open, below h[k], so it
+                # never takes a cell, nor (as h[k] - open - e = h[k] - gap) turns a flag; it saves a lane shift.
+                # Each cell's flag says whether the next cell's gap extends its own, as both come from its scores: the
+                # traceback reads it there (`_F1_EXTENDS`), and no score moves a lane.
                 var here = h.unsafe_load[width=V](at)
-                var left_h = first_lane.select(Vec(last_h), here.shift_right[1]())
-                var e_index1 = ramp1 + Vec(e1 * S(at))
-                var reach1 = _prefix_max(here + e_index1)
-                var before1 = max(first_lane.select(Vec(carry1), reach1.shift_right[1]()), Vec(carry1))
-                var inserted1 = _floor(before1 - opened1 - e_index1)
+                var reach1 = max(_prefix_max(here + e_index1), carry1)
+                var inserted1 = _floor(reach1 - opened1 - e_index1)
                 if at == 0:
                     inserted1 = first_lane.select(Vec(NEG), inserted1)
-                var left_f1 = first_lane.select(Vec(last_f1), inserted1.shift_right[1]())
-                var extends1 = (left_f1 - e1).gt(left_h - gap1).select(one, nothing)
-                carry1 = max(carry1, reach1[V - 1])
-                last_f1 = inserted1[V - 1]
+                var extends1 = (inserted1 - e1).gt(here - gap1).select(one, nothing)
+                carry1 = _last(reach1)
                 var inserted2 = Vec(NEG)
                 var extends2 = nothing
                 if convex:
-                    var e_index2 = ramp2 + Vec(e2 * S(at))
-                    var reach2 = _prefix_max(here + e_index2)
-                    var before2 = max(first_lane.select(Vec(carry2), reach2.shift_right[1]()), Vec(carry2))
-                    inserted2 = _floor(before2 - opened2 - e_index2)
+                    var reach2 = max(_prefix_max(here + e_index2), carry2)
+                    inserted2 = _floor(reach2 - opened2 - e_index2)
                     if at == 0:
                         inserted2 = first_lane.select(Vec(NEG), inserted2)
-                    var left_f2 = first_lane.select(Vec(last_f2), inserted2.shift_right[1]())
-                    extends2 = (left_f2 - e2).gt(left_h - gap2).select(one, nothing)
-                    carry2 = max(carry2, reach2[V - 1])
-                    last_f2 = inserted2[V - 1]
-                last_h = here[V - 1]
+                    extends2 = (inserted2 - e2).gt(here - gap2).select(one, nothing)
+                    carry2 = _last(reach2)
                 var value = here
                 var packed = source_of.unsafe_load[width=V](at)
                 var source = packed & Vec(S(7))
@@ -771,7 +786,14 @@ struct Workspace(Movable):
                 var byte = source | (packed & Vec(S(~7))) | (extends1 << 5) | (extends2 << 6)
                 h.unsafe_store(at, value)
                 bytes.unsafe_store(at, byte.cast[DType.uint8]())
-                best_lanes = max(best_lanes, (lane + S(at)).lt(S(span)).select(value, Vec(NEG)))
+                var inside = cell.lt(ends)
+                best_lanes = max(best_lanes, inside.select(value, Vec(NEG)))
+                if stopping:
+                    reach_lanes = max(reach_lanes, inside.select(value - letters_on, Vec(NEG)))
+                cell += S(V)
+                e_index1 += e1 * S(V)
+                e_index2 += e2 * S(V)
+                letters_on += per_letter * S(V)
                 at += V
             var row_best = best_lanes.reduce_max()
             # The last vector ran into the right padding: back to sentinels for the successors.
@@ -830,9 +852,20 @@ struct Workspace(Movable):
                 if self.waiting[p] == 0:
                     self.free.append(self.slot_of[p])
                     self.slot_of[p] = -1
+                    if stopping:
+                        _drop(open, p)
             if self.waiting[r] == 0:
                 self.free.append(slot)
                 self.slot_of[r] = -1
+            if stopping:
+                if self.waiting[r] > 0:
+                    self.reach_of[r] = Int(reach_lanes.reduce_max()) + Int(scoring.match_score) * (m - low) + base_r
+                    open.append(r)
+                var top = -(1 << 62)
+                for x in open:
+                    top = max(top, self.reach_of[x])
+                if best_ok and top <= best:
+                    break
 
         if mode == GLOBAL or mode == SUFFIX:
             var start_row = self.pool[self.slot_of[0] if self.slot_of[0] >= 0 else 0].unsafe_ptr().unsafe_bitcast[S]()
@@ -881,7 +914,14 @@ struct Workspace(Movable):
                 if not extends:
                     state = 0
             else:
-                var extends = (byte & (_F1_EXTENDS if state == _INSERTION1 else _F2_EXTENDS)) != 0
+                # The cell before holds this one's flag; before the band's first cell, a gap of a cell nothing reaches
+                # (both scores the sentinel) extended when opening costs more than extending.
+                var first = state == _INSERTION1
+                var extends: Bool
+                if at > 0:
+                    extends = (self.trace[self.trace_at[r] + at - 1] & (_F1_EXTENDS if first else _F2_EXTENDS)) != 0
+                else:
+                    extends = (gap1 if first else gap2) > (e1 if first else e2)
                 j -= 1
                 if not extends:
                     state = 0
@@ -935,12 +975,28 @@ def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut r
     if len(keys) == 0:
         rows.append(0)
         return
-    if len(keys) > 1:
-        # Equal weights keep the edges' order: edge ids grow as the edges are made.
-        sort(keys)
+    # Equal weights keep the edges' order: edge ids grow as the edges are made. The keys are few and distinct: an
+    # insertion sort, the order `sort` gives.
+    for a in range(1, len(keys)):
+        var key = keys[a]
+        var b = a
+        while b > 0 and keys[b - 1] > key:
+            keys[b] = keys[b - 1]
+            b -= 1
+        keys[b] = key
     for key in keys:
         var p = Int(graph.edge_from[Int(key & 0xFFFFFFFF)])
         rows.append(0 if p == left else row_of[p])
+
+
+@inline(.always)
+def _drop(mut rows: List[Int], row: Int):
+    """`row` out of `rows` (order not kept)."""
+    for k in range(len(rows)):
+        if rows[k] == row:
+            rows[k] = rows[len(rows) - 1]
+            _ = rows.pop()
+            return
 
 
 @inline(.always)
@@ -1027,13 +1083,44 @@ def _last_equal[dt: DType](h: MutPointer[Scalar[dt], _], span: Int, value: Scala
 @inline(.always)
 def _prefix_max[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
     """Each lane's maximum over itself and the lanes before it."""
-    var lane = iota[dt, width]()
+    var floor = SIMD[dt, width](_neg[dt]())
     var out = v
     comptime for step in range(6):
         comptime shift = 1 << step
         comptime if shift < width:
-            out = max(out, lane.lt(Scalar[dt](shift)).select(SIMD[dt, width](_neg[dt]()), out.shift_right[shift]()))
+            out = max(out, _up[shift](out, floor))
     return out
+
+
+@inline(.always)
+def _up[k: Int, dt: DType, width: Int](v: SIMD[dt, width], fill: SIMD[dt, width]) -> SIMD[dt, width]:
+    """`v` moved `k` lanes up (lane i + k holds lane i), `fill`'s value (in every lane of it) in the `k` below. 16-bit
+    lanes move as pairs in 32-bit ones and shifts within them: a 16-bit shuffle across a vector takes two or three
+    micro-ops on the shuffle port (Skylake-X), a 32-bit one one, and the shifts run elsewhere."""
+    comptime if size_of[dt]() == 2 and width % 2 == 0:
+        comptime half = width // 2
+        var pairs = bitcast[DType.uint32, half](v)
+        var filled = bitcast[DType.uint32, half](fill)
+        comptime if k % 2 == 0:
+            return bitcast[dt, width](filled.join(pairs).slice[half, offset=half - k // 2]())
+        else:
+            # Lane 2d takes the high half of pair d - (k + 1) / 2, lane 2d + 1 the low half of pair d - k / 2.
+            var high = filled.join(pairs).slice[half, offset=half - (k + 1) // 2]()
+            var low = filled.join(pairs).slice[half, offset=half - k // 2]()
+            return bitcast[dt, width]((low << 16) | (high >> 16))
+    else:
+        return fill.join(v).slice[width, offset=width - k]()
+
+
+@inline(.always)
+def _last[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
+    """`v`'s last lane in every lane; 16-bit lanes by a 32-bit broadcast, as `_up` moves them."""
+    comptime if size_of[dt]() == 2 and width % 2 == 0:
+        comptime half = width // 2
+        var top = SIMD[DType.uint32, half](bitcast[DType.uint32, half](v)[half - 1])
+        return bitcast[dt, width]((top >> 16) | (top & 0xFFFF0000))
+    else:
+        return SIMD[dt, width](v[width - 1])
 
 
 @inline(.always)

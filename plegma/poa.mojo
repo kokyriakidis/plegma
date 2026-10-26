@@ -40,6 +40,7 @@ from .kernel import (
 from .order import guide_order
 from .pinned import WindowScratch, align_pinned, unique_pins
 from .pins import pins
+from .polish import past_the_end
 
 
 comptime INPUT_ORDER = 0
@@ -323,7 +324,7 @@ def _foreign(
     """The reads of `left` and `right` (anchored at the left or the right end) another copy's: further from `core`,
     the spanning reads' consensus, than `FOREIGN_RATIO` times the worst spanning read's rate over the letters each
     covers, plus `FOREIGN_SLACK`. Edit distances; a one-sided read's as the polisher aligns it."""
-    var aligner = Aligner()
+    var aligner = Aligner(warm=False)
     var worst = 0.0
     for r in spanning:
         var found = aligner.align(Span(core), Span(seqs[r]), Costs.edit(), Mode.GLOBAL)
@@ -352,10 +353,9 @@ def _one_sided(mut aligner: Aligner, consensus: List[UInt8], seq: List[UInt8], l
     the cheaper."""
     var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), Mode.PREFIX if left else Mode.SUFFIX)
     if len(consensus) - len(seq) < found.cost:
-        var past = Mode.ends_free(query_end=len(seq)) if left else Mode.ends_free(query_start=len(seq))
-        var other = aligner.align(Span(consensus), Span(seq), Costs.edit(), past, max_cost=found.cost - 1)
-        if other:
-            found = other.take()
+        var other = past_the_end(aligner, consensus, seq, left)
+        if other.cost < found.cost:
+            found = other^
     return found^
 
 
@@ -561,7 +561,7 @@ def _join(left: List[UInt8], right: List[UInt8]) raises -> List[UInt8]:
     for j in range(min(len(right), JOIN_ENDS)):
         b.append(right[j])
     var mode = Mode.ends_free(reference_start=len(a), query_end=len(b)).with_match_score(1)
-    var aligner = Aligner()
+    var aligner = Aligner(warm=False)
     # Edits far dearer than a match earns (minimap2's 19 to 1): a longer overlap shifted by tandem copies, its letters
     # a few percent apart, loses to the true one, its letters as alike as the two consensus sequences.
     var got = aligner.align(Span(a), Span(b), Costs.linear(JOIN_EDIT, JOIN_EDIT), mode)

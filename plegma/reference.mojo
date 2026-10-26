@@ -87,7 +87,7 @@ def _pairings(
     def pair(
         slot: Int,
     ) {mut taken, imm order, imm seqs, imm distinct, imm flanks, imm costs, imm pinned, imm out, imm flags}:
-        var aligner = Aligner()
+        var aligner = Aligner(warm=False)
         while True:
             var k = Int(taken.fetch_add(1))
             if k >= len(order):
@@ -100,7 +100,7 @@ def _pairings(
 
     spread(pair, workers, workers)
     # One that raised raises here, as one thread would have.
-    var aligner = Aligner()
+    var aligner = Aligner(warm=False)
     for d in range(1, len(distinct)):
         if failed[d]:
             partner[d] = _pairing_of(aligner, seqs[distinct[0]], seqs[distinct[d]], costs, flanks, pinned)
@@ -136,7 +136,7 @@ def _fall_back(seqs: List[List[UInt8]], distinct: List[Int], mut partner: List[L
     var most = Float64(len(replaced)) >= REPLACED_SEQUENCES * Float64(len(distinct) - 1)
     if not most or Float64(inserted) < REPLACED_LETTERS * Float64(letters):
         return
-    var aligner = Aligner()
+    var aligner = Aligner(warm=False)
     for d in replaced:
         partner[d] = _onto(aligner, seqs[distinct[0]], seqs[distinct[d]], fallback)
 

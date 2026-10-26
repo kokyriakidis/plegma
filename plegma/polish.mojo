@@ -16,9 +16,9 @@ best alone inside a tandem repeat, where one edit gains alike at every copy. Rou
 segments the last round changed, until none gains.
 """
 
-from std.math import log
+from std.math import iota, log
 
-from karan import Aligner, Costs, Mode, Ties
+from karan import Aligner, Alignment, Costs, Mode, Ties
 
 from .alphabet import encode_base
 from .graph import DELETION, INSERTION, MATCH, cigar_runs
@@ -54,6 +54,33 @@ def _code(letter: UInt8) -> Int:
     if lower == UInt8(ord("t")):
         return 3
     return 4
+
+
+struct _Realigned(Movable):
+    """The sequences' alignments to one consensus, as `_Paths.fill` found them, through one aligner. A fill against
+    the same consensus takes them as they are (an alignment depends on its two sequences alone), and a sequence with
+    the letters and anchor of one before it takes that one's (`same_as`): the likelihood rounds mostly start on the
+    consensus the edit rounds end on, and the runs on theirs, two thirds of the letters polishing aligned."""
+
+    var aligner: Aligner
+    var consensus: List[UInt8]
+    var found: List[Optional[Alignment]]
+    """Per sequence, its alignment to `consensus`, once found."""
+    var same_as: List[Int]
+    """Per sequence, the first member with its letters and anchor (itself if none before it)."""
+
+    def __init__(out self, var same_as: List[Int]):
+        self.aligner = Aligner(warm=False)
+        self.consensus = List[UInt8]()
+        self.found = List[Optional[Alignment]]()
+        self.same_as = same_as^
+
+    def on(mut self, consensus: List[UInt8]):
+        """The alignments kept to `consensus`: those to another forgotten."""
+        if len(self.found) == len(self.same_as) and self.consensus == consensus:
+            return
+        self.consensus = consensus.copy()
+        self.found = List[Optional[Alignment]](length=len(self.same_as), fill=None)
 
 
 struct _Paths(Movable):
@@ -100,7 +127,7 @@ struct _Paths(Movable):
 
     def fill(
         mut self,
-        mut aligner: Aligner,
+        mut realigned: _Realigned,
         consensus: List[UInt8],
         sequences: List[List[UInt8]],
         members: List[Int],
@@ -109,7 +136,8 @@ struct _Paths(Movable):
     ) raises:
         """Every member aligned to the consensus: whole (`anchors` empty, or `BOTH`), or, a read anchored at one end,
         against a prefix (`LEFT`) or a suffix (`RIGHT`) of it. A path outside its alignment's span stays at its
-        read's start before it and its end after it."""
+        read's start before it and its end after it. The alignments come from `realigned` where it holds them."""
+        realigned.on(consensus)
         var length = len(consensus)
         self.stride = length + 1
         var count = len(members)
@@ -143,18 +171,17 @@ struct _Paths(Movable):
                 mode = Mode.PREFIX
             elif anchor == RIGHT:
                 mode = Mode.SUFFIX
-            var found = aligner.align(Span(consensus), Span(seq), Costs.edit(), mode, ties=Ties.LEFT)
-            # Every consensus letter the read lacks costs the other way at least one: tried only where that could
-            # still win, and searched only as far as the first one's cost.
-            if (anchor == LEFT or anchor == RIGHT) and length - len(seq) < found.cost:
-                var past = Mode.ends_free(query_end=len(seq)) if anchor == LEFT else Mode.ends_free(
-                    query_start=len(seq)
-                )
-                var other = aligner.align(
-                    Span(consensus), Span(seq), Costs.edit(), past, max_cost=found.cost - 1, ties=Ties.LEFT
-                )
-                if other:
-                    found = other.take()
+            var first = realigned.same_as[members[k]]
+            if not realigned.found[first]:
+                var aligned = realigned.aligner.align(Span(consensus), Span(seq), Costs.edit(), mode, ties=Ties.LEFT)
+                # Every consensus letter the read lacks costs the other way at least one: tried only where that
+                # could still win, and searched only as far as the first one's cost.
+                if (anchor == LEFT or anchor == RIGHT) and length - len(seq) < aligned.cost:
+                    var other = past_the_end(realigned.aligner, consensus, seq, anchor == LEFT)
+                    if other.cost < aligned.cost:
+                        aligned = other^
+                realigned.found[first] = aligned^
+            ref found = realigned.found[first].value()
             self.total += w * found.cost
             var runs = cigar_runs(found.cigar)
             var base = k * self.stride
@@ -357,9 +384,10 @@ def polish(
     # every read, their sums in floating point.
     var unique = List[Int]()
     var weight = List[Int]()
-    _groups(sequences, members, anchors, unique, weight)
+    var same_as = List[Int]()
+    _groups(sequences, members, anchors, unique, weight, same_as)
     var count = len(unique)
-    var aligner = Aligner()
+    var realigned = _Realigned(same_as^)
     var paths = _Paths()
     var bands = _Bands()
     var backward = List[Int32]()
@@ -382,7 +410,7 @@ def polish(
     comptime LETTERS = "ACGT"
     var unchecked = False
     for _ in range(rounds):
-        paths.fill(aligner, current, sequences, unique, anchors, weight)
+        paths.fill(realigned, current, sequences, unique, anchors, weight)
         unchecked = False
         if paths.total >= previous_total:
             # The last round's edits together cost more than they saved: back to before them. Once, then taken one
@@ -478,13 +506,7 @@ def polish(
                     var letter = current[s + c]
                     var lo = bands.low[c + 1]
                     var at = bands.start[c + 1]
-                    for j in range(lo, bands.high[c + 1] + 1):
-                        var v = bands.at(forward, c, j) + 1
-                        if j > first:
-                            v = min(v, bands.at(forward, c, j - 1) + Int32(1 if seq[j - 1] != letter else 0))
-                            if j - 1 >= lo:
-                                v = min(v, forward[at + j - 1 - lo] + 1)
-                        forward[at + j - lo] = v
+                    _forward_column(forward, bands, c, seq, letter, first)
                     if free_start and first >= lo and first <= bands.high[c + 1]:
                         forward[at + first - lo] = 0
                     # The read used up: the consensus after its end is free, so its cost stays as it was.
@@ -495,22 +517,7 @@ def polish(
                 for j in range(bands.low[c_last], bands.high[c_last] + 1):
                     backward[bands.start[c_last] + j - bands.low[c_last]] = Int32(last - j)
                 for c in reversed(range(c_last)):
-                    var letter = current[s + c]
-                    var lo = bands.low[c]
-                    var hi = bands.high[c]
-                    var at = bands.start[c]
-                    for j in reversed(range(lo, hi + 1)):
-                        var v = bands.at(backward, c + 1, j) + 1
-                        if j < last:
-                            if j + 1 <= hi:
-                                v = min(v, backward[at + j + 1 - lo] + 1)
-                            v = min(v, bands.at(backward, c + 1, j + 1) + Int32(1 if seq[j] != letter else 0))
-                        # Not yet started: the consensus before the read's start is free.
-                        if free_start and j == first:
-                            v = min(v, bands.at(backward, c + 1, j))
-                        backward[at + j - lo] = v
-                        if free_end and j == last:
-                            backward[at + j - lo] = 0
+                    _backward_column(backward, bands, c, seq, current[s + c], first, last, free_start, free_end)
                 var base = backward[bands.start[0]]
                 for c in range(columns):
                     var i = s + c
@@ -681,12 +688,12 @@ def polish(
                 dirty[q] = True
     if unchecked:
         # The last round's edits, past the rounds allowed, kept only if they gained.
-        paths.fill(aligner, current, sequences, unique, anchors, weight)
+        paths.fill(realigned, current, sequences, unique, anchors, weight)
         if paths.total >= previous_total:
             current = previous^
-    var out = _likely(current^, sequences, members, likely_rounds, support, share, anchors)
+    var out = _likely(current^, sequences, members, likely_rounds, support, share, anchors, realigned)
     if homopolymers.loaded():
-        out = _runs(out^, sequences, members, anchors, homopolymers, strands)
+        out = _runs(out^, sequences, members, anchors, homopolymers, strands, realigned)
     return out^
 
 
@@ -697,15 +704,15 @@ def _runs(
     anchors: List[Int],
     model: HomopolymerModel,
     strands: List[Int],
+    mut realigned: _Realigned,
 ) raises -> List[UInt8]:
     """Every run of two letters or more in `consensus` at its most likely length under `model`, given the length of
     the run each member reports: the read's letters aligned to the run and inserted at its two ends, with the letters
     like it next to them; a read with another letter inside the run, or not reaching past both its ends (anchored at
     one end), does not vote (as shasta2's msa1 repair votes: the reads with the run's symbol in its column)."""
     var length = len(consensus)
-    var aligner = Aligner()
     var paths = _Paths()
-    paths.fill(aligner, consensus, sequences, members, anchors)
+    paths.fill(realigned, consensus, sequences, members, anchors)
     var out = List[UInt8](capacity=length + length // 8)
     var lengths = List[Int]()
     var on = List[Int]()
@@ -764,11 +771,19 @@ def _runs(
 
 
 def _groups(
-    sequences: List[List[UInt8]], members: List[Int], anchors: List[Int], mut unique: List[Int], mut weight: List[Int]
+    sequences: List[List[UInt8]],
+    members: List[Int],
+    anchors: List[Int],
+    mut unique: List[Int],
+    mut weight: List[Int],
+    mut same_as: List[Int],
 ) raises:
     """`members` grouped by letters and anchor: the first of each group in `unique` (in the order they come), how
-    many it stands for in `weight`."""
+    many it stands for in `weight`, and per sequence the first of its group in `same_as` (itself if not a member)."""
     var at = Dict[String, Int]()
+    same_as = List[Int](capacity=len(sequences))
+    for r in range(len(sequences)):
+        same_as.append(r)
     for r in members:
         var anchor = anchors[r] if len(anchors) > 0 else 0
         var key = String(anchor) + ":" + String(unsafe_from_utf8=sequences[r])
@@ -779,6 +794,158 @@ def _groups(
             weight.append(1)
         else:
             weight[k] += 1
+            same_as[r] = unique[k]
+
+
+def past_the_end(mut aligner: Aligner, consensus: List[UInt8], seq: List[UInt8], left: Bool) raises -> Alignment:
+    """`seq`, anchored at the consensus's start (`left`) or end, aligned past the consensus's other end: the whole
+    consensus against a prefix (or a suffix) of `seq`, the rest of `seq` free. Aligned the other way round, `seq` as
+    the reference, where karan's bit-parallel sweep serves it (free ends in the reference alone, no cap; the
+    wavefront it replaces took most of polishing's time on reads past the end), then turned back."""
+    var turned = aligner.align(
+        Span(seq), Span(consensus), Costs.edit(), Mode.PREFIX if left else Mode.SUFFIX, ties=Ties.LEFT
+    )
+    var cigar = List[UInt8](capacity=turned.cigar.byte_length())
+    for c in turned.cigar.as_bytes():
+        cigar.append(UInt8(ord("D")) if c == UInt8(ord("I")) else (UInt8(ord("I")) if c == UInt8(ord("D")) else c))
+    return Alignment(
+        turned.cost,
+        turned.score,
+        String(unsafe_from_utf8=cigar),
+        turned.query_start,
+        turned.query_end,
+        turned.reference_start,
+        turned.reference_end,
+    )
+
+
+comptime LANES = 8
+"""The int32 lanes of a segment's forward and backward columns (a column is some 70 cells: wider vectors leave
+longer scalar tails)."""
+comptime FAR = Int32(1 << 30)
+"""Above every cell's score, INF and what it gathers along a column included: a lane no running minimum takes."""
+
+
+@inline(.always)
+def _up[k: Int](v: SIMD[DType.int32, LANES]) -> SIMD[DType.int32, LANES]:
+    """`v` moved `k` lanes up (lane i + k holds lane i), `FAR` below."""
+    return SIMD[DType.int32, LANES](FAR).join(v).slice[LANES, offset=LANES - k]()
+
+
+@inline(.always)
+def _down[k: Int](v: SIMD[DType.int32, LANES]) -> SIMD[DType.int32, LANES]:
+    """`v` moved `k` lanes down (lane i holds lane i + k), `FAR` above."""
+    return v.join(SIMD[DType.int32, LANES](FAR)).slice[LANES, offset=k]()
+
+
+def _forward_column(mut forward: List[Int32], bands: _Bands, c: Int, seq: List[UInt8], letter: UInt8, first: Int):
+    """Forward column c + 1 from column c, as one cell at a time takes it: each cell the least of the cell beside it
+    in column c plus one (the consensus letter deleted), the one diagonally before plus the two letters' mismatch
+    (from the read's second letter on, `first` + 1), and the one above plus one (a read letter inserted). The first
+    two from column c alone, a vector at a time where both are inside its band; the third a running minimum, the
+    least over t <= j of a cell's own plus j - t, a vector at a time."""
+    var lo = bands.low[c + 1]
+    var hi = bands.high[c + 1]
+    var at = bands.start[c + 1]
+    var before_lo = bands.low[c]
+    var before_hi = bands.high[c]
+    var before_at = bands.start[c]
+    var cells = forward.unsafe_ptr()
+    var letters = seq.unsafe_ptr()
+    var core_lo = max(lo, before_lo + 1, first + 1)
+    var core_hi = min(hi, before_hi)
+    var j = lo
+    while j <= hi:
+        if j >= core_lo and j + LANES - 1 <= core_hi:
+            var beside = cells.unsafe_load[width=LANES](before_at + j - before_lo)
+            var diagonal = cells.unsafe_load[width=LANES](before_at + j - 1 - before_lo)
+            var differ = letters.unsafe_load[width=LANES](j - 1).ne(letter).cast[DType.int32]()
+            cells.unsafe_store(at + j - lo, min(beside + 1, diagonal + differ))
+            j += LANES
+            continue
+        var v = bands.at(forward, c, j) + 1
+        if j > first:
+            v = min(v, bands.at(forward, c, j - 1) + Int32(1 if seq[j - 1] != letter else 0))
+        cells[unsafe_offset=at + j - lo] = v
+        j += 1
+    var lane = iota[DType.int32, LANES]()
+    var above = FAR  # the cell above the block's first, plus one
+    j = lo
+    while j + LANES - 1 <= hi:
+        var x = cells.unsafe_load[width=LANES](at + j - lo)
+        x = min(x, _up[1](x) + 1)
+        x = min(x, _up[2](x) + 2)
+        x = min(x, _up[4](x) + 4)
+        x = min(x, SIMD[DType.int32, LANES](above) + lane)
+        cells.unsafe_store(at + j - lo, x)
+        above = x[LANES - 1] + 1
+        j += LANES
+    while j <= hi:
+        cells[unsafe_offset=at + j - lo] = min(cells[unsafe_offset=at + j - lo], above)
+        above = cells[unsafe_offset=at + j - lo] + 1
+        j += 1
+
+
+def _backward_column(
+    mut backward: List[Int32],
+    bands: _Bands,
+    c: Int,
+    seq: List[UInt8],
+    letter: UInt8,
+    first: Int,
+    last: Int,
+    free_start: Bool,
+    free_end: Bool,
+):
+    """Backward column c from column c + 1, as `_forward_column` builds forward ones, mirrored: each cell the least
+    of the cell beside it in column c + 1 plus one, the one diagonally after plus the mismatch (before the read's
+    end), and the one below plus one, a running minimum from the bottom. The read used up (`free_end`), its last cell
+    is 0, which the cells above it see; not yet started (`free_start`), its first takes the cell beside it as it is
+    (the consensus before the read's start free)."""
+    var lo = bands.low[c]
+    var hi = bands.high[c]
+    var at = bands.start[c]
+    var after_lo = bands.low[c + 1]
+    var after_hi = bands.high[c + 1]
+    var after_at = bands.start[c + 1]
+    var cells = backward.unsafe_ptr()
+    var letters = seq.unsafe_ptr()
+    var core_lo = max(lo, after_lo)
+    var core_hi = min(hi, after_hi - 1, last - 1)
+    var j = lo
+    while j <= hi:
+        if j >= core_lo and j + LANES - 1 <= core_hi:
+            var beside = cells.unsafe_load[width=LANES](after_at + j - after_lo)
+            var diagonal = cells.unsafe_load[width=LANES](after_at + j + 1 - after_lo)
+            var differ = letters.unsafe_load[width=LANES](j).ne(letter).cast[DType.int32]()
+            cells.unsafe_store(at + j - lo, min(beside + 1, diagonal + differ))
+            j += LANES
+            continue
+        var v = bands.at(backward, c + 1, j) + 1
+        if j < last:
+            v = min(v, bands.at(backward, c + 1, j + 1) + Int32(1 if seq[j] != letter else 0))
+        cells[unsafe_offset=at + j - lo] = v
+        j += 1
+    if free_end and hi == last:
+        cells[unsafe_offset=at + hi - lo] = 0
+    var lane = iota[DType.int32, LANES]()
+    var below = FAR  # the cell below the block's last, plus one
+    j = hi + 1
+    while j - LANES >= lo:
+        j -= LANES
+        var x = cells.unsafe_load[width=LANES](at + j - lo)
+        x = min(x, _down[1](x) + 1)
+        x = min(x, _down[2](x) + 2)
+        x = min(x, _down[4](x) + 4)
+        x = min(x, SIMD[DType.int32, LANES](below) + (LANES - 1 - lane))
+        cells.unsafe_store(at + j - lo, x)
+        below = x[0] + 1
+    while j > lo:
+        j -= 1
+        cells[unsafe_offset=at + j - lo] = min(cells[unsafe_offset=at + j - lo], below)
+        below = cells[unsafe_offset=at + j - lo] + 1
+    if free_start and lo == first:
+        cells[unsafe_offset=at] = min(cells[unsafe_offset=at], bands.at(backward, c + 1, first))
 
 
 @always_inline
@@ -839,6 +1006,7 @@ def _likely(
     support: Int,
     share: Float64,
     anchors: List[Int],
+    mut realigned: _Realigned,
 ) raises -> List[UInt8]:
     """The edits of `polish`, scored by the sequences' summed log-likelihood instead of their edit distance.
 
@@ -853,7 +1021,6 @@ def _likely(
     var count = len(members)
     if count == 0 or rounds <= 0 or len(current) == 0:
         return current^
-    var aligner = Aligner()
     var paths = _Paths()
     var bands = _Bands()
     var forward = List[Float64]()
@@ -875,7 +1042,7 @@ def _likely(
     var before = List[UInt8]()
     var run_gain = RUN_GAIN
     for _ in range(rounds):
-        paths.fill(aligner, current, sequences, members, anchors)
+        paths.fill(realigned, current, sequences, members, anchors)
         if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
             break
         var length = len(current)
