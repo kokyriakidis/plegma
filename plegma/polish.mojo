@@ -40,6 +40,9 @@ comptime REPEAT_DISTANCE = 500
 comptime INF = Int32(1 << 28)
 comptime SLOTS = 9
 """Per consensus position: insert A, C, G or T before it, delete it, substitute A, C, G or T for it."""
+comptime OUTLIER = 0.3
+"""A sequence more than this share edits (over the longer of the two spans its alignment covers) takes no part in
+polishing."""
 comptime MAX_PERIOD = 24
 """Repeat units up to this long are deleted or copied whole (the two bands a unit apart overlap: 2 `BAND` > it)."""
 
@@ -392,6 +395,30 @@ def polish(
     var count = len(unique)
     var realigned = _Realigned(same_as^)
     var paths = _Paths()
+    # A sequence whose alignment to the consensus is more than `OUTLIER` edits is no noisy copy of it (an empty read
+    # between the anchors, another allele's): every round would move toward it, the likelihood model's rates with
+    # it, so polishing leaves it out (all are kept when every one is such).
+    paths.fill(realigned, current, sequences, unique, anchors, weight)
+    var voters = members.copy()
+    var kept = List[Int]()
+    var kept_weight = List[Int]()
+    var outlier = List[Bool](length=len(sequences), fill=False)
+    for k in range(count):
+        ref found = realigned.found[unique[k]].value()
+        var extent = max(found.reference_end - found.reference_start, found.query_end - found.query_start)
+        if Float64(found.cost) > OUTLIER * Float64(max(1, extent)):
+            outlier[unique[k]] = True
+        else:
+            kept.append(unique[k])
+            kept_weight.append(weight[k])
+    if len(kept) > 0 and len(kept) < count:
+        unique = kept^
+        weight = kept_weight^
+        count = len(unique)
+        voters.clear()
+        for r in members:
+            if not outlier[realigned.same_as[r]]:
+                voters.append(r)
     var bands = _Bands()
     var backward = List[Int32]()
     var forward = List[Int32]()
@@ -694,9 +721,9 @@ def polish(
         paths.fill(realigned, current, sequences, unique, anchors, weight)
         if paths.total >= previous_total:
             current = previous^
-    var out = _likely(current^, sequences, members, likely_rounds, support, share, anchors, realigned)
+    var out = _likely(current^, sequences, voters, likely_rounds, support, share, anchors, realigned)
     if homopolymers.loaded():
-        out = _runs(out^, sequences, members, anchors, homopolymers, strands, realigned)
+        out = _runs(out^, sequences, voters, anchors, homopolymers, strands, realigned)
     return out^
 
 

@@ -20,11 +20,12 @@ from plegma.kernel import EXTENSION, GLOBAL, LOCAL, Scoring, Topology
 from plegma.poa import BAND_MAX, BOTH, GUIDE_ORDER, INPUT_ORDER, LEFT, LONGEST_FIRST, RIGHT, Poa, PoaOptions, poa
 from plegma.polish import polish
 from plegma.reference import on_reference
+from plegma.version import VERSION
 
 
 comptime USAGE = """Usage: plegma <command> [options] <in.fa/fq> > cons.fa/msa.fa/plegma.gfa
 
-Commands:
+Commands (plegma --version prints the version):
   poa           partial order alignment of the sequences, as abPOA runs one
   ref           the MSA anchored on the first sequence (the reference): every other aligned to it alone at
                 minimap2's asm5 scores (as costs: mismatch 40, a gap of k letters min(78 + 7k, 162 + 3k)), gaps
@@ -567,6 +568,9 @@ def main() raises:
     if len(args) == 0 or args[0] == "-h" or args[0] == "--help":
         print(USAGE)
         exit(0 if len(args) > 0 else 1)
+    if args[0] == "--version":
+        print("plegma", VERSION)
+        return
     if args[0] != "poa" and args[0] != "ref":
         raise Error(t"unknown command {args[0]}: poa or ref\n{USAGE}")
     var reference = args[0] == "ref"

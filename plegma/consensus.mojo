@@ -8,10 +8,24 @@ spans both anchors and the two sides could not be joined, the left side's and th
 """
 
 from .graph import Graph
-from .homopolymer import HomopolymerModel
-from .kernel import GLOBAL, Topology
+from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
+from .kernel import BOTH, GLOBAL, LEFT, RIGHT, Topology
 from .poa import PoaOptions, poa
 from .polish import polish
+
+
+def _check(count: Int, anchors: List[Int], strands: List[Int]) raises:
+    """`consensus`'s anchors and strands for `count` sequences: none (the defaults), or one each and valid."""
+    if len(anchors) != 0 and len(anchors) != count:
+        raise Error(t"{len(anchors)} anchors for {count} sequences")
+    if len(strands) != 0 and len(strands) != count:
+        raise Error(t"{len(strands)} strands for {count} sequences")
+    for r in range(len(anchors)):
+        if anchors[r] != BOTH and anchors[r] != LEFT and anchors[r] != RIGHT:
+            raise Error(t"read {r}: anchor {anchors[r]} is not {BOTH} (both), {LEFT} (left) or {RIGHT} (right)")
+    for r in range(len(strands)):
+        if strands[r] != 0 and strands[r] != 1 and strands[r] != STRAND_UNKNOWN:
+            raise Error(t"read {r}: strand {strands[r]} is not 0 (forward), 1 (reverse) or {STRAND_UNKNOWN} (unknown)")
 
 
 struct ConsensusOptions(Copyable, Movable):
@@ -29,18 +43,22 @@ struct ConsensusOptions(Copyable, Movable):
 
 
 def consensus(
-    mut seqs: List[List[UInt8]],
-    anchors: List[Int],
-    strands: List[Int],
-    options: ConsensusOptions,
+    var seqs: List[List[UInt8]],
+    anchors: List[Int] = List[Int](),
+    strands: List[Int] = List[Int](),
+    options: ConsensusOptions = ConsensusOptions(),
     homopolymers: HomopolymerModel = HomopolymerModel(),
 ) raises -> List[List[UInt8]]:
-    """The consensus of `seqs` (A, C, G, T in upper case), each anchored as `anchors` says and on `strands`' strand
-    (for `homopolymers`; empty: all unknown), as `plegma poa -r 0` writes it (with `-H` when `homopolymers` is
-    loaded). `seqs` may change: with `options.poa.strand` a spanning read is reverse-complemented when that aligns
-    better."""
+    """The consensus of `seqs` (A, C, G, T in upper case; any other letter matches none), each anchored as `anchors`
+    says (`BOTH`, `LEFT` or `RIGHT`; empty: all `BOTH`) and on `strands`' strand (0, 1 or `STRAND_UNKNOWN`, for
+    `homopolymers`; empty: all unknown), as `plegma poa -r 0` writes it (with `-H` when `homopolymers` is loaded).
+    Raises on anchors or strands of another length than `seqs`, or values outside those."""
+    _check(len(seqs), anchors, strands)
     if len(seqs) == 0:
         return [List[UInt8]()]
+    if len(anchors) == 0:
+        var all_spanning = List[Int](length=len(seqs), fill=BOTH)
+        return consensus(seqs^, all_spanning, strands, options, homopolymers)
     var names = List[String](capacity=len(seqs))
     for k in range(len(seqs)):
         names.append(String(t"r{k}"))

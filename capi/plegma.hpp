@@ -18,6 +18,8 @@
 
 namespace plegma {
 
+static_assert(sizeof(plegma_options) == 56, "plegma_options laid out as the library reads it");
+
 enum class Anchor : std::int32_t { Both = PLEGMA_ANCHOR_BOTH, Left = PLEGMA_ANCHOR_LEFT, Right = PLEGMA_ANCHOR_RIGHT };
 enum class Strand : std::int32_t {
     Forward = PLEGMA_STRAND_FORWARD,
@@ -32,9 +34,13 @@ struct Read {
     Strand strand = Strand::Unknown;
 };
 
-// plegma poa's options (plegma_options in plegma.h): polishing rounds by edit distance, then by likelihood (-P);
-// each read pinned to the consensus so far (-S) or aligned to the whole graph (-N: pinned false, what a local
-// assembler wants); where a one-directional assembly stops (-c). Default: plegma poa's.
+// The library's version ("major.minor.patch").
+inline std::string version() { return plegma_version(); }
+
+// plegma poa's options (plegma_options in plegma.h, which says what each means): polishing rounds by edit distance,
+// then by likelihood (-P); each read pinned to the consensus so far (-S) or aligned to the whole graph (-N: pinned
+// false, what a local assembler wants); where a one-directional assembly stops (-c); the scoring (-M -X -O -E) and
+// the adaptive band (-b -f -B). Default: plegma poa's. A value out of range fails the consensus call.
 struct Options {
     plegma_options values;
     Options() { plegma_options_init(&values); }
@@ -42,6 +48,27 @@ struct Options {
     Options& likelyRounds(std::int32_t rounds) { values.likely_rounds = rounds; return *this; }
     Options& pinned(bool pinned) { values.pinned = pinned ? 1 : 0; return *this; }
     Options& minCover(std::int32_t cover) { values.min_cover = cover; return *this; }
+    Options& scoring(std::int32_t match, std::int32_t mismatch)
+    {
+        values.match = match;
+        values.mismatch = mismatch;
+        return *this;
+    }
+    Options& gaps(std::int32_t open1, std::int32_t extend1, std::int32_t open2 = 0, std::int32_t extend2 = 0)
+    {
+        values.gap_open1 = open1;
+        values.gap_extend1 = extend1;
+        values.gap_open2 = open2;
+        values.gap_extend2 = extend2;
+        return *this;
+    }
+    Options& band(std::int32_t b, float f, std::int32_t max = 64)
+    {
+        values.band_b = b;
+        values.band_f = f;
+        values.band_max = max;
+        return *this;
+    }
 };
 
 // A homopolymer model (shasta2's csv), read-only once made.

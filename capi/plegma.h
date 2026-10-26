@@ -4,7 +4,9 @@
  *
  * Threads: every call is re-entrant, and a model is read-only once made, so threads may share one.
  * Errors: nothing aborts the caller. A model that fails to load is NULL, its message in the caller's buffer; a
- * consensus that fails is a result holding the message (plegma_result_error).
+ * consensus that fails, or whose arguments are wrong, is a result holding the message (plegma_result_error).
+ * Compatibility: plegma_options starts with its own size, so a caller built against an older plegma.h keeps working
+ * with a newer library (the fields it does not know take their defaults).
  */
 #ifndef PLEGMA_H
 #define PLEGMA_H
@@ -16,6 +18,13 @@
 extern "C" {
 #endif
 
+#define PLEGMA_VERSION_MAJOR 0
+#define PLEGMA_VERSION_MINOR 2
+#define PLEGMA_VERSION_PATCH 0
+
+/* The library's version, "major.minor.patch" (the header's, PLEGMA_VERSION_*, is what the caller was built with). */
+const char* plegma_version(void);
+
 /* Where a read is fixed in a local assembly: on both anchors (spanning it), or on the left or the right anchor
  * alone (starting there, ending anywhere; or ending there). */
 enum { PLEGMA_ANCHOR_BOTH = 0, PLEGMA_ANCHOR_LEFT = 1, PLEGMA_ANCHOR_RIGHT = 2 };
@@ -24,17 +33,34 @@ enum { PLEGMA_ANCHOR_BOTH = 0, PLEGMA_ANCHOR_LEFT = 1, PLEGMA_ANCHOR_RIGHT = 2 }
  * (both strands' probabilities weigh half each). */
 enum { PLEGMA_STRAND_FORWARD = 0, PLEGMA_STRAND_REVERSE = 1, PLEGMA_STRAND_UNKNOWN = 2 };
 
-/* How plegma_consensus runs, plegma poa's options: rounds of polishing by edit distance, then by likelihood
- * (-P 50,20); each read pinned to the consensus so far as minimap2 pins an alignment, the alignment only between the
- * pins (-S, 1), or aligned to the whole graph (-N, 0); a one-directional assembly stops where fewer than min_cover
- * reads go on (-c 5). Pins pay on long, divergent sequences (a pangenome's alleles); on a local assembly's reads of
- * one place they only cost (shasta2's chr21: 2.4 times the time, the same consensus), so a local assembler turns
- * them off. plegma_options_init sets plegma poa's defaults. */
+/* How plegma_consensus runs: plegma poa's options. Set them with plegma_options_init first (plegma poa's defaults,
+ * and `size`), then change what you need.
+ *
+ * - polish_rounds, likely_rounds: rounds of polishing by edit distance, then by likelihood (-P 50,20; >= 0).
+ * - pinned: each read pinned to the consensus so far as minimap2 pins an alignment, the alignment only between the
+ *   pins (-S, 1), or aligned to the whole graph (-N, 0). Pins pay on long, divergent sequences (a pangenome's
+ *   alleles); on a local assembly's reads of one place they only cost (shasta2's chr21: 2.4 times the time, the same
+ *   consensus), so a local assembler turns them off.
+ * - min_cover: a one-directional assembly (no read spanning) stops where fewer reads go on (-c 5; >= 1).
+ * - match, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2: abPOA's scoring (-M 2 -X 4 -O 4,24 -E 2,1); a
+ *   g-long gap costs min(gap_open1 + g gap_extend1, gap_open2 + g gap_extend2), gap_open2 0: affine.
+ * - band_b, band_f, band_max: the adaptive band, band_b + band_f L letters either side for a read of L (-b 10
+ *   -f 0.01), at most band_max (-B 64; negative: no cap); band_b negative: no band. */
 typedef struct plegma_options {
+    uint32_t size; /* sizeof(plegma_options), set by plegma_options_init */
     int32_t polish_rounds;
     int32_t likely_rounds;
     int32_t pinned;
     int32_t min_cover;
+    int32_t match;
+    int32_t mismatch;
+    int32_t gap_open1;
+    int32_t gap_extend1;
+    int32_t gap_open2;
+    int32_t gap_extend2;
+    int32_t band_b;
+    float band_f;
+    int32_t band_max;
 } plegma_options;
 
 void plegma_options_init(plegma_options* options);
@@ -48,11 +74,13 @@ plegma_model* plegma_model_load(const char* path, char* error, size_t error_size
 plegma_model* plegma_model_parse(const char* text, size_t length, char* error, size_t error_size);
 void plegma_model_free(plegma_model* model);
 
-/* The consensus of `count` reads: read i is sequences[i] (A, C, G, T; lower case taken as upper), lengths[i] long,
- * fixed as anchors[i] says (NULL: all PLEGMA_ANCHOR_BOTH), on strand strands[i] (NULL: all unknown). With a model
- * every homopolymer run takes its most likely length (plegma poa -H). options NULL: plegma poa's defaults. Never
- * NULL; free it with plegma_result_free. One part, polished; two (the left and the right side, unpolished) when no
- * read spans both anchors and the two sides could not be joined. */
+/* The consensus of `count` reads: read i is sequences[i], lengths[i] letters long (A, C, G, T, lower case taken as
+ * upper; any other byte is read as N, which matches nothing), fixed as anchors[i] says (NULL: all
+ * PLEGMA_ANCHOR_BOTH), on strand strands[i] (NULL: all unknown). With a model every homopolymer run takes its most
+ * likely length (plegma poa -H). options NULL: plegma poa's defaults. Never NULL; free it with plegma_result_free.
+ * One part, polished; two (the left and the right side, unpolished) when no read spans both anchors and the two
+ * sides could not be joined. A read may be empty (a read between adjacent anchors); reads far from the consensus
+ * (more than 30% edits, an empty one among real ones) shape the graph but are left out of polishing. */
 plegma_result* plegma_consensus(size_t count, const uint8_t* const* sequences, const size_t* lengths,
                                 const int32_t* anchors, const int32_t* strands, const plegma_model* model,
                                 const plegma_options* options);

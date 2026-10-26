@@ -36,6 +36,7 @@ is implementation and may change.
   to the first exactly, or pinned as minimap2 pins it given the reference's
   flanks, its letters in the reference letters' columns), for calling variants
   against that reference.
+- `VERSION`, as `plegma --version` and the C API's `plegma_version` give it.
 - minimap2's pinned alignment (2.31, -x asm5 as dipcall runs it): `pins` ->
   `Pins` (the points its alignment of a sequence to the reference passes
   through), `pins_in_context` (the same with flanks as the seeds' context),
@@ -71,3 +72,4 @@ from .pins import Pins, pinned_pairing, pins, pins_in_context
 from .poa import Poa, PoaOptions, poa
 from .polish import polish
 from .reference import on_reference
+from .version import VERSION

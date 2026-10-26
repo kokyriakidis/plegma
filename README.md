@@ -46,13 +46,18 @@ the graph as GFA (`-r`):
   0.758 against 0.667, the hard set 0.476 against 0.385). On the largest chr20 VNTRs it is 17-19 times faster than
   abPOA in a tenth to a hundredth of its memory.
 
-## Library API (C and C++)
+## Using plegma from other tools
 
-`pixi run build-capi` builds `build/libplegma.so`, the consensus of a read set as a call: `capi/plegma.h` (C) and
-`capi/plegma.hpp` (C++, header-only over it). A homopolymer model is loaded once (from a file, or from its text in
-memory) and shared by every thread; each call takes the reads with their anchors and strands and returns what
-`plegma poa -r 0 [-H model]` writes, byte for byte (checked on 2,000 of shasta2's local assemblies). Errors come back
-as messages (C) or `std::runtime_error` (C++), never an abort.
+`pixi run build-capi` builds `build/libplegma.so`: the consensus of a read set as one call, from C, C++, Python or
+Mojo. Each call takes the reads with where they are anchored (`both`, `left`, `right`, a local assembly's reads
+between two anchors) and their strands, and returns what `plegma poa -r 0 [-H model]` writes, byte for byte: one
+sequence, or the left and the right side when no read spans both anchors and the two could not be joined. A
+homopolymer model (shasta2's csv) is loaded once and shared by every thread; every call is re-entrant. Wrong
+arguments and failures come back as messages (C), `std::runtime_error` (C++) or `plegma.Error` (Python), never an
+abort. Letters other than A, C, G, T are read as N; an empty read is allowed (adjacent anchors); reads far from the
+consensus (over 30% edits) shape the graph but are left out of polishing.
+
+C++ (`capi/plegma.hpp`, header-only over the C API in `capi/plegma.h`):
 
 ```cpp
 #include "plegma.hpp"
@@ -62,13 +67,29 @@ std::vector<plegma::Read> reads = {{spanning, plegma::Anchor::Both, plegma::Stra
 std::vector<std::string> parts = plegma::consensus(reads, &model, plegma::Options().pinned(false));
 ```
 
-`plegma_options` (C) or `plegma::Options` (C++) carries `plegma poa`'s options: polishing rounds (`-P`), pinning
-(`-S`; off is `-N`) and `-c`. A local assembler of one place's reads turns pinning off: there the pins only cost
-time (shasta2's chr21: the same consensus in 2.4 times less).
+With CMake, `find_package(plegma CONFIG REQUIRED PATHS <plegma>/capi)` and `target_link_libraries(tool PRIVATE
+plegma::plegma)`; by hand, `-I<plegma>/capi -L<plegma>/build -lplegma -Wl,-rpath,<plegma>/build`. The library finds
+the Mojo runtime it needs (in plegma's pixi environment) by its own run path.
 
-Link with `-Lbuild -lplegma -Wl,-rpath,<plegma>/build`; the library finds the Mojo runtime it needs (in plegma's
-pixi environment) by its own run path. `pixi run test-capi` tests it (threads sharing a model included).
-shasta2's Plegma local assembly method uses it when configured with `-DPLEGMA_DIR=<plegma checkout>`
+Python (`python/plegma.py`, ctypes over the same library, no build step of its own):
+
+```python
+import plegma  # python/ on the path; the library at $PLEGMA_LIBRARY or ../build/libplegma.so
+model = plegma.Model.load("HomopolymerModel-ONT-R10.4.1-sup5.0.0-2026-09-28.csv")
+parts = plegma.consensus(reads, anchors=["both", "left"], strands=[0, 1], model=model, pinned=False)
+```
+
+Mojo: `plegma.consensus(seqs^, anchors, strands, ConsensusOptions(), model)`, the function behind the others.
+
+The options (`plegma_options` in C, set by `plegma_options_init` first; `plegma::Options` in C++; keyword arguments in
+Python) are `plegma poa`'s: polishing rounds (`-P`), pinning (`-S`; off is `-N`), `-c`, the scoring (`-M -X -O -E`)
+and the band (`-b -f -B`). A local assembler of one place's reads turns pinning off: there the pins only cost time
+(shasta2's chr21: the same consensus in 2.4 times less). `plegma_options` starts with its own size, so a tool built
+against an older `plegma.h` keeps working with a newer library. `plegma_version()` (C), `plegma::version()` (C++),
+`plegma.version()` (Python) and `plegma --version` give the version. `pixi run test-capi` and `pixi run test-python`
+test the two (threads sharing a model, wrong arguments, empty and odd reads included).
+
+shasta2's Plegma local assembly method uses the library when configured with `-DPLEGMA_DIR=<plegma checkout>`
 (github.com/kokyriakidis/shasta2, branch la7-dump). On its HG002 chr21 assembly (the Final graph reassembled, lassen
 against HG002 v1.1):
 

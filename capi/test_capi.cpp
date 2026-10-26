@@ -270,6 +270,79 @@ int main(int argc, char** argv)
         check(plegma::consensus({{one}})[0] == one, "one read is its own consensus");
     }
 
+    // The version, the options' size and defaults; a caller built against an older, shorter plegma_options.
+    {
+        std::string want = std::to_string(PLEGMA_VERSION_MAJOR) + "." + std::to_string(PLEGMA_VERSION_MINOR) + "." +
+                           std::to_string(PLEGMA_VERSION_PATCH);
+        check(plegma::version() == want, "plegma_version agrees with the header: " + plegma::version());
+        plegma_options o;
+        plegma_options_init(&o);
+        check(o.size == sizeof(plegma_options) and o.match == 2 and o.mismatch == 4 and o.gap_open1 == 4 and
+                  o.gap_extend1 == 2 and o.gap_open2 == 24 and o.gap_extend2 == 1 and o.band_b == 10 and
+                  std::fabs(o.band_f - 0.01f) < 1e-6 and o.band_max == 64,
+              "plegma_options_init sets the size, scoring and band");
+        Case c = makeCase(rng, 1500);
+        std::vector<std::string> full = plegma::consensus(c.reads(), nullptr, plegma::Options().pinned(false));
+        plegma::Options older = plegma::Options().pinned(false);
+        older.values.size = 20;  // through min_cover: the fields after it take their defaults
+        older.values.match = 99;
+        check(plegma::consensus(c.reads(), nullptr, older) == full, "fields past an older size take their defaults");
+    }
+
+    // Wrong arguments fail with a message, never a crash.
+    {
+        auto fails = [](plegma_result* result) {
+            bool failed = plegma_result_error(result) != nullptr and plegma_result_parts(result) == 0;
+            plegma_result_free(result);
+            return failed;
+        };
+        std::string read = "ACGTACGTAC";
+        const std::uint8_t* letters[] = {reinterpret_cast<const std::uint8_t*>(read.data())};
+        std::size_t lengths[] = {read.size()};
+        std::int32_t badAnchor[] = {7};
+        std::int32_t badStrand[] = {9};
+        check(fails(plegma_consensus(1, nullptr, lengths, nullptr, nullptr, nullptr, nullptr)), "no sequences fails");
+        check(fails(plegma_consensus(1, letters, nullptr, nullptr, nullptr, nullptr, nullptr)), "no lengths fails");
+        check(fails(plegma_consensus(1, letters, lengths, badAnchor, nullptr, nullptr, nullptr)), "a bad anchor fails");
+        check(fails(plegma_consensus(1, letters, lengths, nullptr, badStrand, nullptr, nullptr)), "a bad strand fails");
+        plegma_options o;
+        plegma_options_init(&o);
+        o.polish_rounds = -1;
+        check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)), "negative rounds fail");
+        plegma_options_init(&o);
+        o.size = 0;
+        check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)),
+              "options not set by plegma_options_init fail");
+        const std::uint8_t* none[] = {nullptr};
+        std::size_t zero[] = {0};
+        plegma_result* empty = plegma_consensus(1, none, zero, nullptr, nullptr, nullptr, nullptr);
+        check(plegma_result_error(empty) == nullptr and plegma_result_parts(empty) == 1,
+              "an empty read may have no letters pointer");
+        plegma_result_free(empty);
+        check(plegma_result_parts(nullptr) == 0 and plegma_result_error(nullptr) == nullptr,
+              "a null result has no parts");
+    }
+
+    // An empty read among real ones (a read between adjacent anchors) leaves the consensus as the others make it;
+    // bytes other than A, C, G, T are read as N and never reach the consensus.
+    {
+        std::string truth = randomSequence(rng, 300);
+        std::vector<std::string> storage;
+        for (int k = 0; k < 3; k++) storage.push_back(mutated(rng, truth, 0.06));
+        std::vector<plegma::Read> reads;
+        for (const std::string& s : storage) reads.push_back({s});
+        plegma::Options options = plegma::Options().pinned(false);
+        std::string without = plegma::consensus(reads, nullptr, options)[0];
+        reads.push_back({std::string_view()});
+        check(plegma::consensus(reads, nullptr, options)[0] == without, "an empty read leaves the consensus alone");
+        std::vector<std::string> odd = storage;
+        for (std::string& s : odd) s[100] = '-';
+        std::vector<plegma::Read> oddReads;
+        for (const std::string& s : odd) oddReads.push_back({s});
+        std::string got = plegma::consensus(oddReads, nullptr, options)[0];
+        check(got.find_first_not_of("ACGTN") == std::string::npos, "other bytes never reach the consensus");
+    }
+
     std::cout << (failures ? "FAILED " : "all passed ") << failures << std::endl;
     return failures ? 1 : 0;
 }

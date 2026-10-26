@@ -1,8 +1,10 @@
 from std.random import random_ui64, seed
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from karan import distance
 
+from plegma.consensus import ConsensusOptions, consensus
+from plegma.kernel import BOTH
 from plegma.polish import polish
 
 
@@ -114,6 +116,36 @@ def test_likelihood_alone_mends_a_letter_and_a_unit() raises:
     start.extend(List[UInt8](truth[186:]))
     var polished = polish(start, reads, members, 0, likely_rounds=20)
     assert_equal(distance(_text(polished), _text(truth)), 0)
+
+
+def test_an_empty_read_leaves_the_consensus_alone() raises:
+    """An empty read between the anchors among real ones: polishing leaves it out (all its alignment is edits), so
+    the consensus is the one the others make; its deletions once set the likelihood model's rates (334 letters, not
+    303)."""
+    seed(23)
+    var truth = _random(300)
+    var reads = List[List[UInt8]]()
+    for _ in range(3):
+        reads.append(_mutated(truth, 0.06))
+    var options = ConsensusOptions()
+    options.poa.seeded = False
+    var without = consensus(reads.copy(), options=options)
+    reads.append(List[UInt8]())
+    var with_empty = consensus(reads.copy(), options=options)
+    assert_equal(_text(with_empty[0]), _text(without[0]))
+
+
+def test_consensus_checks_its_arguments() raises:
+    var reads = List[List[UInt8]]()
+    reads.append(_random(50))
+    reads.append(_random(50))
+    with assert_raises(contains="anchors for"):
+        _ = consensus(reads.copy(), [BOTH])
+    with assert_raises(contains="anchor 7"):
+        _ = consensus(reads.copy(), [BOTH, 7])
+    with assert_raises(contains="strand 9"):
+        _ = consensus(reads.copy(), strands=[0, 9])
+    assert_equal(len(consensus(List[List[UInt8]]())), 1)
 
 
 def main() raises:

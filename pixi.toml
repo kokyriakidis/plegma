@@ -4,7 +4,7 @@ channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
 description = "Fast partial order alignment (POA) of DNA in Mojo: multiple sequence alignment and consensus"
 name = "plegma"
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 license-file = "LICENSE"
 
@@ -39,6 +39,7 @@ build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan
 build-capi = { cmd = "mojo build --emit shared-lib -D ASSERT=none -I . -I deps/sporos -I deps/karan capi/plegma_capi.mojo -o build/libplegma.so", depends-on = ["prepare"] }
 build-test-capi = { cmd = "c++ -std=c++17 -O2 -Icapi capi/test_capi.cpp -Lbuild -lplegma -Wl,-rpath,$PIXI_PROJECT_ROOT/build -Wl,-rpath,$CONDA_PREFIX/lib -pthread -o build/test_capi", depends-on = ["build-capi"] }
 test-capi = { cmd = "./build/test_capi", depends-on = ["build-test-capi"] }
+test-python = { cmd = "python3 python/test_plegma.py", depends-on = ["build-capi"] }
 # Random inputs through every option combination, every output checked: `pixi run fuzz [cases] [seed]`.
 fuzz = { cmd = "python3 -I experiments/validate/fuzz.py build/plegma build/fuzz", depends-on = ["build-cli"] }
 # The co-optimal letter pairs experiments/chr20/qc_loop.py --coopt scores against.
