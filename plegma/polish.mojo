@@ -745,8 +745,8 @@ def _run_lengths(
 ):
     """The length each member reports for the consensus's run `s ..< e` of `base` (code), its strand, and which
     member it is (`which`, its index in `members`): the read's letters aligned to the run and inserted at its two
-    ends, with the letters like it next to them; a read with another letter inside the run, or not reaching a letter
-    past both its ends, has none."""
+    ends; a read with another letter inside the run, not reaching a letter past both its ends, or with no letter
+    other than the run's aligned to a flank, has none."""
     var length = paths.stride - 1
     # A read votes when its alignment spans the run and a letter either side of it (where there is one).
     var need_start = s - 1 if s > 0 else 0
@@ -771,11 +771,20 @@ def _run_lengths(
             pure = pure and _code(seq[j]) == base
         if not pure:
             continue
-        if a < b:
-            while a > 0 and _code(seq[a - 1]) == base:
-                a -= 1
-            while b < len(seq) and _code(seq[b]) == base:
-                b += 1
+        # A letter other than the run's aligned to each flank. Before, a read's like letters next to the run counted
+        # however far they went: a read without the letter between two runs of one letter (the other haplotype's, in
+        # a cluster holding both) reported its whole stretch for each run and the model lengthened both
+        # (chr18:46,302,804: T4 and T11 either side of a C, each to the other haplotype's T16, 86 letters from
+        # reads of 69). shasta2's chr21 assembly 6,750 -> 6,752 errors; only the reads crossing into the next run
+        # left out instead, 6,809.
+        if s > 0:
+            var at = Int(paths.leave[kb + s - 1])
+            if at >= Int(paths.enter[kb + s]) or _code(seq[at]) == base:
+                continue
+        if e < length:
+            var at = Int(paths.leave[kb + e])
+            if at >= Int(paths.enter[kb + e + 1]) or _code(seq[at]) == base:
+                continue
         lengths.append(b - a)
         which.append(k)
         var r = members[k]
@@ -845,9 +854,10 @@ def _runs(
     mut realigned: _Realigned,
 ) raises -> List[UInt8]:
     """Every run of two letters or more in `consensus` at its most likely length under `model`, given the length of
-    the run each member reports: the read's letters aligned to the run and inserted at its two ends, with the letters
-    like it next to them; a read with another letter inside the run, or not reaching past both its ends (anchored at
-    one end), does not vote (as shasta2's msa1 repair votes: the reads with the run's symbol in its column)."""
+    the run each member reports: the read's letters aligned to the run and inserted at its two ends; a read with
+    another letter inside the run, not reaching past both its ends (anchored at one end), or without a letter other
+    than the run's aligned to each flank, does not vote (as shasta2's msa1 repair votes: the reads with the run's
+    symbol in its column)."""
     var length = len(consensus)
     var paths = _Paths()
     paths.fill(realigned, consensus, sequences, members, anchors)

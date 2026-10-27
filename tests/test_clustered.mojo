@@ -5,7 +5,7 @@ from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 from karan import distance
 
 from plegma.clustered import clustered_consensus, phased_consensus
-from plegma.consensus import ConsensusOptions
+from plegma.consensus import ConsensusOptions, consensus
 from plegma.homopolymer import HomopolymerModel
 from plegma.kernel import BOTH, INSIDE, LEFT, RIGHT
 
@@ -290,6 +290,64 @@ def test_runs_longer_than_the_model_keep_their_length() raises:
     assert_equal(len(clustered.consensus), 2)
     var got = clustered.consensus.copy()
     assert_true((got[0] == one and got[1] == two) or (got[0] == two and got[1] == one))
+
+
+def _short_reads_model() raises -> HomopolymerModel:
+    """Every base, strand and true length n 2 to 40 read m long, a run read short likelier than long (as HiFi reads
+    one): n with 0.8, one short 0.1, one long 0.05, more short 0.01, more long 1e-6."""
+    var text = String("base,strand,left,right,n,m,count,probability,logProbabilityDb\n")
+    for base in [String("A"), String("C"), String("G"), String("T")]:
+        for strand in range(2):
+            for n in range(2, 41):
+                for m in range(46):
+                    var d = m - n
+                    var p = 0.8 if d == 0 else (0.1 if d == -1 else (0.05 if d == 1 else (0.01 if d < 0 else 1e-6)))
+                    text.write(base, ",", strand, ",*,*,", n, ",", m, ",", 100, ",", p, ",", 10.0 * log10(p), "\n")
+    comptime path = "build/test_clustered_short_model.csv"
+    with open(path, "w") as f:
+        f.write(text)
+    return HomopolymerModel.load(path)
+
+
+def test_run_repair_of_two_haplotypes_lengthens_no_run_twice() raises:
+    """HG002 chr18:46,302,804, both haplotypes' reads in one consensus: one has T4 C T11 where the other has T16.
+    The other's reads, without that C, reported their T16 for both runs and the model made both 16, a consensus of
+    86 letters from reads of 69; a read with no letter aligned to a run's flank now does not vote there."""
+    var t16 = List[UInt8]("GTTCCACATTTCTCTGTGGCTCTCTTCATTTTCTTTTCTTTTCTTTTTTTTTTTTTTTTATGAGATGGA".as_bytes())
+    var t4c = List[UInt8]("GTTCCACATTTCTCTGTGGCTCTCTTCATTTTCTTTTCTTTTCTTTTCTTTTTTTTTTTATGAGATGGA".as_bytes())
+    var reads = List[List[UInt8]]()
+    var strands = List[Int]()
+    for k in range(55):
+        reads.append(t4c.copy() if k % 2 == 0 else t16.copy())
+        strands.append(k % 3 % 2)
+    var options = ConsensusOptions()
+    options.poa.seeded = False
+    var parts = consensus(reads^, List[Int](length=55, fill=BOTH), strands, options, _short_reads_model())
+    assert_equal(len(parts), 1)
+    assert_true(parts[0] == t16 or parts[0] == t4c, _text(parts[0]))
+
+
+def test_one_repeat_unit_splits_a_haplotype_only_with_enough_reads() raises:
+    """Clusters apart only by one TG of a (TG)10 / (TG)11 repeat: one cluster with the smaller under 30% of the
+    reads (HiFi reads' slips there), two at half."""
+    var left = List[UInt8]("ACCTGAGCAATCGGATCCAGTTACGGA".as_bytes())
+    var right = List[UInt8]("CCATTGAGCGTACAGGTCAATGCCTAG".as_bytes())
+    var ten = left.copy()
+    var eleven = left.copy()
+    for k in range(11):
+        if k < 10:
+            ten.extend(List[UInt8]("TG".as_bytes()))
+        eleven.extend(List[UInt8]("TG".as_bytes()))
+    ten.extend(right.copy())
+    eleven.extend(right.copy())
+    for minority in [4, 8]:
+        var reads = List[List[UInt8]]()
+        for k in range(16 - minority):
+            reads.append(ten.copy())
+        for k in range(minority):
+            reads.append(eleven.copy())
+        var got = clustered_consensus(reads^, max_clusters=2, min_freq=0.2, options=_unpinned())
+        assert_equal(len(got.consensus), 1 if minority == 4 else 2, String(t"{minority} of 16 reads one TG longer"))
 
 
 def test_arguments_are_checked() raises:
