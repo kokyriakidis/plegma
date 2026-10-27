@@ -41,6 +41,9 @@ comptime LEFT = 1
 """A read fixed at the left anchor only (aligned `PREFIX`)."""
 comptime RIGHT = 2
 """A read fixed at the right anchor only (aligned `SUFFIX`)."""
+comptime INSIDE = 3
+"""A read covering neither anchor, inside the region: it builds no consensus, and is aligned inside one
+(`clustered_consensus`)."""
 
 
 # A cell's traceback byte: where its score came from (the low three bits), and whether each gap state extended

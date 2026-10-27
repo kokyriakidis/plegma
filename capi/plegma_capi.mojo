@@ -10,6 +10,7 @@ one; every call is re-entrant.
 from std.math import isfinite
 from std.memory import Layout, alloc
 
+from plegma.clustered import Clustered, clustered_consensus, phased_consensus
 from plegma.consensus import ConsensusOptions, consensus
 from plegma.homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from plegma.kernel import BOTH
@@ -23,14 +24,22 @@ comptime _VERSION = VERSION + "\x00"
 
 
 struct Result(Movable):
-    """A consensus call's outcome: its sequences (`parts`), or the message of what failed (`error`, NUL-ended)."""
+    """A consensus call's outcome: its sequences (`parts`), or the message of what failed (`error`, NUL-ended); of a
+    clustered call also each part's reads (`members`) and each read's alignment (`cigars`, NUL-ended, and
+    `placements`: cluster, cost and the four span ends, as plegma_placement holds them)."""
 
     var parts: List[List[UInt8]]
     var error: List[UInt8]
+    var members: List[List[Int32]]
+    var cigars: List[List[UInt8]]
+    var placements: List[Int64]
 
     def __init__(out self):
         self.parts = List[List[UInt8]]()
         self.error = List[UInt8]()
+        self.members = List[List[Int32]]()
+        self.cigars = List[List[UInt8]]()
+        self.placements = List[Int64]()
 
 
 def _box[T: Movable](var value: T) -> Pointer[T, MutUntrackedOrigin]:
@@ -93,7 +102,9 @@ comptime _GAP_EXTEND2 = _Field(40)
 comptime _BAND_B = _Field(44)
 comptime _BAND_F = _Field(48)
 comptime _BAND_MAX = _Field(52)
-comptime _OPTIONS_SIZE = 56
+comptime _NOISE_RUN = _Field(56)
+comptime _TWO_LENGTHS_DB = _Field(60)
+comptime _OPTIONS_SIZE = 64
 """sizeof(plegma_options) in this library's plegma.h."""
 
 
@@ -146,6 +157,8 @@ def _settings(at: Bytes) raises -> ConsensusOptions:
     options.poa.band_b = given.int(_BAND_B, options.poa.band_b)
     options.poa.band_f = given.float(_BAND_F, options.poa.band_f)
     options.poa.band_max = given.int(_BAND_MAX, options.poa.band_max)
+    options.noise_run = given.int(_NOISE_RUN, options.noise_run)
+    options.two_lengths_db = given.float(_TWO_LENGTHS_DB, options.two_lengths_db)
     if options.polish_rounds < 0 or options.likely_rounds < 0:
         raise Error(t"polishing rounds {options.polish_rounds},{options.likely_rounds}: each must be 0 or more")
     if options.poa.min_cover < 1:
@@ -187,6 +200,8 @@ def plegma_options_init(settings: Bytes) abi("C"):
     _set_int(settings, _BAND_B, defaults.poa.band_b)
     settings.unsafe_offset(_BAND_F.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.poa.band_f)
     _set_int(settings, _BAND_MAX, defaults.poa.band_max)
+    _set_int(settings, _NOISE_RUN, defaults.noise_run)
+    settings.unsafe_offset(_TWO_LENGTHS_DB.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.two_lengths_db)
 
 
 @export
@@ -234,22 +249,27 @@ def _letter(c: UInt8) -> UInt8:
     return 0x4E
 
 
-def _consensus(
+comptime Sequences = OptionalPointer[OptionalPointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]
+comptime Lengths = OptionalPointer[Int, MutUntrackedOrigin]
+comptime Values = OptionalPointer[Int32, MutUntrackedOrigin]
+comptime Settings = OptionalPointer[UInt8, MutUntrackedOrigin]
+
+
+def _reads(
     count: Int,
-    sequences: OptionalPointer[OptionalPointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
-    lengths: OptionalPointer[Int, MutUntrackedOrigin],
-    anchors: OptionalPointer[Int32, MutUntrackedOrigin],
-    strands: OptionalPointer[Int32, MutUntrackedOrigin],
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
-    settings: OptionalPointer[UInt8, MutUntrackedOrigin],
-) raises -> List[List[UInt8]]:
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    mut seqs: List[List[UInt8]],
+    mut anchor_of: List[Int],
+    mut strand_of: List[Int],
+) raises:
+    """The caller's reads, anchors and strands (unset ones at their defaults); `consensus` checks the values."""
     if count < 0:
         raise Error(t"count {count}: must be 0 or more")
     if count > 0 and (not sequences or not lengths):
         raise Error("sequences and lengths must be given for count > 0")
-    var seqs = List[List[UInt8]](capacity=count)
-    var anchor_of = List[Int](capacity=count)
-    var strand_of = List[Int](capacity=count)
     for r in range(count):
         var n = lengths.value()[unsafe_offset=r]
         var source = sequences.value()[unsafe_offset=r]
@@ -261,10 +281,50 @@ def _consensus(
         seqs.append(seq^)
         anchor_of.append(Int(anchors.value()[unsafe_offset=r]) if anchors else BOTH)
         strand_of.append(Int(strands.value()[unsafe_offset=r]) if strands else STRAND_UNKNOWN)
+
+
+def _consensus(
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+) raises -> List[List[UInt8]]:
+    var seqs = List[List[UInt8]](capacity=count)
+    var anchor_of = List[Int](capacity=count)
+    var strand_of = List[Int](capacity=count)
+    _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
     var options = _settings(settings.value()) if settings else ConsensusOptions()
     if model:
         return consensus(seqs^, anchor_of, strand_of, options, model.value()[])
     return consensus(seqs^, anchor_of, strand_of, options)
+
+
+def _clustered(
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    max_clusters: Int,
+    min_freq: Float64,
+    mut result: Result,
+) raises:
+    var seqs = List[List[UInt8]](capacity=count)
+    var anchor_of = List[Int](capacity=count)
+    var strand_of = List[Int](capacity=count)
+    _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
+    var options = _settings(settings.value()) if settings else ConsensusOptions()
+    var got: Clustered
+    if model:
+        got = clustered_consensus(seqs^, anchor_of, strand_of, max_clusters, min_freq, options, model.value()[])
+    else:
+        got = clustered_consensus(seqs^, anchor_of, strand_of, max_clusters, min_freq, options)
+    _held(got, result)
 
 
 @export
@@ -285,6 +345,129 @@ def plegma_consensus(
         result.error = List[UInt8](String(e).as_bytes())
         result.error.append(0)
     return _box(result^)
+
+
+@export
+def plegma_clustered_consensus(
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    max_clusters: Int32,
+    min_freq: Float32,
+) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
+    var result = Result()
+    try:
+        _clustered(
+            count, sequences, lengths, anchors, strands, model, settings, Int(max_clusters), Float64(min_freq), result
+        )
+    except e:
+        result = Result()
+        result.error = List[UInt8](String(e).as_bytes())
+        result.error.append(0)
+    return _box(result^)
+
+
+def _phased(
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    haplotypes: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    mut result: Result,
+) raises:
+    var seqs = List[List[UInt8]](capacity=count)
+    var anchor_of = List[Int](capacity=count)
+    var strand_of = List[Int](capacity=count)
+    _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
+    if count > 0 and not haplotypes:
+        raise Error("haplotypes must be given for count > 0")
+    var haps = List[Int](capacity=count)
+    for r in range(count):
+        haps.append(Int(haplotypes.value()[unsafe_offset=r]))
+    var options = _settings(settings.value()) if settings else ConsensusOptions()
+    var got: Clustered
+    if model:
+        got = phased_consensus(seqs^, haps, anchor_of, strand_of, options, model.value()[])
+    else:
+        got = phased_consensus(seqs^, haps, anchor_of, strand_of, options)
+    _held(got, result)
+
+
+def _held(got: Clustered, mut result: Result):
+    """A clustered or phased call's outcome into `result`."""
+    result.parts = got.consensus.copy()
+    for m in got.members:
+        var reads = List[Int32](capacity=len(m))
+        for r in m:
+            reads.append(Int32(r))
+        result.members.append(reads^)
+    for p in got.placements:
+        var cigar = List[UInt8](p.cigar.as_bytes())
+        cigar.append(0)
+        result.cigars.append(cigar^)
+        result.placements.append(Int64(p.cluster))
+        result.placements.append(Int64(p.cost))
+        result.placements.append(Int64(p.consensus_start))
+        result.placements.append(Int64(p.consensus_end))
+        result.placements.append(Int64(p.read_start))
+        result.placements.append(Int64(p.read_end))
+
+
+@export
+def plegma_phased_consensus(
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    haplotypes: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
+    var result = Result()
+    try:
+        _phased(count, sequences, lengths, anchors, strands, haplotypes, model, settings, result)
+    except e:
+        result = Result()
+        result.error = List[UInt8](String(e).as_bytes())
+        result.error.append(0)
+    return _box(result^)
+
+
+@export
+def plegma_result_members(
+    result: OptionalPointer[Result, MutUntrackedOrigin],
+    part: Int,
+    reads: OptionalPointer[OptionalPointer[Int32, MutUntrackedOrigin], MutUntrackedOrigin],
+) abi("C") -> Int:
+    if not result or part < 0 or part >= len(result.value()[].members):
+        if reads:
+            reads.value()[] = None
+        return 0
+    ref members = result.value()[].members[part]
+    if reads:
+        reads.value()[] = members.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    return len(members)
+
+
+@export
+def plegma_result_cigar(
+    result: OptionalPointer[Result, MutUntrackedOrigin], index: Int, placement: OptionalPointer[Int64, MutUntrackedOrigin]
+) abi("C") -> OptionalPointer[UInt8, MutUntrackedOrigin]:
+    if not result or index < 0 or index >= len(result.value()[].cigars):
+        return None
+    ref held = result.value()[]
+    if placement:
+        for k in range(6):
+            placement.value()[unsafe_offset=k] = held.placements[6 * index + k]
+    return held.cigars[index].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
 
 @export

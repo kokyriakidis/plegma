@@ -42,6 +42,8 @@ class _Options(ctypes.Structure):
         ("band_b", ctypes.c_int32),
         ("band_f", ctypes.c_float),
         ("band_max", ctypes.c_int32),
+        ("noise_run", ctypes.c_int32),
+        ("two_lengths_db", ctypes.c_float),
     ]
 
 
@@ -146,7 +148,8 @@ def consensus(reads, anchors=None, strands=None, model=None, **options):
     anchors: per read "both", "left" or "right" (or BOTH, LEFT, RIGHT); None: all spanning. strands: per read 0, 1
     or None (unknown), for the homopolymer model; None: all unknown. model: a Model. options: plegma_options' fields
     by name (polish_rounds, likely_rounds, pinned, min_cover, match, mismatch, gap_open1, gap_extend1, gap_open2,
-    gap_extend2, band_b, band_f, band_max; see capi/plegma.h), plegma poa's defaults otherwise.
+    gap_extend2, band_b, band_f, band_max, noise_run, two_lengths_db; see capi/plegma.h), plegma poa's defaults
+    otherwise.
     """
     letters = [r.encode() if isinstance(r, str) else bytes(r) for r in reads]
     count = len(letters)

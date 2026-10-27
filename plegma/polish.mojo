@@ -43,6 +43,8 @@ comptime SLOTS = 9
 comptime OUTLIER = 0.3
 """A sequence more than this share edits (over the longer of the two spans its alignment covers) takes no part in
 polishing."""
+comptime TIE_RUN = 4
+"""Runs of one letter at least this long take the longer length of a tie (`_lengthen_ties`)."""
 comptime MAX_PERIOD = 24
 """Repeat units up to this long are deleted or copied whole (the two bands a unit apart overlap: 2 `BAND` > it)."""
 
@@ -721,10 +723,116 @@ def polish(
         paths.fill(realigned, current, sequences, unique, anchors, weight)
         if paths.total >= previous_total:
             current = previous^
+    if rounds > 0:
+        current = _lengthen_ties(current^, sequences, unique, anchors, weight, realigned, paths)
     var out = _likely(current^, sequences, voters, likely_rounds, support, share, anchors, realigned)
     if homopolymers.loaded():
         out = _runs(out^, sequences, voters, anchors, homopolymers, strands, realigned)
     return out^
+
+
+def _run_lengths(
+    paths: _Paths,
+    sequences: List[List[UInt8]],
+    members: List[Int],
+    strands: List[Int],
+    s: Int,
+    e: Int,
+    base: Int,
+    mut lengths: List[Int],
+    mut on: List[Int],
+    mut which: List[Int],
+):
+    """The length each member reports for the consensus's run `s ..< e` of `base` (code), its strand, and which
+    member it is (`which`, its index in `members`): the read's letters aligned to the run and inserted at its two
+    ends, with the letters like it next to them; a read with another letter inside the run, or not reaching a letter
+    past both its ends, has none."""
+    var length = paths.stride - 1
+    # A read votes when its alignment spans the run and a letter either side of it (where there is one).
+    var need_start = s - 1 if s > 0 else 0
+    var need_end = e + 1 if e < length else length
+    lengths.clear()
+    on.clear()
+    which.clear()
+    for k in range(len(members)):
+        if paths.span_start[k] > need_start or paths.span_end[k] < need_end:
+            continue
+        ref seq = sequences[members[k]]
+        var kb = k * paths.stride
+        var a = Int(paths.enter[kb + s])
+        var b = Int(paths.leave[kb + e])
+        # Letters unlike the run at its ends are the flanks' (inserted there, or the run's ends substituted).
+        while a < b and _code(seq[a]) != base:
+            a += 1
+        while b > a and _code(seq[b - 1]) != base:
+            b -= 1
+        var pure = True
+        for j in range(a, b):
+            pure = pure and _code(seq[j]) == base
+        if not pure:
+            continue
+        if a < b:
+            while a > 0 and _code(seq[a - 1]) == base:
+                a -= 1
+            while b < len(seq) and _code(seq[b]) == base:
+                b += 1
+        lengths.append(b - a)
+        which.append(k)
+        var r = members[k]
+        on.append(strands[r] if r < len(strands) else STRAND_UNKNOWN)
+
+
+def _lengthen_ties(
+    var current: List[UInt8],
+    sequences: List[List[UInt8]],
+    unique: List[Int],
+    anchors: List[Int],
+    weight: List[Int],
+    mut realigned: _Realigned,
+    mut paths: _Paths,
+) raises -> List[UInt8]:
+    """Every run of one letter at least `TIE_RUN` long one letter longer where that leaves the sequences' summed
+    edit distance as it is. Between the two middle lengths the reads report the sum is flat, and the edit rounds
+    keep whichever the POA took; reads lose letters in long runs far more often than they gain them (HiFi as
+    nanopore: on HG002 the truth's run was the longer of a tie in 193 of 203 runs a consensus had one short), so a
+    tie goes to the longer. The reads' lengths screen the runs (a read the run's length or shorter loses a match
+    from one letter more, one longer gains one): only where those balance are the reads aligned again to confirm."""
+    paths.fill(realigned, current, sequences, unique, anchors, weight)
+    var base = paths.total
+    var lengths = List[Int]()
+    var on = List[Int]()
+    var which = List[Int]()
+    var ties = List[Tuple[Int, Int]]()  # the runs to confirm, (start, end)
+    var i = 0
+    while i < len(current):
+        var e = i + 1
+        while e < len(current) and current[e] == current[i]:
+            e += 1
+        var code = _code(current[i])
+        if e - i >= TIE_RUN and code < 4:
+            _run_lengths(paths, sequences, unique, List[Int](), i, e, code, lengths, on, which)
+            var balance = 0
+            for k in range(len(lengths)):
+                var w = weight[which[k]] if len(weight) > 0 else 1
+                balance += w if lengths[k] > e - i else -w
+            if balance == 0 and len(lengths) > 0:
+                ties.append((i, e))
+        i = e
+    var shift = 0
+    for t in ties:
+        var start = t[0] + shift
+        var end = t[1] + shift
+        var longer = List[UInt8](capacity=len(current) + 1)
+        for k in range(end):
+            longer.append(current[k])
+        longer.append(current[start])
+        for k in range(end, len(current)):
+            longer.append(current[k])
+        paths.fill(realigned, longer, sequences, unique, anchors, weight)
+        if paths.total == base:
+            current = longer^
+            shift += 1
+    return current^
 
 
 def _runs(
@@ -746,6 +854,7 @@ def _runs(
     var out = List[UInt8](capacity=length + length // 8)
     var lengths = List[Int]()
     var on = List[Int]()
+    var which = List[Int]()
     var s = 0
     while s < length:
         var e = s + 1
@@ -759,38 +868,11 @@ def _runs(
             continue
         var left = _code(consensus[s - 1]) if s > 0 else FLANK_UNKNOWN
         var right = _code(consensus[e]) if e < length else FLANK_UNKNOWN
-        # A read votes when its alignment spans the run and a letter either side of it (where there is one).
-        var need_start = s - 1 if s > 0 else 0
-        var need_end = e + 1 if e < length else length
-        lengths.clear()
-        on.clear()
-        for k in range(len(members)):
-            if paths.span_start[k] > need_start or paths.span_end[k] < need_end:
-                continue
-            ref seq = sequences[members[k]]
-            var kb = k * paths.stride
-            var a = Int(paths.enter[kb + s])
-            var b = Int(paths.leave[kb + e])
-            # Letters unlike the run at its ends are the flanks' (inserted there, or the run's ends substituted).
-            while a < b and _code(seq[a]) != base:
-                a += 1
-            while b > a and _code(seq[b - 1]) != base:
-                b -= 1
-            var pure = True
-            for j in range(a, b):
-                pure = pure and _code(seq[j]) == base
-            if not pure:
-                continue
-            if a < b:
-                while a > 0 and _code(seq[a - 1]) == base:
-                    a -= 1
-                while b < len(seq) and _code(seq[b]) == base:
-                    b += 1
-            lengths.append(b - a)
-            var r = members[k]
-            on.append(strands[r] if r < len(strands) else STRAND_UNKNOWN)
+        _run_lengths(paths, sequences, members, strands, s, e, base, lengths, on, which)
         var n = e - s
-        if len(lengths) > 0:
+        # A run the model holds no rows for, at the length most of its reads report, keeps its length: the model
+        # would otherwise take the nearest length it holds (a model learnt where long runs of a letter are rare).
+        if len(lengths) > 0 and model.covers(base, _median(lengths)):
             var best = model.most_likely(base, left, right, lengths, on)
             if best >= 2:
                 n = best
@@ -798,6 +880,13 @@ def _runs(
             out.append(consensus[s])
         s = e
     return out^
+
+
+def _median(values: List[Int]) -> Int:
+    """The lower median of `values` (not empty)."""
+    var sorted_values = values.copy()
+    sort(sorted_values)
+    return sorted_values[(len(sorted_values) - 1) // 2]
 
 
 def _groups(

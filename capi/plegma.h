@@ -19,15 +19,16 @@ extern "C" {
 #endif
 
 #define PLEGMA_VERSION_MAJOR 0
-#define PLEGMA_VERSION_MINOR 2
+#define PLEGMA_VERSION_MINOR 3
 #define PLEGMA_VERSION_PATCH 0
 
 /* The library's version, "major.minor.patch" (the header's, PLEGMA_VERSION_*, is what the caller was built with). */
 const char* plegma_version(void);
 
-/* Where a read is fixed in a local assembly: on both anchors (spanning it), or on the left or the right anchor
- * alone (starting there, ending anywhere; or ending there). */
-enum { PLEGMA_ANCHOR_BOTH = 0, PLEGMA_ANCHOR_LEFT = 1, PLEGMA_ANCHOR_RIGHT = 2 };
+/* Where a read is fixed in a local assembly: on both anchors (spanning it), on the left or the right anchor alone
+ * (starting there, ending anywhere; or ending there), or on neither (inside the region: it makes no consensus, and
+ * plegma_clustered_consensus aligns it inside one). */
+enum { PLEGMA_ANCHOR_BOTH = 0, PLEGMA_ANCHOR_LEFT = 1, PLEGMA_ANCHOR_RIGHT = 2, PLEGMA_ANCHOR_INSIDE = 3 };
 
 /* A read's strand for the homopolymer model: 0 as the consensus runs, 1 reverse-complemented to it, or unknown
  * (both strands' probabilities weigh half each). */
@@ -61,6 +62,10 @@ typedef struct plegma_options {
     int32_t band_b;
     float band_f;
     int32_t band_max;
+    int32_t noise_run; /* plegma_clustered_consensus: clusters apart only by single letters in runs this long are one
+                          (3; 0 never) */
+    float two_lengths_db; /* clustered and phased consensus, with a model: how many dB better two run lengths must
+                             explain the reads than one to keep two (15) */
 } plegma_options;
 
 void plegma_options_init(plegma_options* options);
@@ -85,11 +90,49 @@ plegma_result* plegma_consensus(size_t count, const uint8_t* const* sequences, c
                                 const int32_t* anchors, const int32_t* strands, const plegma_model* model,
                                 const plegma_options* options);
 
+/* Several consensus sequences of one read set (haplotypes: abPOA's -d, as a diploid caller asks for): at most
+ * max_clusters (>= 1) parts, each the consensus of the reads nearest it, made and polished as plegma_consensus makes
+ * one; a cluster stays apart only with at least min_freq (0 to 1) of the reads that make consensus sequences (not
+ * PLEGMA_ANCHOR_INSIDE). The reads are clustered by the MSA columns where they disagree, then moved, k-means like, to
+ * the consensus each aligns to more cheaply until none moves. Each read's alignment to its cluster's consensus
+ * (plegma_result_placement) is at the options' scoring as costs (twice the scores: a mismatch 2 (mismatch + match),
+ * a gap letter 2 gap_extend + match over twice the openings), gaps leftmost. Arguments as plegma_consensus's. */
+plegma_result* plegma_clustered_consensus(size_t count, const uint8_t* const* sequences, const size_t* lengths,
+                                          const int32_t* anchors, const int32_t* strands, const plegma_model* model,
+                                          const plegma_options* options, int32_t max_clusters, float min_freq);
+
+/* The two haplotypes' consensus sequences of reads already phased: haplotypes[i] 0 or 1 (-1: neither, placed where
+ * it fits best). Each made as plegma_consensus makes one from its reads; where the two differ only by homopolymer
+ * lengths and a model is given, each such run decided on both haplotypes' reads (their own lengths only when that
+ * explains the reads clearly better than one length for both). Two parts always; members and placements as
+ * plegma_clustered_consensus's. */
+plegma_result* plegma_phased_consensus(size_t count, const uint8_t* const* sequences, const size_t* lengths,
+                                       const int32_t* anchors, const int32_t* strands, const int32_t* haplotypes,
+                                       const plegma_model* model, const plegma_options* options);
+
+/* A read's alignment to its cluster's consensus: the cluster (a part), the alignment's cost, and the spans it
+ * covers, consensus letters consensus_start ..< consensus_end and read letters read_start ..< read_end. */
+typedef struct plegma_placement {
+    int64_t cluster;
+    int64_t cost;
+    int64_t consensus_start;
+    int64_t consensus_end;
+    int64_t read_start;
+    int64_t read_end;
+} plegma_placement;
+
 /* The result's parts (0 on failure); part i's letters (valid until the result is freed) and their count; the
  * failure's message, or NULL. */
 size_t plegma_result_parts(const plegma_result* result);
 const uint8_t* plegma_result_sequence(const plegma_result* result, size_t part, size_t* length);
 const char* plegma_result_error(const plegma_result* result);
+
+/* Of a plegma_clustered_consensus result: part i's reads (input indices, ascending; valid until the result is
+ * freed) and their count; read r's alignment to its cluster's consensus as a CIGAR (=, X, I a letter the read has
+ * and the consensus not, D one the consensus has and the read not; NUL-ended), its placement in *placement when
+ * given. 0 reads and NULL for a plegma_consensus result, or a part or read out of range. */
+size_t plegma_result_members(const plegma_result* result, size_t part, const int32_t** reads);
+const char* plegma_result_cigar(const plegma_result* result, size_t read, plegma_placement* placement);
 void plegma_result_free(plegma_result* result);
 
 #ifdef __cplusplus

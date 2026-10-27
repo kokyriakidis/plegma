@@ -89,6 +89,22 @@ against an older `plegma.h` keeps working with a newer library. `plegma_version(
 `plegma.version()` (Python) and `plegma --version` give the version. `pixi run test-capi` and `pixi run test-python`
 test the two (threads sharing a model, wrong arguments, empty and odd reads included).
 
+Haplotypes, for a diploid caller (abPOA's `-d`): `plegma_clustered_consensus` (C++ `plegma::clusteredConsensus`)
+gives up to `max_clusters` consensus sequences of one read set, each from the reads nearest it, a cluster under
+`min_freq` of the reads joining another; `plegma_phased_consensus` (`plegma::phasedConsensus`) gives the two of reads
+already phased. Either returns each cluster's reads and each read's CIGAR to its cluster's consensus; a read on
+neither anchor (`PLEGMA_ANCHOR_INSIDE`) builds nothing and is aligned within one. Clusters apart only by homopolymer
+lengths are one unless, with a model, two lengths explain the reads `two_lengths_db` better than one (15 dB;
+without a model, unless one differs by more than one letter): reads' length errors in runs split one haplotype's
+reads far more often than a true difference does. pgphase (github.com/kokyriakidis/pgphase, branch `plegma-msa`,
+`PGPHASE_MSA=plegma`) uses them in place of abPOA; on HG002 HiFi chr12, chr18 and chr20 against the v1.1 truth (its
+noisy regions' het calls; a HiFi homopolymer model learnt on chr20, `two_lengths_db` 5):
+
+| MSA | true het | false het | wrong het | missed het | phased correct | discordant | unphased |
+|---|---|---|---|---|---|---|---|
+| abPOA | 27,636 | 1,321 | 2,324 | 1,140 | 1,036,153 | 5,155 | 997 |
+| plegma | 28,237 | 205 | 1,953 | 1,154 | 1,036,565 | 4,495 | 1,245 |
+
 shasta2's Plegma local assembly method uses the library when configured with `-DPLEGMA_DIR=<plegma checkout>`
 (github.com/kokyriakidis/shasta2, branch la7-dump). On its HG002 chr21 assembly (the Final graph reassembled, lassen
 against HG002 v1.1):

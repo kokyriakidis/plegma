@@ -18,9 +18,14 @@
 
 namespace plegma {
 
-static_assert(sizeof(plegma_options) == 56, "plegma_options laid out as the library reads it");
+static_assert(sizeof(plegma_options) == 64, "plegma_options laid out as the library reads it");
 
-enum class Anchor : std::int32_t { Both = PLEGMA_ANCHOR_BOTH, Left = PLEGMA_ANCHOR_LEFT, Right = PLEGMA_ANCHOR_RIGHT };
+enum class Anchor : std::int32_t {
+    Both = PLEGMA_ANCHOR_BOTH,
+    Left = PLEGMA_ANCHOR_LEFT,
+    Right = PLEGMA_ANCHOR_RIGHT,
+    Inside = PLEGMA_ANCHOR_INSIDE
+};
 enum class Strand : std::int32_t {
     Forward = PLEGMA_STRAND_FORWARD,
     Reverse = PLEGMA_STRAND_REVERSE,
@@ -62,6 +67,8 @@ struct Options {
         values.gap_extend2 = extend2;
         return *this;
     }
+    Options& noiseRun(std::int32_t run) { values.noise_run = run; return *this; }
+    Options& twoLengthsDb(float db) { values.two_lengths_db = db; return *this; }
     Options& band(std::int32_t b, float f, std::int32_t max = 64)
     {
         values.band_b = b;
@@ -137,6 +144,99 @@ inline std::vector<std::string> consensus(const std::vector<Read>& reads, const 
         parts.emplace_back(reinterpret_cast<const char*>(letters), length);
     }
     return parts;
+}
+
+// A read's alignment to its cluster's consensus (plegma_placement): the cluster, the CIGAR (=, X, I, D), its cost and
+// the spans it covers, [consensusStart, consensusEnd) and [readStart, readEnd).
+struct Placement {
+    int cluster = -1;
+    std::string cigar;
+    std::int64_t cost = 0;
+    std::size_t consensusStart = 0, consensusEnd = 0, readStart = 0, readEnd = 0;
+};
+
+// plegma_clustered_consensus's outcome: per cluster its consensus and its reads (input indices); per read its
+// placement.
+struct Clustering {
+    std::vector<std::string> consensus;
+    std::vector<std::vector<int>> members;
+    std::vector<Placement> placements;
+};
+
+namespace detail {
+inline Clustering clustering(plegma_result* raw, std::size_t count)
+{
+    std::unique_ptr<plegma_result, void (*)(plegma_result*)> result(raw, plegma_result_free);
+    if (const char* error = plegma_result_error(result.get())) {
+        throw std::runtime_error(std::string("plegma: ") + error);
+    }
+    Clustering out;
+    for (std::size_t part = 0; part < plegma_result_parts(result.get()); part++) {
+        std::size_t length = 0;
+        const std::uint8_t* letters = plegma_result_sequence(result.get(), part, &length);
+        out.consensus.emplace_back(reinterpret_cast<const char*>(letters), length);
+        const std::int32_t* ids = nullptr;
+        std::size_t n = plegma_result_members(result.get(), part, &ids);
+        out.members.emplace_back(ids, ids + n);
+    }
+    for (std::size_t r = 0; r < count; r++) {
+        plegma_placement held{};
+        const char* cigar = plegma_result_cigar(result.get(), r, &held);
+        Placement placement;
+        placement.cluster = static_cast<int>(held.cluster);
+        placement.cigar = cigar ? cigar : "";
+        placement.cost = held.cost;
+        placement.consensusStart = static_cast<std::size_t>(held.consensus_start);
+        placement.consensusEnd = static_cast<std::size_t>(held.consensus_end);
+        placement.readStart = static_cast<std::size_t>(held.read_start);
+        placement.readEnd = static_cast<std::size_t>(held.read_end);
+        out.placements.push_back(std::move(placement));
+    }
+    return out;
+}
+}  // namespace detail
+
+// At most maxClusters consensus sequences of the reads (haplotypes, abPOA's -d), each from the reads nearest it, a
+// cluster kept apart only with at least minFreq of the reads (see plegma_clustered_consensus).
+inline Clustering clusteredConsensus(const std::vector<Read>& reads, const Model* model = nullptr,
+                                     const Options& options = Options(), int maxClusters = 2, float minFreq = 0.25f)
+{
+    std::vector<const std::uint8_t*> sequences;
+    std::vector<std::size_t> lengths;
+    std::vector<std::int32_t> anchors;
+    std::vector<std::int32_t> strands;
+    for (const Read& read : reads) {
+        sequences.push_back(reinterpret_cast<const std::uint8_t*>(read.sequence.data()));
+        lengths.push_back(read.sequence.size());
+        anchors.push_back(static_cast<std::int32_t>(read.anchor));
+        strands.push_back(static_cast<std::int32_t>(read.strand));
+    }
+    return detail::clustering(
+        plegma_clustered_consensus(reads.size(), sequences.data(), lengths.data(), anchors.data(), strands.data(),
+                                   model ? model->get() : nullptr, &options.values, maxClusters, minFreq),
+        reads.size());
+}
+
+// The two haplotypes' consensus sequences of reads already phased (haplotypes[i] 0, 1 or -1; see
+// plegma_phased_consensus).
+inline Clustering phasedConsensus(const std::vector<Read>& reads, const std::vector<int>& haplotypes,
+                                  const Model* model = nullptr, const Options& options = Options())
+{
+    if (haplotypes.size() != reads.size()) throw std::runtime_error("plegma: one haplotype per read");
+    std::vector<const std::uint8_t*> sequences;
+    std::vector<std::size_t> lengths;
+    std::vector<std::int32_t> anchors, strands, haps;
+    for (std::size_t r = 0; r < reads.size(); r++) {
+        sequences.push_back(reinterpret_cast<const std::uint8_t*>(reads[r].sequence.data()));
+        lengths.push_back(reads[r].sequence.size());
+        anchors.push_back(static_cast<std::int32_t>(reads[r].anchor));
+        strands.push_back(static_cast<std::int32_t>(reads[r].strand));
+        haps.push_back(static_cast<std::int32_t>(haplotypes[r]));
+    }
+    return detail::clustering(
+        plegma_phased_consensus(reads.size(), sequences.data(), lengths.data(), anchors.data(), strands.data(),
+                                haps.data(), model ? model->get() : nullptr, &options.values),
+        reads.size());
 }
 
 }  // namespace plegma

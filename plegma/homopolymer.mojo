@@ -331,6 +331,32 @@ struct HomopolymerModel(Copyable, Movable):
         row = self._row(base, strand, FLANK_UNKNOWN, FLANK_UNKNOWN, n)
         return row * self.m_count if self.present[row] else -1
 
+    def covers(self, base: Int, n: Int) -> Bool:
+        """Whether runs of `base` n long are in the model (both strands' `*` rows)."""
+        if base < 0 or base > 3 or n < 0 or n >= self.n_count:
+            return False
+        return (
+            self.present[self._row(base, 0, FLANK_UNKNOWN, FLANK_UNKNOWN, n)]
+            and self.present[self._row(base, 1, FLANK_UNKNOWN, FLANK_UNKNOWN, n)]
+        )
+
+    def log_probability(self, base: Int, left: Int, right: Int, n: Int, m: Int, strand: Int) -> Float64:
+        """10 log10 P(m | n): a read on `strand` (0, 1 or `STRAND_UNKNOWN`, the two strands' probabilities
+        half each) reporting a run of `base` between `left` and `right` m long where it is n long (the flanks' row,
+        else the `*` row); -Float64.MAX when n is not in the model."""
+        if n < 0 or n >= self.n_count:
+            return -Float64.MAX
+        var at0 = self._offset(base, 0, left, right, n)
+        var at1 = self._offset(base, 1, left, right, n)
+        if at0 < 0 or at1 < 0:
+            return -Float64.MAX
+        var k = min(max(m, 0), self.m_count - 1)
+        if strand == 0:
+            return self.table[at0 + k]
+        if strand == 1:
+            return self.table[at1 + k]
+        return 10.0 * log10(0.5 * (10.0 ** (self.table[at0 + k] / 10.0) + 10.0 ** (self.table[at1 + k] / 10.0)))
+
     def most_likely(self, base: Int, left: Int, right: Int, lengths: List[Int], strands: List[Int]) -> Int:
         """The run length n most likely given the reads' lengths `lengths` (each on `strands`' strand: 0, 1 or
         `STRAND_UNKNOWN`), `base` between `left` and `right` (0..3, or `FLANK_UNKNOWN`): the n that maximizes

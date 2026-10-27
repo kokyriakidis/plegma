@@ -279,7 +279,7 @@ int main(int argc, char** argv)
         plegma_options_init(&o);
         check(o.size == sizeof(plegma_options) and o.match == 2 and o.mismatch == 4 and o.gap_open1 == 4 and
                   o.gap_extend1 == 2 and o.gap_open2 == 24 and o.gap_extend2 == 1 and o.band_b == 10 and
-                  std::fabs(o.band_f - 0.01f) < 1e-6 and o.band_max == 64,
+                  std::fabs(o.band_f - 0.01f) < 1e-6 and o.band_max == 64 and o.noise_run == 3,
               "plegma_options_init sets the size, scoring and band");
         Case c = makeCase(rng, 1500);
         std::vector<std::string> full = plegma::consensus(c.reads(), nullptr, plegma::Options().pinned(false));
@@ -341,6 +341,62 @@ int main(int argc, char** argv)
         for (const std::string& s : odd) oddReads.push_back({s});
         std::string got = plegma::consensus(oddReads, nullptr, options)[0];
         check(got.find_first_not_of("ACGTN") == std::string::npos, "other bytes never reach the consensus");
+    }
+
+    // Two haplotypes: two clusters, each its haplotype's consensus, every read in its own and its CIGAR spanning it;
+    // one haplotype: one cluster.
+    {
+        std::string one = randomSequence(rng, 700);
+        std::string two = one;
+        for (std::size_t i = 35; i < two.size(); i += 70) two[i] = two[i] == 'A' ? 'C' : 'A';
+        two.erase(300, 4);
+        std::vector<std::string> storage;
+        for (int k = 0; k < 16; k++) storage.push_back(mutated(rng, k % 2 ? two : one, 0.04));
+        storage.push_back(one.substr(200, 250));  // inside the region: no anchor
+        std::vector<plegma::Read> reads;
+        for (std::size_t k = 0; k < storage.size(); k++) {
+            reads.push_back({storage[k], k + 1 == storage.size() ? plegma::Anchor::Inside : plegma::Anchor::Both});
+        }
+        plegma::Clustering got =
+            plegma::clusteredConsensus(reads, nullptr, plegma::Options().pinned(false), 2, 0.2f);
+        bool split = got.consensus.size() == 2;
+        check(split, "two haplotypes, two clusters");
+        if (split) {
+            bool truths = true, placed = true;
+            for (int c = 0; c < 2; c++) {
+                std::size_t a = distance(got.consensus[c], one), b = distance(got.consensus[c], two);
+                truths = truths and std::min(a, b) <= 1;
+            }
+            for (std::size_t r = 0; r + 1 < reads.size(); r++) {
+                const plegma::Placement& p = got.placements[r];
+                const std::string& truth = r % 2 ? two : one;
+                placed = placed and distance(got.consensus[p.cluster], truth) <
+                                        distance(got.consensus[1 - p.cluster], truth);
+                placed = placed and p.readStart == 0 and p.readEnd == storage[r].size() and not p.cigar.empty();
+            }
+            const plegma::Placement& inside = got.placements.back();
+            check(truths, "each cluster's consensus is its haplotype");
+            check(placed, "every read in its haplotype's cluster, aligned whole");
+            check(inside.cost == 0 and inside.consensusEnd - inside.consensusStart == 250,
+                  "a read inside aligned within its haplotype's consensus");
+            check(got.members[0].size() + got.members[1].size() == reads.size(), "members cover every read");
+        }
+        std::vector<plegma::Read> same;
+        for (int k = 0; k < 16; k += 2) same.push_back({storage[k]});
+        check(plegma::clusteredConsensus(same, nullptr, plegma::Options().pinned(false), 2, 0.2f).consensus.size() == 1,
+              "one haplotype, one cluster");
+        bool threw = false;
+        try {
+            plegma::clusteredConsensus(same, nullptr, plegma::Options(), 0, 0.2f);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        check(threw, "max_clusters 0 fails");
+        plegma_result* plain = plegma_consensus(0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        const std::int32_t* ids = nullptr;
+        check(plegma_result_members(plain, 0, &ids) == 0 and plegma_result_cigar(plain, 0, nullptr) == nullptr,
+              "a plain consensus has no members or placements");
+        plegma_result_free(plain);
     }
 
     std::cout << (failures ? "FAILED " : "all passed ") << failures << std::endl;
