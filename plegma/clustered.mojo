@@ -5,8 +5,9 @@ The clusters start as `cluster_rows` splits the spanning reads by the MSA column
 k-means does, each read goes to the consensus it aligns to more cheaply and each cluster's consensus is made again
 from its reads, until no read moves. Two clusters stay apart only while each holds at least `min_freq` of the reads
 and their consensus sequences differ by more than one letter in a homopolymer run (`_apart_by_runs_alone`: the
-reads' length errors there split one haplotype's reads as readily as two haplotypes'). A read covering neither anchor (`INSIDE`) builds no consensus; it is aligned
-inside the one it fits best.
+reads' length errors there split one haplotype's reads as readily as two haplotypes'), nor only by one unit of a
+short tandem repeat with the smaller under `MIN_UNIT_SPLIT_FREQ` of the reads. A read covering neither anchor
+(`INSIDE`) builds no consensus; it is aligned inside the one it fits best.
 """
 
 from std.math import log10
@@ -24,6 +25,12 @@ from .poa import poa
 
 comptime MAX_REFINEMENTS = 4
 """Rounds of moving reads to their nearest consensus, at most."""
+
+comptime MIN_UNIT_SPLIT_FREQ = 0.3
+"""Two clusters apart by one unit of a tandem repeat of 2 to 6 letters stay apart only while the smaller holds this
+share of the reads: reads' slips in short tandem repeats split one haplotype's reads by a unit. On HG002 HiFi chr12,
+18 and 20 (pgphase's regions no phase set held), such splits with the smaller under 30% of the reads were 1 true het
+to 25 false; at 30% or more, 67 to 11."""
 
 
 @fieldwise_init
@@ -165,6 +172,33 @@ def _apart_by_runs_alone(
             j += count
         count = 0
     return True
+
+
+def _one_unit_apart(a: List[UInt8], b: List[UInt8]) -> Bool:
+    """Whether `a` and `b` differ only by one unit, 2 to 6 letters not all one, of a tandem repeat: the longer one's
+    extra letters, where the two first differ, repeat the unit beside them."""
+    var longer = a.copy() if len(a) > len(b) else b.copy()
+    var shorter = b.copy() if len(a) > len(b) else a.copy()
+    var p = len(longer) - len(shorter)
+    if p < 2 or p > 6:
+        return False
+    var i = 0
+    while i < len(shorter) and longer[i] == shorter[i]:
+        i += 1
+    for k in range(i, len(shorter)):
+        if longer[k + p] != shorter[k]:
+            return False
+    var one_letter = True
+    for k in range(i + 1, i + p):
+        one_letter = one_letter and longer[k] == longer[i]
+    if one_letter:
+        return False
+    var after = i + 2 * p <= len(longer)
+    var before = i >= p
+    for k in range(p):
+        after = after and longer[i + p + k] == longer[i + k]
+        before = before and longer[i - p + k] == longer[i + k]
+    return after or before
 
 
 def _runs_in(a: List[UInt8], b: List[UInt8], runs: List[Int]) -> List[Int]:
@@ -476,6 +510,10 @@ def clustered_consensus(
         for a in range(len(made)):
             for b in range(a + 1, len(made)):
                 if made[a] == made[b]:
+                    distinct = False
+                elif _one_unit_apart(made[a], made[b]) and Float64(
+                    min(len(groups[a]), len(groups[b]))
+                ) < MIN_UNIT_SPLIT_FREQ * Float64(len(builders)):
                     distinct = False
                 elif _apart_by_runs_alone(aligner, made[a], made[b], options.noise_run, runs, single):
                     # With a model: kept apart where it finds two lengths at one of the runs, then every differing run
