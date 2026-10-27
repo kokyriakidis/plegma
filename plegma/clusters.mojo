@@ -3,8 +3,9 @@
 A column is heterozygous when its second most common letter (a gap counting as one) is carried by at least
 `min_freq` of the sequences. Over those columns the sequences are clustered by k-modes (Hamming distance, each
 cluster's mode its commonest letter per column), seeded with the sequence nearest all others and then each time the
-furthest from the seeds so far; a cluster left smaller than `min_freq` of the sequences joins its nearest large
-neighbour.
+one furthest from the seeds so far, its distance weighted by how many sequences share its letters there (a lone
+read's error is never a seed over an allele many carry); a cluster left smaller than `min_freq` of the sequences
+joins its nearest large neighbour.
 """
 
 
@@ -70,8 +71,11 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
         out.append(everyone^)
         return out^
     # k-modes over those columns, which a few reads' errors do not move: the first mode the row nearest every other
-    # (least summed Hamming distance), each next the row furthest from the modes so far; then every row joins its
-    # nearest mode and each mode becomes its rows' commonest letter per column, until no row moves.
+    # (least summed Hamming distance), each next the row furthest from the modes so far times the rows sharing its
+    # letters; then every row joins its nearest mode and each mode becomes its rows' commonest letter per column,
+    # until no row moves. Unweighted, one read's third letter in the only differing column (chr18:25,307,645, 38
+    # reads A, 38 a gap, one G) seeded the second mode, every gap row tied between the two and joined the first, and
+    # the het was lost.
     var letters = List[List[UInt8]](capacity=n)
     for i in range(n):
         var key = List[UInt8](capacity=len(columns))
@@ -80,10 +84,13 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
         letters.append(key^)
     var first_mode = 0
     var least = Int.MAX
+    var sharing = List[Int](length=n, fill=0)
     for i in range(n):
         var total = 0
         for j in range(n):
-            total += _hamming(letters[i], letters[j])
+            var d = _hamming(letters[i], letters[j])
+            total += d
+            sharing[i] += Int(d == 0)
         if total < least:
             least = total
             first_mode = i
@@ -96,8 +103,8 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
             var near = Int.MAX
             for m in modes:
                 near = min(near, _hamming(letters[i], m))
-            if near > far:
-                far = near
+            if near * sharing[i] > far:
+                far = near * sharing[i]
                 furthest = i
         if furthest < 0:
             break

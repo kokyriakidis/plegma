@@ -150,6 +150,27 @@ def test_a_cluster_under_min_freq_joins_the_other() raises:
     assert_true(distance(_text(got.consensus[0]), _text(one)) <= 1)
 
 
+def test_one_read_third_letter_does_not_hide_a_het() raises:
+    # HG002 chr18:25,307,645, an A deleted from CATAGGGG: one MSA column tells the haplotypes apart, and one read
+    # (another A after the G run) has a G there. Seeded at the furthest row alone, that read was the second mode and
+    # the het one cluster.
+    var with_a = List[UInt8]("AAATCGGCATAGGGGAAAGGGCCTG".as_bytes())
+    var without = List[UInt8]("AAATCGGCATGGGGAAAGGGCCTG".as_bytes())
+    var reads = List[List[UInt8]]()
+    reads.append(List[UInt8]("AAATCGGCATAGGGGGAAAGGGCCTG".as_bytes()))
+    reads.append(List[UInt8]("AAATCGGCATGGGGAAAAGGGCCTG".as_bytes()))
+    for _ in range(8):
+        reads.append(with_a.copy())
+    for _ in range(8):
+        reads.append(without.copy())
+    var got = clustered_consensus(reads^, max_clusters=2, min_freq=0.2, options=_unpinned())
+    assert_equal(len(got.consensus), 2)
+    assert_true(
+        (got.consensus[0] == with_a and got.consensus[1] == without)
+        or (got.consensus[0] == without and got.consensus[1] == with_a)
+    )
+
+
 def test_anchored_and_inside_reads() raises:
     """Reads fixed at one anchor build the consensus with the spanning ones; a read inside builds none and is aligned
     within its haplotype's consensus."""
