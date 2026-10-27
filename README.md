@@ -68,8 +68,10 @@ std::vector<std::string> parts = plegma::consensus(reads, &model, plegma::Option
 ```
 
 With CMake, `find_package(plegma CONFIG REQUIRED PATHS <plegma>/capi)` and `target_link_libraries(tool PRIVATE
-plegma::plegma)`; by hand, `-I<plegma>/capi -L<plegma>/build -lplegma -Wl,-rpath,<plegma>/build`. The library finds
-the Mojo runtime it needs (in plegma's pixi environment) by its own run path.
+plegma::plegma)`; by hand, `-I<plegma>/capi -L<plegma>/build -lplegma -Wl,-rpath,<plegma>/build`. `build-capi` copies
+the Mojo runtime libraries the library needs beside it, where it finds them by its own run path (`$ORIGIN`): build/
+alone is what a tool links against and ships, with no pixi environment at run time (glibc 2.35 and libstdc++ of GCC
+12 or newer).
 
 Python (`python/plegma.py`, ctypes over the same library, no build step of its own):
 

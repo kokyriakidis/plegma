@@ -1,6 +1,6 @@
 /* plegma's C API: the consensus of a read set (a local assembly's, between two anchors), as `plegma poa -r 0`
- * writes it, from a C or C++ caller that assembles many. Built as build/libplegma.so (`pixi run build-capi`); link
- * with -lplegma and an rpath to it and to the Mojo runtime libraries beside it (see README).
+ * writes it, from a C or C++ caller that assembles many. Built as build/libplegma.so (`pixi run build-capi`), the
+ * Mojo runtime libraries it needs beside it in build/; link with -lplegma and an rpath to build/ (see README).
  *
  * Threads: every call is re-entrant, and a model is read-only once made, so threads may share one.
  * Errors: nothing aborts the caller. A model that fails to load is NULL, its message in the caller's buffer; a

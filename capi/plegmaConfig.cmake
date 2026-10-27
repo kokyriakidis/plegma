@@ -3,8 +3,8 @@
 #     find_package(plegma CONFIG REQUIRED PATHS /path/to/plegma/capi)
 #     target_link_libraries(mytool PRIVATE plegma::plegma)
 #
-# plegma::plegma puts capi/ (plegma.h, plegma.hpp) on the include path and links build/libplegma.so with run paths
-# to it and to the Mojo runtime libraries in plegma's pixi environment.
+# plegma::plegma puts capi/ (plegma.h, plegma.hpp) on the include path and links build/libplegma.so with a run path
+# to build/, which also holds the Mojo runtime libraries it needs (copied there by build-capi).
 get_filename_component(_plegma_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 set(plegma_VERSION 0.3.0)
 set(_plegma_library "${_plegma_root}/build/libplegma.so")
@@ -16,5 +16,5 @@ if(NOT TARGET plegma::plegma)
     set_target_properties(plegma::plegma PROPERTIES
         IMPORTED_LOCATION "${_plegma_library}"
         INTERFACE_INCLUDE_DIRECTORIES "${_plegma_root}/capi"
-        INTERFACE_LINK_OPTIONS "-Wl,-rpath,${_plegma_root}/build;-Wl,-rpath,${_plegma_root}/.pixi/envs/default/lib")
+        INTERFACE_LINK_OPTIONS "-Wl,-rpath,${_plegma_root}/build")
 endif()
