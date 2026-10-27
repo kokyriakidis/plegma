@@ -104,7 +104,7 @@ without a model, unless one differs by more than one letter): reads' length erro
 reads far more often than a true difference does. pgphase (github.com/kokyriakidis/pgphase, branch `plegma-msa`,
 `PGPHASE_MSA=plegma`) uses them as its default MSA (`--msa abpoa` for abPOA); at pgphase 902c665, on HG002 HiFi chr12, chr18 and chr20 against the v1.1 truth (the het calls
 in plegma's noisy regions, both MSAs scored on the same regions; a HiFi homopolymer model learnt on chr20,
-`two_lengths_db` 5):
+`two_lengths_db` 5 on reads already phased, 8 clustering them all):
 
 | MSA | true het | false het | wrong het | missed het | phased correct | discordant | unphased |
 |---|---|---|---|---|---|---|---|
