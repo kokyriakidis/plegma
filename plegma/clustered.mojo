@@ -279,7 +279,9 @@ def _two_lengths(
     the log likelihood ratio in dB, each read under two from either length with probability a half; the two lengths
     in `shorter` and `longer`, searched from 4 under the shorter of the run's length and `other` (the other
     cluster's) to 4 over the longer. All the reads together, not each cluster's: clusters split by the run's length
-    hold the reads biased apart."""
+    hold the reads biased apart. Where the model does not reach that far (a run longer than its rows), it cannot say:
+    the two lengths the clusters have, apart (`Float64.MAX`) when they differ by more than a letter, as without a
+    model, else one (`-Float64.MAX`)."""
     var e = s
     while e < len(consensus) and consensus[e] == consensus[s]:
         e += 1
@@ -303,6 +305,10 @@ def _two_lengths(
     var n0 = e - s
     var low = max(2, min(n0, other) - 4)
     var high = max(n0, other) + 4
+    if not model.covers(base, high):
+        shorter = min(n0, other)
+        longer = max(n0, other)
+        return Float64.MAX if longer - shorter > 1 else -Float64.MAX
     var one = -Float64.MAX
     for n in range(low, high + 1):
         var total = 0.0
@@ -680,7 +686,6 @@ def phased_consensus(
         var second = List[Int]()
         var lengths0 = List[Int]()
         var lengths1 = List[Int]()
-        var lengths = List[Int]()
         var in_1 = _runs_in(made[0], made[1], runs)
         for k in range(len(runs)):
             var s = runs[k]
@@ -695,9 +700,15 @@ def phased_consensus(
             # From 4 under the shorter of the two haplotypes' lengths to 4 over the longer: they may be far apart.
             var low = max(2, min(e - s, in_1[k]) - 4)
             var high = max(e - s, in_1[k]) + 4
+            if not homopolymers.covers(base, high):
+                # A run longer than the model's rows: it cannot say, so each haplotype keeps its own consensus's
+                # length (searched within the rows alone, both came out at the longest row: T59 as T50).
+                first.append(e - s)
+                second.append(in_1[k])
+                continue
             _read_lengths(aligner, made[0], s, e, seqs, groups[0], anchor_of, lengths0)
             _read_lengths(aligner, made[0], s, e, seqs, groups[1], anchor_of, lengths1)
-            lengths = lengths0.copy()
+            var lengths = lengths0.copy()
             lengths.extend(lengths1.copy())
             var shared_score = 0.0
             var score0 = 0.0

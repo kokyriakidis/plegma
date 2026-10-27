@@ -5,6 +5,8 @@
     model = plegma.Model.load("HomopolymerModel-ONT-R10.4.1-sup5.0.0-2026-09-28.csv")  # optional
     parts = plegma.consensus(["ACGT...", "ACGT..."], anchors=["both", "left"], strands=[0, 1], model=model,
                              pinned=False)
+    two = plegma.clustered_consensus(reads, model=model, max_clusters=2, min_freq=0.25, pinned=False)
+    two.consensus, two.members, two.placements[0].cigar   # haplotypes, their reads, each read's alignment
 
 The library is found at $PLEGMA_LIBRARY, else at ../build/libplegma.so beside this file. Calls are re-entrant and a
 model is read-only once made, so threads may share one. Failures raise plegma.Error.
@@ -13,11 +15,27 @@ model is read-only once made, so threads may share one. Failures raise plegma.Er
 import ctypes
 import os
 
-__all__ = ["Error", "Model", "consensus", "version", "BOTH", "LEFT", "RIGHT", "FORWARD", "REVERSE", "UNKNOWN"]
+__all__ = [
+    "Error",
+    "Model",
+    "Clustered",
+    "Placement",
+    "consensus",
+    "clustered_consensus",
+    "phased_consensus",
+    "version",
+    "BOTH",
+    "LEFT",
+    "RIGHT",
+    "INSIDE",
+    "FORWARD",
+    "REVERSE",
+    "UNKNOWN",
+]
 
-BOTH, LEFT, RIGHT = 0, 1, 2
+BOTH, LEFT, RIGHT, INSIDE = 0, 1, 2, 3
 FORWARD, REVERSE, UNKNOWN = 0, 1, 2
-_ANCHORS = {"both": BOTH, "left": LEFT, "right": RIGHT}
+_ANCHORS = {"both": BOTH, "left": LEFT, "right": RIGHT, "inside": INSIDE}
 
 
 class Error(RuntimeError):
@@ -50,6 +68,19 @@ class _Options(ctypes.Structure):
 _OPTION_NAMES = [name for name, _ in _Options._fields_ if name != "size"]
 
 
+class _Placement(ctypes.Structure):
+    """plegma_placement (capi/plegma.h)."""
+
+    _fields_ = [
+        ("cluster", ctypes.c_int64),
+        ("cost", ctypes.c_int64),
+        ("consensus_start", ctypes.c_int64),
+        ("consensus_end", ctypes.c_int64),
+        ("read_start", ctypes.c_int64),
+        ("read_end", ctypes.c_int64),
+    ]
+
+
 def _library():
     path = os.environ.get("PLEGMA_LIBRARY") or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "build", "libplegma.so"
@@ -76,6 +107,21 @@ def _library():
         p,
         ctypes.POINTER(_Options),
     ]
+    reads_args = [
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    lib.plegma_clustered_consensus.restype = p
+    lib.plegma_clustered_consensus.argtypes = reads_args + [p, ctypes.POINTER(_Options), ctypes.c_int32, ctypes.c_float]
+    lib.plegma_phased_consensus.restype = p
+    lib.plegma_phased_consensus.argtypes = reads_args + [ctypes.POINTER(ctypes.c_int32), p, ctypes.POINTER(_Options)]
+    lib.plegma_result_members.restype = ctypes.c_size_t
+    lib.plegma_result_members.argtypes = [p, ctypes.c_size_t, ctypes.POINTER(ctypes.POINTER(ctypes.c_int32))]
+    lib.plegma_result_cigar.restype = ctypes.c_char_p
+    lib.plegma_result_cigar.argtypes = [p, ctypes.c_size_t, ctypes.POINTER(_Placement)]
     lib.plegma_result_parts.restype = ctypes.c_size_t
     lib.plegma_result_parts.argtypes = [p]
     lib.plegma_result_sequence.restype = ctypes.POINTER(ctypes.c_char)
@@ -136,9 +182,51 @@ class Model:
 def _anchor(value):
     if isinstance(value, str):
         if value.lower() not in _ANCHORS:
-            raise ValueError(f"anchor {value!r}: not 'both', 'left' or 'right'")
+            raise ValueError(f"anchor {value!r}: not 'both', 'left', 'right' or 'inside'")
         return _ANCHORS[value.lower()]
     return int(value)
+
+
+class _Reads:
+    """The arguments every consensus call takes, as the C API takes them (kept alive while the call runs)."""
+
+    def __init__(self, reads, anchors, strands, model, options, caller):
+        letters = [r.encode() if isinstance(r, str) else bytes(r) for r in reads]
+        self.count = len(letters)
+        if anchors is not None and len(anchors) != self.count:
+            raise ValueError(f"{len(anchors)} anchors for {self.count} reads")
+        if strands is not None and len(strands) != self.count:
+            raise ValueError(f"{len(strands)} strands for {self.count} reads")
+        self.settings = _Options()
+        _lib.plegma_options_init(ctypes.byref(self.settings))
+        for name, value in options.items():
+            if name not in _OPTION_NAMES:
+                raise TypeError(f"{caller}() got an unexpected option {name!r}")
+            setattr(self.settings, name, int(value) if name == "pinned" else value)
+        self.sequences = (ctypes.c_char_p * self.count)(*letters)
+        self.lengths = (ctypes.c_size_t * self.count)(*[len(s) for s in letters])
+        self.anchors = None if anchors is None else (ctypes.c_int32 * self.count)(*[_anchor(a) for a in anchors])
+        self.strands = (
+            None
+            if strands is None
+            else (ctypes.c_int32 * self.count)(*[UNKNOWN if s is None else int(s) for s in strands])
+        )
+        self.model = model._handle if model is not None else None
+
+    def head(self):
+        return (self.count, self.sequences, self.lengths, self.anchors, self.strands)
+
+
+def _parts(result):
+    error = _lib.plegma_result_error(result)
+    if error:
+        raise Error(error.decode(errors="replace"))
+    parts = []
+    for part in range(_lib.plegma_result_parts(result)):
+        length = ctypes.c_size_t(0)
+        data = _lib.plegma_result_sequence(result, part, ctypes.byref(length))
+        parts.append(ctypes.string_at(data, length.value).decode() if length.value else "")
+    return parts
 
 
 def consensus(reads, anchors=None, strands=None, model=None, **options):
@@ -151,42 +239,83 @@ def consensus(reads, anchors=None, strands=None, model=None, **options):
     gap_extend2, band_b, band_f, band_max, noise_run, two_lengths_db; see capi/plegma.h), plegma poa's defaults
     otherwise.
     """
-    letters = [r.encode() if isinstance(r, str) else bytes(r) for r in reads]
-    count = len(letters)
-    if anchors is not None and len(anchors) != count:
-        raise ValueError(f"{len(anchors)} anchors for {count} reads")
-    if strands is not None and len(strands) != count:
-        raise ValueError(f"{len(strands)} strands for {count} reads")
-    settings = _Options()
-    _lib.plegma_options_init(ctypes.byref(settings))
-    for name, value in options.items():
-        if name not in _OPTION_NAMES:
-            raise TypeError(f"consensus() got an unexpected option {name!r}")
-        setattr(settings, name, int(value) if name == "pinned" else value)
-    sequences = (ctypes.c_char_p * count)(*letters)
-    lengths = (ctypes.c_size_t * count)(*[len(s) for s in letters])
-    anchor_array = None if anchors is None else (ctypes.c_int32 * count)(*[_anchor(a) for a in anchors])
-    strand_array = (
-        None if strands is None else (ctypes.c_int32 * count)(*[UNKNOWN if s is None else int(s) for s in strands])
-    )
-    result = _lib.plegma_consensus(
-        count,
-        sequences,
-        lengths,
-        anchor_array,
-        strand_array,
-        model._handle if model is not None else None,
-        ctypes.byref(settings),
+    given = _Reads(reads, anchors, strands, model, options, "consensus")
+    result = _lib.plegma_consensus(*given.head(), given.model, ctypes.byref(given.settings))
+    try:
+        return _parts(result)
+    finally:
+        _lib.plegma_result_free(result)
+
+
+class Placement:
+    """A read's alignment to its cluster's consensus: the cluster, the alignment's cost (twice the options' scores,
+    see capi/plegma.h), the consensus letters consensus_start ..< consensus_end and the read letters
+    read_start ..< read_end it covers, and its CIGAR (=, X, I a letter the read has and the consensus not, D one the
+    consensus has and the read not)."""
+
+    __slots__ = ("cluster", "cost", "consensus_start", "consensus_end", "read_start", "read_end", "cigar")
+
+    def __init__(self, raw, cigar):
+        for name in self.__slots__[:-1]:
+            setattr(self, name, getattr(raw, name))
+        self.cigar = cigar
+
+    def __repr__(self):
+        return (
+            f"Placement(cluster={self.cluster}, cost={self.cost}, consensus={self.consensus_start}:"
+            f"{self.consensus_end}, read={self.read_start}:{self.read_end}, cigar={self.cigar!r})"
+        )
+
+
+class Clustered:
+    """Several consensus sequences of one read set: `consensus` (one per cluster), `members` (each cluster's reads,
+    input indices, ascending) and `placements` (one Placement per read, in input order)."""
+
+    __slots__ = ("consensus", "members", "placements")
+
+    def __init__(self, result, count):
+        self.consensus = _parts(result)
+        self.members = []
+        for part in range(len(self.consensus)):
+            ids = ctypes.POINTER(ctypes.c_int32)()
+            n = _lib.plegma_result_members(result, part, ctypes.byref(ids))
+            self.members.append([ids[i] for i in range(n)])
+        self.placements = []
+        for read in range(count):
+            raw = _Placement()
+            cigar = _lib.plegma_result_cigar(result, read, ctypes.byref(raw))
+            self.placements.append(Placement(raw, cigar.decode() if cigar else ""))
+
+    def __repr__(self):
+        return f"Clustered({len(self.consensus)} clusters, {[len(m) for m in self.members]} reads)"
+
+
+def clustered_consensus(reads, anchors=None, strands=None, model=None, max_clusters=2, min_freq=0.25, **options):
+    """Several consensus sequences of `reads` (haplotypes, as a diploid caller asks abPOA's -d for): at most
+    `max_clusters`, each the consensus of the reads nearest it, a cluster with under `min_freq` of the reads joining
+    another. Reads, anchors (also "inside": a read on neither anchor, aligned within a cluster's consensus), strands,
+    model and options as `consensus` takes them. A Clustered."""
+    given = _Reads(reads, anchors, strands, model, options, "clustered_consensus")
+    result = _lib.plegma_clustered_consensus(
+        *given.head(), given.model, ctypes.byref(given.settings), int(max_clusters), float(min_freq)
     )
     try:
-        error = _lib.plegma_result_error(result)
-        if error:
-            raise Error(error.decode(errors="replace"))
-        parts = []
-        for part in range(_lib.plegma_result_parts(result)):
-            length = ctypes.c_size_t(0)
-            data = _lib.plegma_result_sequence(result, part, ctypes.byref(length))
-            parts.append(ctypes.string_at(data, length.value).decode() if length.value else "")
-        return parts
+        return Clustered(result, given.count)
+    finally:
+        _lib.plegma_result_free(result)
+
+
+def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, **options):
+    """The two haplotypes' consensus sequences of reads already phased: `haplotypes` per read 0 or 1 (-1 or None:
+    neither, placed where it fits best). Where the two differ only by homopolymer lengths and a model is given, each
+    such run is decided on both haplotypes' reads (their own lengths only when that explains the reads
+    `two_lengths_db` better). Other arguments as `clustered_consensus`. A Clustered of two clusters."""
+    given = _Reads(reads, anchors, strands, model, options, "phased_consensus")
+    if len(haplotypes) != given.count:
+        raise ValueError(f"{len(haplotypes)} haplotypes for {given.count} reads")
+    haps = (ctypes.c_int32 * given.count)(*[-1 if h is None else int(h) for h in haplotypes])
+    result = _lib.plegma_phased_consensus(*given.head(), haps, given.model, ctypes.byref(given.settings))
+    try:
+        return Clustered(result, given.count)
     finally:
         _lib.plegma_result_free(result)

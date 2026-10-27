@@ -94,5 +94,74 @@ class ConsensusTest(unittest.TestCase):
         self.assertTrue(all(g == alone for g in got))
 
 
+
+def _other(s):
+    """Another allele of `s`: a SNP every 60 letters, a 3-letter deletion at 200."""
+    out = []
+    for i, c in enumerate(s):
+        if 200 <= i < 203:
+            continue
+        out.append("ACGT"[("ACGT".index(c) + 1) % 4] if i % 60 == 30 else c)
+    return "".join(out)
+
+
+def _cigar_spells(cigar, consensus, read, c0, r0):
+    i, j, count = c0, r0, ""
+    for ch in cigar:
+        if ch.isdigit():
+            count += ch
+            continue
+        for _ in range(int(count)):
+            if ch in "=X":
+                if (consensus[i] == read[j]) != (ch == "="):
+                    return False
+                i, j = i + 1, j + 1
+            elif ch == "I":
+                j += 1
+            else:
+                i += 1
+        count = ""
+    return True
+
+
+class ClusteredTest(unittest.TestCase):
+    def setUp(self):
+        rng = random.Random(11)
+        self.one = _random(rng, 700)
+        self.two = _other(self.one)
+        self.reads = [_mutated(rng, self.one if k % 2 == 0 else self.two, 0.04) for k in range(16)]
+
+    def test_two_haplotypes(self):
+        got = plegma.clustered_consensus(self.reads, max_clusters=2, min_freq=0.2, pinned=False)
+        self.assertEqual(len(got.consensus), 2)
+        self.assertEqual(sorted(len(m) for m in got.members), [8, 8])
+        for k, cons in enumerate(got.consensus):
+            self.assertLessEqual(min(_distance(cons, self.one), _distance(cons, self.two)), 1)
+        for r, placed in enumerate(got.placements):
+            self.assertIn(r, got.members[placed.cluster])
+            mine = got.consensus[placed.cluster]
+            self.assertTrue(_cigar_spells(placed.cigar, mine, self.reads[r], placed.consensus_start, placed.read_start))
+
+    def test_phased(self):
+        haplotypes = [k % 2 for k in range(len(self.reads))]
+        got = plegma.phased_consensus(self.reads, haplotypes, pinned=False)
+        self.assertEqual(len(got.consensus), 2)
+        self.assertLessEqual(_distance(got.consensus[0], self.one), 1)
+        self.assertLessEqual(_distance(got.consensus[1], self.two), 1)
+        self.assertEqual(got.members[0], list(range(0, 16, 2)))
+
+    def test_inside_and_errors(self):
+        reads = self.reads + [self.one[200:450]]
+        anchors = ["both"] * len(self.reads) + ["inside"]
+        got = plegma.clustered_consensus(reads, anchors=anchors, max_clusters=2, min_freq=0.2, pinned=False)
+        self.assertEqual(got.placements[-1].cost, 0)
+        with self.assertRaises(plegma.Error):
+            plegma.clustered_consensus(self.reads, max_clusters=0)
+        with self.assertRaises(ValueError):
+            plegma.phased_consensus(self.reads, [0, 1])
+        with self.assertRaises(TypeError):
+            plegma.clustered_consensus(self.reads, no_such=1)
+
+
 if __name__ == "__main__":
     unittest.main()

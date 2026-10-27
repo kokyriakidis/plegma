@@ -242,6 +242,35 @@ def test_homopolymer_lengths_far_apart_stay_two() raises:
         assert_true((got[0] == one and got[1] == two) or (got[0] == two and got[1] == one))
 
 
+def test_runs_longer_than_the_model_keep_their_length() raises:
+    """Haplotypes apart by a run of A 20 and 45 long, the model's rows ending at 40: the model cannot judge the long
+    run, so each haplotype keeps its own consensus's length there (it was cut to the model's longest row, 40)."""
+    seed(61)
+    var left = _no_a(150)
+    var right = _no_a(150)
+    var reads = List[List[UInt8]]()
+    var strands = List[Int]()
+    var haplotypes = List[Int]()
+    var offsets = [0, 0, -1, 0, 1, 0, 0, -1]
+    for h in range(2):
+        for k in range(len(offsets)):
+            reads.append(_with_run(left, (20 if h == 0 else 45) + offsets[k], right))
+            strands.append(k % 2)
+            haplotypes.append(h)
+    var model = _wide_model()
+    var one = _with_run(left, 20, right)
+    var two = _with_run(left, 45, right)
+    var phased = phased_consensus(reads.copy(), haplotypes, strands=strands, options=_unpinned(), homopolymers=model)
+    assert_true(phased.consensus[0] == one, _text(phased.consensus[0]))
+    assert_true(phased.consensus[1] == two, _text(phased.consensus[1]))
+    var clustered = clustered_consensus(
+        reads.copy(), strands=strands, max_clusters=2, min_freq=0.2, options=_unpinned(), homopolymers=model
+    )
+    assert_equal(len(clustered.consensus), 2)
+    var got = clustered.consensus.copy()
+    assert_true((got[0] == one and got[1] == two) or (got[0] == two and got[1] == one))
+
+
 def test_arguments_are_checked() raises:
     var reads = List[List[UInt8]]()
     reads.append(_random(40))

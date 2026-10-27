@@ -77,6 +77,8 @@ Python (`python/plegma.py`, ctypes over the same library, no build step of its o
 import plegma  # python/ on the path; the library at $PLEGMA_LIBRARY or ../build/libplegma.so
 model = plegma.Model.load("HomopolymerModel-ONT-R10.4.1-sup5.0.0-2026-09-28.csv")
 parts = plegma.consensus(reads, anchors=["both", "left"], strands=[0, 1], model=model, pinned=False)
+two = plegma.clustered_consensus(reads, model=model, max_clusters=2, min_freq=0.25, pinned=False)
+two.consensus, two.members, two.placements[0].cigar  # also plegma.phased_consensus(reads, haplotypes, ...)
 ```
 
 Mojo: `plegma.consensus(seqs^, anchors, strands, ConsensusOptions(), model)`, the function behind the others.
@@ -103,7 +105,7 @@ noisy regions' het calls; a HiFi homopolymer model learnt on chr20, `two_lengths
 | MSA | true het | false het | wrong het | missed het | phased correct | discordant | unphased |
 |---|---|---|---|---|---|---|---|
 | abPOA | 27,636 | 1,321 | 2,324 | 1,140 | 1,036,153 | 5,155 | 997 |
-| plegma | 28,504 | 216 | 1,964 | 872 | 1,036,565 | 4,495 | 1,245 |
+| plegma | 28,507 | 216 | 1,962 | 862 | 1,036,594 | 4,497 | 1,214 |
 
 pgphase writes plegma's hets unphased where the reads are too noisy to phase them (a long homopolymer HiFi reads one
 letter short as often as not); abPOA's need the reads, since written so they add 420 false hets for 150 true.
