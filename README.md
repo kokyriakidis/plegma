@@ -101,13 +101,14 @@ neither anchor (`PLEGMA_ANCHOR_INSIDE`) builds nothing and is aligned within one
 lengths are one unless, with a model, two lengths explain the reads `two_lengths_db` better than one (15 dB;
 without a model, unless one differs by more than one letter): reads' length errors in runs split one haplotype's
 reads far more often than a true difference does. pgphase (github.com/kokyriakidis/pgphase, branch `plegma-msa`,
-`PGPHASE_MSA=plegma`) uses them as its default MSA (`--msa abpoa` for abPOA); at pgphase 081cfcc, on HG002 HiFi chr12, chr18 and chr20 against the v1.1 truth (its
-noisy regions' het calls; a HiFi homopolymer model learnt on chr20, `two_lengths_db` 5):
+`PGPHASE_MSA=plegma`) uses them as its default MSA (`--msa abpoa` for abPOA); at pgphase 10eefda, on HG002 HiFi chr12, chr18 and chr20 against the v1.1 truth (the het calls
+in plegma's noisy regions, both MSAs scored on the same regions; a HiFi homopolymer model learnt on chr20,
+`two_lengths_db` 5):
 
 | MSA | true het | false het | wrong het | missed het | phased correct | discordant | unphased |
 |---|---|---|---|---|---|---|---|
-| abPOA | 28,133 | 1,320 | 1,831 | 1,136 | 1,036,220 | 5,173 | 912 |
-| plegma | 29,146 | 233 | 1,475 | 712 | 1,036,664 | 4,509 | 1,132 |
+| abPOA | 28,225 | 1,320 | 1,739 | 1,136 | 1,036,220 | 5,173 | 912 |
+| plegma | 29,457 | 243 | 1,266 | 520 | 1,036,778 | 4,473 | 1,054 |
 
 pgphase writes plegma's hets unphased where the reads are too noisy to phase them (a long homopolymer HiFi reads one
 letter short as often as not); abPOA's need the reads, since written so they add 420 false hets for 150 true.
