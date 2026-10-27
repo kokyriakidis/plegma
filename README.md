@@ -103,7 +103,10 @@ noisy regions' het calls; a HiFi homopolymer model learnt on chr20, `two_lengths
 | MSA | true het | false het | wrong het | missed het | phased correct | discordant | unphased |
 |---|---|---|---|---|---|---|---|
 | abPOA | 27,636 | 1,321 | 2,324 | 1,140 | 1,036,153 | 5,155 | 997 |
-| plegma | 28,237 | 205 | 1,953 | 1,154 | 1,036,565 | 4,495 | 1,245 |
+| plegma | 28,504 | 216 | 1,964 | 872 | 1,036,565 | 4,495 | 1,245 |
+
+pgphase writes plegma's hets unphased where the reads are too noisy to phase them (a long homopolymer HiFi reads one
+letter short as often as not); abPOA's need the reads, since written so they add 420 false hets for 150 true.
 
 shasta2's Plegma local assembly method uses the library when configured with `-DPLEGMA_DIR=<plegma checkout>`
 (github.com/kokyriakidis/shasta2, branch la7-dump). On its HG002 chr21 assembly (the Final graph reassembled, lassen
