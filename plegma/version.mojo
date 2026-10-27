@@ -1,3 +1,3 @@
 """plegma's version, as `plegma --version`, `plegma_version` (the C API) and `pixi.toml` give it."""
 
-comptime VERSION = "0.3.0"
+comptime VERSION = "0.4.0"

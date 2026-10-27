@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 #define PLEGMA_VERSION_MAJOR 0
-#define PLEGMA_VERSION_MINOR 3
+#define PLEGMA_VERSION_MINOR 4
 #define PLEGMA_VERSION_PATCH 0
 
 /* The library's version, "major.minor.patch" (the header's, PLEGMA_VERSION_*, is what the caller was built with). */
