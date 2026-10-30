@@ -22,7 +22,7 @@ from karan import Aligner, Alignment, Costs, Mode, Ties
 
 from .alphabet import encode_base
 from .graph import DELETION, INSERTION, MATCH, cigar_runs
-from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel
+from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from .kernel import LEFT, RIGHT
 
 
@@ -882,7 +882,9 @@ def _runs(
         var n = e - s
         # A run the model holds no rows for, at the length most of its reads report, keeps its length: the model
         # would otherwise take the nearest length it holds (a model learnt where long runs of a letter are rare).
-        if len(lengths) > 0 and model.covers(base, _median(lengths)):
+        if reads_say_one(lengths):
+            n = 1
+        elif len(lengths) > 0 and model.covers(base, _median(lengths)):
             var best = model.most_likely(base, left, right, lengths, on)
             if best >= 2:
                 n = best

@@ -327,6 +327,28 @@ def test_run_repair_of_two_haplotypes_lengthens_no_run_twice() raises:
     assert_true(parts[0] == t16 or parts[0] == t4c, _text(parts[0]))
 
 
+def test_one_letter_where_the_other_haplotype_has_a_run() raises:
+    """HG002 chr20:8,254,476: one haplotype's 42 reads have T where the other's 26 have TTT. The model holds no rows
+    under 2 and the haplotypes' run search started at 2, so the first came out TT (the truth's 2 bp deletion written
+    as 1 bp); its reads, all T, now keep it one letter."""
+    var one = List[UInt8]("ACATGTCTCTGAGTCACTGTTACCATTTATAAAATGAAA".as_bytes())
+    var three = List[UInt8]("ACATGTCTCTGAGTCACTTTGTTACCATTTATAAAATGAAA".as_bytes())
+    var reads = List[List[UInt8]]()
+    var strands = List[Int]()
+    var haplotypes = List[Int]()
+    for k in range(68):
+        reads.append(one.copy() if k < 42 else three.copy())
+        strands.append(k % 2)
+        haplotypes.append(0 if k < 42 else 1)
+    var options = ConsensusOptions()
+    options.poa.seeded = False
+    var phased = phased_consensus(
+        reads.copy(), haplotypes, strands=strands, options=options, homopolymers=_short_reads_model()
+    )
+    assert_true(phased.consensus[0] == one, _text(phased.consensus[0]))
+    assert_true(phased.consensus[1] == three, _text(phased.consensus[1]))
+
+
 def test_one_repeat_unit_splits_a_haplotype_only_with_enough_reads() raises:
     """Clusters apart only by one TG of a (TG)10 / (TG)11 repeat: one cluster with the smaller under 30% of the
     reads (HiFi reads' slips there), two at half."""

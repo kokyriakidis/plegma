@@ -18,7 +18,7 @@ from .clusters import cluster_rows
 from .consensus import ConsensusOptions, consensus
 from .graph import Graph
 from .alphabet import encode_base
-from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel
+from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from .kernel import BOTH, INSIDE, LEFT, RIGHT, Scoring
 from .poa import poa
 
@@ -766,6 +766,12 @@ def phased_consensus(
             else:
                 first.append(shared)
                 second.append(shared)
+            # A haplotype whose reads report the letter once there has no run (`reads_say_one`): the search above
+            # starts at 2 (chr20:8,254,476, 42 reads T against the other haplotype's 26 TTT: written TT, the truth T).
+            if first[k] >= 0 and reads_say_one(lengths0):
+                first[k] = 1
+            if second[k] >= 0 and reads_say_one(lengths1):
+                second[k] = 1
         # Both rebuilt from the first (the two differ only at these runs), unless a run had too few reads to say.
         var decided = True
         for k in range(len(runs)):

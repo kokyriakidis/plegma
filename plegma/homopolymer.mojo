@@ -26,6 +26,19 @@ comptime FLANK_UNKNOWN = 4
 """A run's flank at the consensus's end, or not a letter of ACGT."""
 comptime _STRANDS = 2
 comptime _FLANKS = 5
+comptime ONE_LETTER_READS = 3
+"""The reads `reads_say_one` needs before their lengths say a run is one letter."""
+
+
+def reads_say_one(lengths: List[Int]) -> Bool:
+    """Whether the reads' lengths of a run, at least `ONE_LETTER_READS` of them, put it one letter long at their lower
+    median: no run. The model holds no rows under 2, so `most_likely` cannot say 1 and a search over its rows makes the
+    run 2 long (HG002 chr20:8,254,476, 42 reads T, written TT); HiFi reads report 1 for a true 2 at 5 in 10,000."""
+    if len(lengths) < ONE_LETTER_READS:
+        return False
+    var sorted_lengths = lengths.copy()
+    sort(sorted_lengths)
+    return sorted_lengths[(len(sorted_lengths) - 1) // 2] == 1
 
 
 def _flank(code: UInt8) raises -> Int:
