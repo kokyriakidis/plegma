@@ -171,6 +171,35 @@ def test_one_read_third_letter_does_not_hide_a_het() raises:
     )
 
 
+def _snp_and_run(letter: String, run: Int) -> List[UInt8]:
+    """A haplotype `letter` apart from the other at one place, with a run of T `run` long further on."""
+    var s = String("GATCCAGTACGGATCA") + letter + String("TGCAAC")
+    for _ in range(run):
+        s += "T"
+    s += "GACCTAGGCTAA"
+    return List[UInt8](s.as_bytes())
+
+
+def test_a_letter_apart_outweighs_a_run_slip() raises:
+    # HG002 chr20:11,477,892: the parents a letter apart, and each parent's reads split alike by a run's length (the
+    # reads slip). Every MSA column counted the same, the reads split by the run, and neither consensus kept the
+    # letter; a column of two letters counts SUBSTITUTION_WEIGHT gap columns.
+    var reads = List[List[UInt8]]()
+    for letter in ["C", "G"]:
+        for k in range(20):
+            reads.append(_snp_and_run(letter, 9 if k % 5 < 3 else 10))
+    var got = clustered_consensus(reads^, max_clusters=2, min_freq=0.2, options=_unpinned())
+    assert_equal(len(got.consensus), 2)
+    var c = _snp_and_run("C", 9)
+    var g = _snp_and_run("G", 9)
+    assert_true(
+        (got.consensus[0] == c and got.consensus[1] == g) or (got.consensus[0] == g and got.consensus[1] == c),
+        String(t"{_text(got.consensus[0])} {_text(got.consensus[1])}"),
+    )
+    for k in range(2):
+        assert_equal(len(got.members[k]), 20)
+
+
 def test_anchored_and_inside_reads() raises:
     """Reads fixed at one anchor build the consensus with the spanning ones; a read inside builds none and is aligned
     within its haplotype's consensus."""

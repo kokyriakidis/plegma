@@ -1,8 +1,9 @@
 """Several consensus sequences: the sequences clustered by the MSA columns where they disagree (abPOA's -d).
 
 A column is heterozygous when its second most common letter (a gap counting as one) is carried by at least
-`min_freq` of the sequences. Over those columns the sequences are clustered by k-modes (Hamming distance, each
-cluster's mode its commonest letter per column), seeded with the sequence nearest all others and then each time the
+`min_freq` of the sequences. Over those columns the sequences are clustered by k-modes (Hamming distance, a column of
+two letters counting `SUBSTITUTION_WEIGHT` columns where a gap is one of the two; each cluster's mode its commonest
+letter per column), seeded with the sequence nearest all others and then each time the
 one furthest from the seeds so far, its distance weighted by how many sequences share its letters there (a lone
 read's error is never a seed over an allele many carry); a cluster left smaller than `min_freq` of the sequences
 joins its nearest large neighbour.
@@ -12,11 +13,18 @@ joins its nearest large neighbour.
 comptime MAX_ROUNDS = 50
 """k-modes rounds at most (they stop when no row moves)."""
 
+comptime GAP = UInt8(ord("-"))
 
-def _hamming(a: List[UInt8], b: List[UInt8]) -> Int:
+comptime SUBSTITUTION_WEIGHT = 3
+"""A column where the rows disagree by two letters counts this many times one where some rows have a gap: HiFi reads
+slip in runs (a gap) far more often than they misread a letter, so the letters apart are the likelier alleles."""
+
+
+def _hamming(a: List[UInt8], b: List[UInt8], weights: List[Int]) -> Int:
     var d = 0
     for c in range(len(a)):
-        d += Int(a[c] != b[c])
+        if a[c] != b[c]:
+            d += weights[c]
     return d
 
 
@@ -51,6 +59,7 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
     var width = rows[0].byte_length()
     var floor = max(1, Int(min_freq * Float64(n) + 0.999999))
     var columns = List[Int]()
+    var weights = List[Int]()
     var counts = List[Int](length=256, fill=0)
     for c in range(width):
         for b in range(256):
@@ -59,14 +68,21 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
             counts[Int(r.as_bytes()[c])] += 1
         var first = 0
         var second = 0
+        var first_letter = 0
+        var second_letter = 0
         for b in range(256):
             if counts[b] > first:
                 second = first
+                second_letter = first_letter
                 first = counts[b]
+                first_letter = b
             elif counts[b] > second:
                 second = counts[b]
+                second_letter = b
         if second >= floor:
             columns.append(c)
+            var substitution = UInt8(first_letter) != GAP and UInt8(second_letter) != GAP
+            weights.append(SUBSTITUTION_WEIGHT if substitution else 1)
     if len(columns) == 0:
         out.append(everyone^)
         return out^
@@ -88,7 +104,7 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
     for i in range(n):
         var total = 0
         for j in range(n):
-            var d = _hamming(letters[i], letters[j])
+            var d = _hamming(letters[i], letters[j], weights)
             total += d
             sharing[i] += Int(d == 0)
         if total < least:
@@ -102,7 +118,7 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
         for i in range(n):
             var near = Int.MAX
             for m in modes:
-                near = min(near, _hamming(letters[i], m))
+                near = min(near, _hamming(letters[i], m, weights))
             if near * sharing[i] > far:
                 far = near * sharing[i]
                 furthest = i
@@ -119,7 +135,7 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
             var best = 0
             var best_d = Int.MAX
             for k in range(len(modes)):
-                var d = _hamming(letters[i], modes[k])
+                var d = _hamming(letters[i], modes[k], weights)
                 if d < best_d:
                     best_d = d
                     best = k
@@ -148,7 +164,7 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
         var best_d = Int.MAX
         for k in range(len(modes)):
             if size[k] >= floor:
-                var d = _hamming(letters[i], modes[k])
+                var d = _hamming(letters[i], modes[k], weights)
                 if d < best_d:
                     best_d = d
                     best = k
