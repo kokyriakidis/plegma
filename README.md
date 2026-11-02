@@ -33,7 +33,7 @@ the graph as GFA (`-r`):
   With `-H` (a homopolymer model in shasta2's csv, `plegma/homopolymer.mojo`) every run then takes its most likely
   length given the reads' lengths there, each read on the strand its header gives (`strand=0|1`), as shasta2's msa1
   repair chooses it. In shasta2's local assemblies of HG002 chr21 (its Final graph reassembled with plegma's library
-  in-process, as in the table below, scored by lassen against HG002 v1.1) it leaves 6752 errors, shasta2's msa1 repair
+  in-process, as in the table below, scored by lassen against HG002 v1.1) it leaves 6755 errors, shasta2's msa1 repair
   7353 and its abPOA default 11302.
 - **`plegma ref`**: the MSA anchored on the first sequence, the reference (CHM13's allele in a pangenome region): every
   other aligned to it alone at minimap2's asm5 scores, gaps left-normalized, its letters in the reference's columns
@@ -121,9 +121,10 @@ against HG002 v1.1):
 | consensus | errors | wall | CPU | peak memory |
 |---|---|---|---|---|
 | abPOA (shasta2's default) | 11,302 | 0:34 | 249 s | 3.7-4.0 GB |
-| plegma (library, `-H`, unpinned) | 6,752 | 0:20 | 129 s | 2.3 GB |
+| plegma (library, `-H`, unpinned) | 6,755 | 0:20 | 129 s | 2.3 GB |
 
-(shasta2's msa1 repair: 7,353 errors.) Each timed twice, 10 threads, on an otherwise idle machine.
+(shasta2's msa1 repair: 7,353 errors.) Errors at 0737184. Each timed twice at 005e225, 10 threads, on an otherwise
+idle machine.
 
 Per local assembly, in one process, on 2,093 of them (every 17th that reaches a consensus method), routed as shasta2's
 default routes them (abPOA with 6 or more spanning reads up to 5 kb, theseus otherwise), plegma on every read with
