@@ -5,6 +5,7 @@ from karan import distance
 
 from plegma.graph import Graph
 from plegma.kernel import BOTH, LEFT, RIGHT
+from plegma.consensus import consensus
 from plegma.poa import PoaOptions, poa
 from plegma.polish import polish
 
@@ -177,6 +178,50 @@ def test_one_side_assembles_a_prefix_where_reads_agree() raises:
     assert_true(len(consensus) >= 1000)
     var prefix = _slice(truth, 0, len(consensus))
     assert_true(distance(String(unsafe_from_utf8=consensus), String(unsafe_from_utf8=prefix)) <= 10)
+
+
+def _fasta(path: String) raises -> List[Tuple[String, List[UInt8]]]:
+    """A FASTA file's records: each header line (without its `>`) and its letters."""
+    var out = List[Tuple[String, List[UInt8]]]()
+    var header = String()
+    var letters = List[UInt8]()
+    var any = False
+    with open(path, "r") as f:
+        for line in f.read().splitlines():
+            if line.startswith(">"):
+                if any:
+                    out.append((header, letters^))
+                    letters = List[UInt8]()
+                header = String(line.removeprefix(">"))
+                any = True
+            else:
+                for byte in line.as_bytes():
+                    letters.append(byte)
+    if any:
+        out.append((header, letters^))
+    return out^
+
+
+def test_hg00512_drb1_joins_where_both_sides_have_reads() raises:
+    """Real reads: HG00512's HLA-DRB1 haplotype 1 (DRB1*08:03) as panStar windows it, 9 reads anchored left and 18
+    right, none spanning; the right side reaches the left end on one read alone. Its consensus must be the haplotype
+    HG00512's own assembly (HGSVC3 verkko) spells there. Joined at the middle of the pins it was 13 letters from it,
+    9 insertions and 2 deletions of that one read over 1.1 kb where 9 left reads disagreed, and the allele was read
+    *08:01:05."""
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    var strands = List[Int]()
+    for record in _fasta("tests/data/hg00512_drb1/reads.fa"):
+        var fields = record[0].split(" ")
+        anchors.append(LEFT if fields[1] == "anchor=left" else RIGHT)
+        strands.append(Int(fields[2].removeprefix("strand=")))
+        seqs.append(record[1].copy())
+    assert_equal(len(seqs), 27)
+    var truth = _fasta("tests/data/hg00512_drb1/truth.fa")[0][1].copy()
+    var made = consensus(seqs^, anchors, strands)
+    assert_equal(len(made), 1)
+    var edits = distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth))
+    assert_equal(edits, 0, String(t"{edits} edits from HG00512's assembly"))
 
 
 def main() raises:

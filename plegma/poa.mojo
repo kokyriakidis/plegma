@@ -14,10 +14,11 @@ the consensus is taken, and the caller leaves it out of polishing (`Poa.foreign`
 With no spanning read each side is assembled on its own: the left reads into a graph of their own, the longest
 first, its consensus followed from the left anchor while most reads go on (`Graph.heaviest_path`); the right reads
 likewise from the right anchor backwards (`Graph.heaviest_path_backward`). With both sides the two consensus
-sequences are joined where they overlap, at a pin of minimap2's chain between them (or, without one, a short
-overlap karan finds between their ends); the graph is then rebuilt on the joined sequence, every read aligned to it
-as anchored. With one side only (a telomere) its consensus is the assembly, one-directional. Memory follows the
-adaptive band in every mode: the reads' length times the band, not times each other.
+sequences are joined where they overlap, at the pin of minimap2's chain between them where both sides have the
+most reads (or, without one, a short overlap karan finds between their ends); the graph is then rebuilt on the
+joined sequence, every read aligned to it as anchored. With one side only (a telomere) its consensus is the
+assembly, one-directional. Memory follows the adaptive band in every mode: the reads' length times the band, not
+times each other.
 """
 
 from karan import Aligner, Alignment, Costs, Mode
@@ -290,7 +291,13 @@ def poa(
         var side = _one_side(names, seqs, right, options, SUFFIX)
         parts.append(_letters(side[0], side[0].heaviest_path_backward(Topology(side[0]).order, side[1])))
     if len(parts) == 2:
-        var joined = _join(parts[0], parts[1])
+        var left_reach = List[Int](capacity=len(left))
+        for r in left:
+            left_reach.append(len(seqs[r]))
+        var right_reach = List[Int](capacity=len(right))
+        for r in right:
+            right_reach.append(len(seqs[r]))
+        var joined = _join(parts[0], parts[1], left_reach, right_reach)
         if len(joined) > 0:
             parts.clear()
             parts.append(joined^)
@@ -541,31 +548,59 @@ def _trim(mut consensus: List[UInt8], seqs: List[List[UInt8]], reads: List[Int],
         consensus = kept^
 
 
-def _join(left: List[UInt8], right: List[UInt8]) raises -> List[UInt8]:
+def _support(reach: List[Int], at: Int) -> Int:
+    """How many reads reaching `reach` letters from their anchor get past `at` letters from it."""
+    var n = 0
+    for length in reach:
+        if length > at:
+            n += 1
+    return n
+
+
+def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_reach: List[Int]) raises -> List[UInt8]:
     """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end: at
-    the middle of the pins of minimap2's chain between them whose 19-mer is unique in both (a tandem array's copies
-    may chain to the wrong copy), when they place `right` starting inside `left` and reaching past its end by an
-    overlap of `JOIN_LEAST` letters or more; else at an overlap karan finds between `left`'s last and `right`'s first
-    `JOIN_ENDS` letters, as long and `JOIN_IDENTITY` alike; empty when they do not overlap."""
+    a pin of minimap2's chain between them whose 19-mer is unique in both (a tandem array's copies may chain to the
+    wrong copy), when they place `right` starting inside `left` and reaching past its end by an overlap of
+    `JOIN_LEAST` letters or more; else at an overlap karan finds between `left`'s last and `right`'s first `JOIN_ENDS`
+    letters, as long and `JOIN_IDENTITY` alike; empty when they do not overlap.
+
+    Of the pins, the one where the side worse supported there is best supported: left's letters before it come from
+    the left reads that reach it (`left_reach`, each read's length from the left anchor), right's after it from the
+    right reads that reach back to it (`right_reach`, from the right anchor). Each side's sequence near its far end is
+    the few longest reads' alone. Taking the middle pin, HG00512's HLA-DRB1 haplotype 1 (no read spanning, 9 left
+    reads and 18 right) had a stretch of 1.1 kb from the one right read reaching that far, against 9 left reads
+    there, and its 9 insertions and 2 deletions (12 of 13 reads disagreeing at each) shifted exons 3 to 6 out of
+    frame; the allele was read *08:01:05 for *08:03."""
     var found = pins(left, right)
     var unique = unique_pins(left, right, found)
     var kept = List[Int]()
     for m in range(len(found.r)):
-        if unique[m]:
-            kept.append(m)
-    if len(kept) > 0:
-        var m = kept[len(kept) // 2]
+        # Right starts inside left (q letters before the pin, r of left's) and ends past it.
         var r = found.r[m]
         var q = found.q[m]
-        # Right starts inside left (q letters before the pin, r of left's) and ends past it.
-        var overlap = len(left) - (r - q)
-        if r >= q and len(right) - q > len(left) - r and overlap >= JOIN_LEAST:
-            var out = List[UInt8](capacity=r + len(right) - q)
-            for i in range(r):
-                out.append(left[i])
-            for j in range(q, len(right)):
-                out.append(right[j])
-            return out^
+        if unique[m] and r >= q and len(right) - q > len(left) - r and len(left) - (r - q) >= JOIN_LEAST:
+            kept.append(m)
+    if len(kept) > 0:
+        # As well supported, the pin nearer the middle of the chain, where the join was taken before.
+        var best = -1
+        var best_support = -1
+        var best_off = 0
+        for k in range(len(kept)):
+            var m = kept[k]
+            var support = min(_support(left_reach, found.r[m]), _support(right_reach, len(right) - found.q[m]))
+            var off = abs(k - len(kept) // 2)
+            if support > best_support or (support == best_support and off < best_off):
+                best = m
+                best_support = support
+                best_off = off
+        var r = found.r[best]
+        var q = found.q[best]
+        var out = List[UInt8](capacity=r + len(right) - q)
+        for i in range(r):
+            out.append(left[i])
+        for j in range(q, len(right)):
+            out.append(right[j])
+        return out^
     var a_start = max(0, len(left) - JOIN_ENDS)
     var a = List[UInt8](capacity=len(left) - a_start)
     for i in range(a_start, len(left)):
