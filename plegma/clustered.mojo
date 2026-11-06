@@ -669,12 +669,23 @@ def _best_length(
 comptime TO_BOTH = 2
 """`_sides`: a read for both haplotypes, covering no place where the two differ."""
 
-comptime MIN_SITE_READS = 3
-"""`_sides`: a place where the two haplotypes differ decides a read only where each haplotype's consensus there is
-built from at least this many of its own reads, the fewest whose majority outvotes one read's error. Where fewer
-build it the difference is as likely an error as a het: HG002's HLA-DPA1 thinned to 15x had haplotype 2 built from
-its 10 labelled reads but its first 11.5 kb covered by 1 or 2 of them, and there its consensus held 36 errors, every
-one read as a place apart from haplotype 1; each unlabelled read, carrying the truth, went to haplotype 1 alone."""
+comptime MIN_CARRIERS = 1
+"""`_sides`: a place where the two haplotypes' consensus sequences differ decides reads only where each spelling is
+carried by at least this many reads of the window, labelled or not, and by `MIN_CARRIER_SHARE` of those spelling it
+either way. The share does the work: a spelling few of many reads carry is a read's error made the consensus's, not a
+second haplotype. HG002's HLA-DPA1 thinned to 15x had haplotype 2's left half built from 1 or 2 labelled reads, whose
+36 errors read as 36 places apart from haplotype 1, and every unlabelled read, carrying the truth there, went to
+haplotype 1 alone. Counting instead the labelled reads behind each consensus (3 of each) set aside the true
+differences low depth leaves under 3 labelled reads, and the unlabelled reads there, given to both haplotypes, made
+heterozygotes homozygous (CYP4A11 among them, unflagged); a floor of 2 carriers did the same at 10x and below (NAT2,
+MTHFR, HTR2A, GRIK1, XPC), a second allele there being one read in four."""
+
+comptime MIN_CARRIER_SHARE = 0.25
+"""`_sides`: the least share of the reads spelling a place either way that each spelling must have to decide reads
+there, a second haplotype being about half. On HG002 thinned to 30x down to 5x (two read sets) this kept every
+HLA-DPA1 consensus exact at 15x and 10x and left no wrong call unflagged in panStar; it still set aside a second allele
+one read in five carried at 10x and below (NAT2, MTHFR thinned), as the reads alone cannot tell it from an error
+there: at 0.15 those were kept, but so were DPA1's errors where one read in six carried them (33 edits at 15x)."""
 
 comptime SITE_FLANK = 8
 """Letters of the longer haplotype either side of a place where the two differ, compared with a read's letters there
@@ -768,90 +779,69 @@ def _differences(mut aligner: Aligner, longer: List[UInt8], shorter: List[UInt8]
     return out^
 
 
-def _cover(
-    mut aligner: Aligner,
-    consensus: List[UInt8],
-    seqs: List[List[UInt8]],
-    reads: List[Int],
-    anchors: List[Int],
-    costs: Costs,
-) raises -> List[Int]:
-    """How many of `reads`, aligned to `consensus` as anchored, cover each of its letters."""
-    var steps = List[Int](length=len(consensus) + 1, fill=0)
-    for r in reads:
-        var placed = _aligned(aligner, consensus, seqs[r], anchors[r], costs)
-        steps[placed.reference_start] += 1
-        steps[placed.reference_end] -= 1
-    var out = List[Int](length=len(consensus), fill=0)
-    var running = 0
-    for i in range(len(consensus)):
-        running += steps[i]
-        out[i] = running
-    return out^
-
-
-def _least(cover: List[Int], start: Int, end: Int) -> Int:
-    """The fewest reads over `start ..< end` of `cover`; over an empty span, at the letter it stands before."""
-    if len(cover) == 0:
+def _spelling(seq: List[UInt8], placed: Alignment, at: List[Int], site: _Site) -> Int:
+    """Which spelling of `site` a read carries, placed in the longer haplotype as `placed` (`at`: `_query_at`): 0 the
+    longer's, 1 the shorter's, -1 neither, or a place the read does not span wholly short of its alignment's ends,
+    where a read running past the haplotype's end piles its overhang."""
+    if site.start <= placed.reference_start or site.end >= placed.reference_end:
+        return -1
+    var letters = List[UInt8]()
+    for q in range(at[site.start - placed.reference_start], at[site.end - placed.reference_start]):
+        letters.append(seq[q])
+    if letters == site.longer:
         return 0
-    var lo = min(start, len(cover) - 1)
-    var hi = max(end, lo + 1)
-    var least = cover[lo]
-    for i in range(lo, min(hi, len(cover))):
-        least = min(least, cover[i])
-    return least
+    if letters == site.shorter:
+        return 1
+    return -1
 
 
 def _sides(
     mut aligner: Aligner,
     made: List[List[UInt8]],
     seqs: List[List[UInt8]],
-    groups: List[List[Int]],
-    anchors: List[Int],
+    builders: List[Int],
     reads: List[Int],
     costs: Costs,
 ) raises -> List[Int]:
     """For each of `reads`, the haplotype of `made` whose letters it carries where the two differ: 0 or 1, `TO_BOTH`
     when it covers no such place (a stretch where the two read alike, or one neither reaches), -1 when it carries as
-    many of one's as of the other's. Each read is placed inside the longer (`Mode.INFIX`) and its letters over each
-    place it spans wholly compared with the two spellings there. Only places where each haplotype's consensus is
-    built from `MIN_SITE_READS` of its own reads (`groups`, aligned as `anchors` says) count."""
+    many of one's as of the other's. Every read of `builders` (labelled or not) is placed inside the longer
+    (`Mode.INFIX`) and its letters over each place it spans wholly compared with the two spellings there; a place
+    decides only where each spelling is carried by `MIN_CARRIERS` of them and `MIN_CARRIER_SHARE` of those spelling
+    it either way."""
     var out = List[Int](length=len(reads), fill=TO_BOTH)
     var long_index = 0 if len(made[0]) >= len(made[1]) else 1
     ref longer = made[long_index]
-    var found = _differences(aligner, longer, made[1 - long_index], costs)
-    if len(found) == 0:
-        return out^
-    var long_cover = _cover(aligner, longer, seqs, groups[long_index], anchors, costs)
-    var short_cover = _cover(aligner, made[1 - long_index], seqs, groups[1 - long_index], anchors, costs)
-    var sites = List[_Site]()
-    for ref site in found:
-        if (
-            _least(long_cover, site.start, site.end) >= MIN_SITE_READS
-            and _least(short_cover, site.short_start, site.short_end) >= MIN_SITE_READS
-        ):
-            sites.append(site.copy())
+    var sites = _differences(aligner, longer, made[1 - long_index], costs)
     if len(sites) == 0:
         return out^
-    for i in range(len(reads)):
-        ref seq = seqs[reads[i]]
+    # Each read's spelling at each place: row per read of `builders`.
+    var spelt = List[List[Int]]()
+    var row_of = List[Int](length=len(seqs), fill=-1)
+    for b in range(len(builders)):
+        ref seq = seqs[builders[b]]
         var placed = aligner.align(Span(longer), Span(seq), costs, Mode.INFIX, ties=Ties.LEFT)
         var at = _query_at(placed)
+        var row = List[Int](length=len(sites), fill=-1)
+        for k in range(len(sites)):
+            row[k] = _spelling(seq, placed, at, sites[k])
+        spelt.append(row^)
+        row_of[builders[b]] = b
+    var counted = List[Bool](length=len(sites), fill=False)
+    for k in range(len(sites)):
+        var carriers = [0, 0]
+        for ref row in spelt:
+            if row[k] >= 0:
+                carriers[row[k]] += 1
+        var fewer = min(carriers[0], carriers[1])
+        counted[k] = fewer >= MIN_CARRIERS and Float64(fewer) >= MIN_CARRIER_SHARE * Float64(carriers[0] + carriers[1])
+    for i in range(len(reads)):
         var votes = [0, 0]
-        for ref site in sites:
-            # A place the read spans wholly, short of its alignment's ends, where a read running past the
-            # haplotype's end piles its overhang.
-            if site.start <= placed.reference_start or site.end >= placed.reference_end:
-                continue
-            var q0 = at[site.start - placed.reference_start]
-            var q1 = at[site.end - placed.reference_start]
-            var letters = List[UInt8]()
-            for q in range(q0, q1):
-                letters.append(seq[q])
-            if letters == site.longer:
-                votes[long_index] += 1
-            elif letters == site.shorter:
-                votes[1 - long_index] += 1
+        ref row = spelt[row_of[reads[i]]]
+        for k in range(len(sites)):
+            if counted[k] and row[k] >= 0:
+                # Spelling 0 is the longer haplotype's.
+                votes[long_index if row[k] == 0 else 1 - long_index] += 1
         if votes[0] > votes[1]:
             out[i] = 0
         elif votes[1] > votes[0]:
@@ -921,7 +911,10 @@ def phased_consensus(
             unlabelled.append(r)
     if len(unlabelled) > 0 and len(groups[0]) + len(groups[1]) > 0:
         var costs = alignment_costs(options.poa.scoring)
-        var sides = _sides(aligner, made, seqs, groups, anchor_of, unlabelled, costs)
+        var builders = groups[0].copy()
+        builders.extend(groups[1].copy())
+        builders.extend(unlabelled.copy())
+        var sides = _sides(aligner, made, seqs, builders, unlabelled, costs)
         var grew = [False, False]
         for i in range(len(unlabelled)):
             for k in range(2):
