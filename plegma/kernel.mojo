@@ -228,8 +228,10 @@ def align_to_graph(
 ) raises -> GraphAlignment:
     """The best alignment of `query` to `graph` under `scoring` in `mode`, inside abPOA's adaptive band
     (`band_b` < 0: no band; a band the global end falls outside of is doubled and tried again). Of equal
-    alignments, the one taking the diagonal first in the traceback, so gaps come first, and of equal
-    predecessors the one whose edge most sequences took."""
+    alignments, the one taking the diagonal first in the traceback, so gaps come first, then of equal gaps
+    KSW2's order (a deletion of the first gap piece, an insertion of it, a deletion of the second, an
+    insertion of it), as minimap2 and karan's `Ties.KSW2` choose; and of equal predecessors the one whose edge
+    most sequences took."""
     var row_of = List[Int](length=len(graph), fill=-1)
     return align_between(graph, topology, topology.order, SOURCE, SINK, query, scoring, row_of, mode, band_b, band_f)
 
@@ -779,7 +781,9 @@ struct Workspace(Movable):
                 var value = here
                 var packed = source_of.unsafe_load[width=V](at)
                 var source = packed & Vec(S(7))
-                var take1 = inserted1.gt(value)
+                # KSW2's order among gaps (diagonal, D1, I1, D2, I2): the first piece's insertion also takes over
+                # from the second piece's deletion it ties.
+                var take1 = inserted1.gt(value) | (inserted1.eq(value) & source.eq(Vec(S(_DELETION2))))
                 value = take1.select(inserted1, value)
                 source = take1.select(Vec(S(_INSERTION1)), source)
                 var take2 = inserted2.gt(value)
