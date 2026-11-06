@@ -307,9 +307,11 @@ def clustered_consensus(reads, anchors=None, strands=None, model=None, max_clust
 
 def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, **options):
     """The two haplotypes' consensus sequences of reads already phased: `haplotypes` per read 0 or 1 (-1 or None:
-    neither, placed where it fits best). Where the two differ only by homopolymer lengths and a model is given, each
-    such run is decided on both haplotypes' reads (their own lengths only when that explains the reads
-    `two_lengths_db` better). Other arguments as `clustered_consensus`. A Clustered of two clusters."""
+    neither, which builds on the haplotype whose letters it carries where the two differ, on both where it covers no
+    such place, on neither where it carries as many of each, and is placed where it fits best). Where the two differ
+    only by homopolymer lengths and a model is given, each such run is decided on both haplotypes' reads (their own
+    lengths only when that explains the reads `two_lengths_db` better). Other arguments as `clustered_consensus`.
+    A Clustered of two clusters."""
     given = _Reads(reads, anchors, strands, model, options, "phased_consensus")
     if len(haplotypes) != given.count:
         raise ValueError(f"{len(haplotypes)} haplotypes for {given.count} reads")

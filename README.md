@@ -185,7 +185,10 @@ For a diploid caller (abPOA's `-d`):
   `max_clusters` consensus sequences of one read set, each from the reads nearest it; a cluster under `min_freq` of
   the reads joins another.
 - `plegma_phased_consensus` (`plegma::phasedConsensus`, `plegma.phased_consensus`) gives the two consensus sequences
-  of reads already phased.
+  of reads already phased. A read of neither haplotype (-1) builds as well: on the haplotype whose letters it carries
+  where the two differ (each built there from at least 3 of its own reads), on both where it covers no such place,
+  on neither where it carries as many of each. A phase set ending inside the window then no longer leaves a
+  haplotype pieced together from its few labelled reads there.
 
 Both return each cluster's reads and each read's CIGAR to its cluster's consensus. A read on neither anchor
 (`PLEGMA_ANCHOR_INSIDE`) builds nothing and is only aligned within a cluster. Clusters apart only by homopolymer

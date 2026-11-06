@@ -101,8 +101,10 @@ plegma_result* plegma_clustered_consensus(size_t count, const uint8_t* const* se
                                           const int32_t* anchors, const int32_t* strands, const plegma_model* model,
                                           const plegma_options* options, int32_t max_clusters, float min_freq);
 
-/* The two haplotypes' consensus sequences of reads already phased: haplotypes[i] 0 or 1 (-1: neither, placed where
- * it fits best). Each made as plegma_consensus makes one from its reads; where the two differ only by homopolymer
+/* The two haplotypes' consensus sequences of reads already phased: haplotypes[i] 0 or 1 (-1: neither, which builds on
+ * the haplotype whose letters it carries where the two differ, on both where it covers no such place, on neither
+ * where it carries as many of each, and is placed where it fits best). Each made as plegma_consensus makes one from
+ * its reads; where the two differ only by homopolymer
  * lengths and a model is given, each such run decided on both haplotypes' reads (their own lengths only when that
  * explains the reads clearly better than one length for both). Two parts always; members and placements as
  * plegma_clustered_consensus's. */

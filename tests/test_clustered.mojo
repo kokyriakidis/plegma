@@ -414,5 +414,64 @@ def test_arguments_are_checked() raises:
     assert_equal(len(none.consensus), 1)
 
 
+def _swapped(seq: List[UInt8], at: List[Int]) -> List[UInt8]:
+    """`seq` with the letter at each of `at` turned to another."""
+    var out = seq.copy()
+    var letters = "ACGT".as_bytes()
+    for i in at:
+        out[i] = letters[(Int(String("ACGT").find(chr(Int(out[i])))) + 1) % 4]
+    return out^
+
+
+def _slice(seq: List[UInt8], start: Int, end: Int) -> List[UInt8]:
+    var out = List[UInt8](capacity=end - start)
+    for i in range(start, end):
+        out.append(seq[i])
+    return out^
+
+
+def _labelled_right_unlabelled_left(one: List[UInt8], two: List[UInt8]) raises -> List[List[UInt8]]:
+    """`phased_consensus` of six reads of each haplotype labelled and anchored right, over letters 480 on, and six of
+    each unlabelled and anchored left, over letters 0 to 720: no read spans, and only unlabelled reads reach the
+    left end, as where pgphase's phase set ends inside a window (HG002's HLA-DPA1 thinned to 10x and 15x)."""
+    var reads = List[List[UInt8]]()
+    var anchors = List[Int]()
+    var haplotypes = List[Int]()
+    for h in range(2):
+        var seq = one.copy() if h == 0 else two.copy()
+        for _ in range(6):
+            reads.append(_slice(seq, 480, len(seq)))
+            anchors.append(RIGHT)
+            haplotypes.append(h)
+        for _ in range(6):
+            reads.append(_slice(seq, 0, 720))
+            anchors.append(LEFT)
+            haplotypes.append(-1)
+    return phased_consensus(reads^, haplotypes, anchors=anchors).consensus.copy()
+
+
+def test_unlabelled_reads_build_the_haplotype_whose_letters_they_carry() raises:
+    """The haplotypes differ at letters 240, 600 and 960; the unlabelled left reads carry 600, where the labelled
+    consensus sequences differ too, and so each joins its own haplotype, which it alone carries to the left end and
+    to letter 240. Built from the labelled reads alone, each haplotype began at letter 480."""
+    seed(91)
+    var one = _random(1200)
+    var two = _swapped(one, [240, 600, 960])
+    var got = _labelled_right_unlabelled_left(one, two)
+    assert_true(got[0] == one, _text(got[0]))
+    assert_true(got[1] == two, _text(got[1]))
+
+
+def test_unlabelled_reads_where_the_haplotypes_read_alike_build_both() raises:
+    """The haplotypes differ at letter 960 alone, which no unlabelled read reaches: each such read covers no place
+    where the two differ and builds both, each then whole from its left end."""
+    seed(92)
+    var one = _random(1200)
+    var two = _swapped(one, [960])
+    var got = _labelled_right_unlabelled_left(one, two)
+    assert_true(got[0] == one, _text(got[0]))
+    assert_true(got[1] == two, _text(got[1]))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
