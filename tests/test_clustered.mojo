@@ -401,6 +401,33 @@ def test_one_repeat_unit_splits_a_haplotype_only_with_enough_reads() raises:
         assert_equal(len(got.consensus), 1 if minority == 4 else 2, String(t"{minority} of 16 reads one TG longer"))
 
 
+def test_a_minority_haplotype_backed_by_its_labels_keeps_its_letter() raises:
+    """NA18941's CYP1A1 in panStar: 8 reads of haplotype 0 and 3 of haplotype 1 over a block, apart at one SNV every
+    labelled read agrees on, and 4 more reads of another phase set (unlabelled) carrying haplotype 0's letter. Three
+    of fifteen is under a quarter of the reads, but each spelling is carried by three of its own haplotype's
+    labelled reads and none of the other's: a difference, not an error. Counted as one, the unlabelled reads go to
+    haplotype 0 alone; uncounted, they went to both and outvoted haplotype 1's own three reads."""
+    seed(41)
+    var first = _random(700)
+    var second = first.copy()
+    var letters = "ACGT".as_bytes()
+    second[350] = letters[0] if first[350] != letters[0] else letters[1]
+    var reads = List[List[UInt8]]()
+    var haplotypes = List[Int]()
+    for _ in range(8):
+        reads.append(first.copy())
+        haplotypes.append(0)
+    for _ in range(3):
+        reads.append(second.copy())
+        haplotypes.append(1)
+    for _ in range(4):
+        reads.append(first.copy())
+        haplotypes.append(-1)
+    var phased = phased_consensus(reads^, haplotypes)
+    assert_equal(_text(phased.consensus[0]), _text(first))
+    assert_equal(_text(phased.consensus[1]), _text(second), "haplotype 1 keeps its own reads' letter")
+
+
 def test_arguments_are_checked() raises:
     var reads = List[List[UInt8]]()
     reads.append(_random(40))

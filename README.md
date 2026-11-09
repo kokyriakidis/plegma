@@ -186,7 +186,8 @@ For a diploid caller (abPOA's `-d`):
   the reads joins another.
 - `plegma_phased_consensus` (`plegma::phasedConsensus`, `plegma.phased_consensus`) gives the two consensus sequences
   of reads already phased. A read of neither haplotype (-1) builds as well: on the haplotype whose letters it carries
-  where the two differ (each spelling there carried by 2 reads and a quarter of them), on both where it covers no
+  where the two differ (each spelling there carried by a quarter of the reads, or by 3 of its own haplotype's labelled reads and
+  three quarters of them), on both where it covers no
   such place, on neither where it carries as many of each. A phase set ending inside the window then no longer
   leaves a haplotype pieced together from its few labelled reads there.
 

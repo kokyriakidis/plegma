@@ -687,6 +687,16 @@ HLA-DPA1 consensus exact at 15x and 10x and left no wrong call unflagged in panS
 one read in five carried at 10x and below (NAT2, MTHFR thinned), as the reads alone cannot tell it from an error
 there: at 0.15 those were kept, but so were DPA1's errors where one read in six carried them (33 edits at 15x)."""
 
+comptime PHASED_CARRIERS = 3
+"""`_sides`: a place also decides reads where pgphase's labels back it: each haplotype's spelling carried by at least
+this many of its own labelled reads, and by `PHASED_AGREEMENT` of its labelled reads spelling it either way. The
+share of all reads cannot tell a minority haplotype from an error (NA18941's CYP1A1: 8 reads of one haplotype, 3 of
+the other, 4 of another phase set carrying the first's letter; at 3 of 15 the place was set aside, the 4 went to
+both and outvoted the second's own 3), but an error does not follow the labels: one read's error made a thin
+consensus's (HG002's HLA-DPA1 at 15x, a haplotype built from 1 or 2 reads) has under 3 carriers of its own."""
+
+comptime PHASED_AGREEMENT = 0.75
+
 comptime SITE_FLANK = 8
 """Letters of the longer haplotype either side of a place where the two differ, compared with a read's letters there
 along with it: two alignments may put the same gap a letter or two apart, which compared alone would read as the
@@ -802,13 +812,14 @@ def _sides(
     builders: List[Int],
     reads: List[Int],
     costs: Costs,
+    labels: List[Int] = List[Int](),
 ) raises -> List[Int]:
     """For each of `reads`, the haplotype of `made` whose letters it carries where the two differ: 0 or 1, `TO_BOTH`
     when it covers no such place (a stretch where the two read alike, or one neither reaches), -1 when it carries as
     many of one's as of the other's. Every read of `builders` (labelled or not) is placed inside the longer
     (`Mode.INFIX`) and its letters over each place it spans wholly compared with the two spellings there; a place
     decides only where each spelling is carried by `MIN_CARRIERS` of them and `MIN_CARRIER_SHARE` of those spelling
-    it either way."""
+    it either way, or where `labels` (a haplotype per read of `seqs`, -1 none) back it (`PHASED_CARRIERS`)."""
     var out = List[Int](length=len(reads), fill=TO_BOTH)
     var long_index = 0 if len(made[0]) >= len(made[1]) else 1
     ref longer = made[long_index]
@@ -830,11 +841,31 @@ def _sides(
     var counted = List[Bool](length=len(sites), fill=False)
     for k in range(len(sites)):
         var carriers = [0, 0]
-        for ref row in spelt:
-            if row[k] >= 0:
-                carriers[row[k]] += 1
+        # own[2 * h + c]: reads labelled h spelling the place c (0 the longer haplotype's spelling).
+        var own = List[Int](length=4, fill=0)
+        for b in range(len(spelt)):
+            var c = spelt[b][k]
+            if c < 0:
+                continue
+            carriers[c] += 1
+            var h = labels[builders[b]] if len(labels) > 0 else -1
+            if h == 0 or h == 1:
+                own[2 * h + c] += 1
         var fewer = min(carriers[0], carriers[1])
         counted[k] = fewer >= MIN_CARRIERS and Float64(fewer) >= MIN_CARRIER_SHARE * Float64(carriers[0] + carriers[1])
+        if not counted[k]:
+            # Labels back it: the longer haplotype's reads spell it 0, the other's 1.
+            var short_index = 1 - long_index
+            var mine = own[2 * long_index]
+            var theirs = own[2 * short_index + 1]
+            var mine_all = own[2 * long_index] + own[2 * long_index + 1]
+            var theirs_all = own[2 * short_index] + own[2 * short_index + 1]
+            counted[k] = (
+                mine >= PHASED_CARRIERS
+                and theirs >= PHASED_CARRIERS
+                and Float64(mine) >= PHASED_AGREEMENT * Float64(mine_all)
+                and Float64(theirs) >= PHASED_AGREEMENT * Float64(theirs_all)
+            )
     for i in range(len(reads)):
         var votes = [0, 0]
         ref row = spelt[row_of[reads[i]]]
@@ -914,7 +945,7 @@ def phased_consensus(
         var builders = groups[0].copy()
         builders.extend(groups[1].copy())
         builders.extend(unlabelled.copy())
-        var sides = _sides(aligner, made, seqs, builders, unlabelled, costs)
+        var sides = _sides(aligner, made, seqs, builders, unlabelled, costs, haplotypes)
         var grew = [False, False]
         for i in range(len(unlabelled)):
             for k in range(2):
