@@ -4,7 +4,8 @@ from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from karan import distance
 
-from plegma.clustered import clustered_consensus, phased_consensus
+from karan import Aligner, Costs, Mode, Ties
+from plegma.clustered import _haplotype_at, clustered_consensus, phased_consensus
 from plegma.consensus import ConsensusOptions, consensus
 from plegma.homopolymer import HomopolymerModel
 from plegma.kernel import BOTH, INSIDE, LEFT, RIGHT
@@ -498,6 +499,43 @@ def test_unlabelled_reads_where_the_haplotypes_read_alike_build_both() raises:
     var got = _labelled_right_unlabelled_left(one, two)
     assert_true(got[0] == one, _text(got[0]))
     assert_true(got[1] == two, _text(got[1]))
+
+
+def test_unlabelled_reads_join_haplotypes_of_different_lengths() raises:
+    """The second haplotype lacks 30 letters (590 to 620) and differs at 240, 900 and 960: the two consensus sequences
+    differ in length, each labelled read is placed on its own haplotype (the shorter's at each place's span there)
+    and the unlabelled left reads, which reach the deletion, still join theirs."""
+    seed(93)
+    var one = _random(1200)
+    var swapped = _swapped(one, [240, 900, 960])
+    var two = _slice(swapped, 0, 590)
+    two.extend(_slice(swapped, 620, len(swapped)))
+    var got = _labelled_right_unlabelled_left(one, two)
+    assert_true(got[0] == one, _text(got[0]))
+    assert_true(got[1] == two, _text(got[1]))
+
+
+def test_a_haplotype_inside_a_read_has_each_letters_read_letter() raises:
+    # `_haplotype_at`: a haplotype placed inside a longer read gives each haplotype letter the read letter it stands
+    # before; a read letter the haplotype lacks counts before the haplotype letter after it, as `_query_at` counts.
+    var haplotype = List[UInt8]("GATTACAGGTCCATTAGC".as_bytes())
+    var flanked = List[UInt8]("CCCC".as_bytes())
+    flanked.extend(haplotype.copy())
+    flanked.extend(List[UInt8]("TTTTT".as_bytes()))
+    var aligner = Aligner()
+    var at = _haplotype_at(aligner.align(Span(flanked), Span(haplotype), Costs.edit(), Mode.INFIX, ties=Ties.LEFT))
+    assert_equal(len(at), len(haplotype) + 1)
+    for p in range(len(haplotype) + 1):
+        assert_equal(at[p], 4 + p)
+    # One letter more in the read after the haplotype's eighth: from there on, one further along.
+    var longer = List[UInt8]("CCCC".as_bytes())
+    longer.extend(List[UInt8](Span(haplotype)[:8]))
+    longer.append(UInt8(ord("A")))
+    longer.extend(List[UInt8](Span(haplotype)[8:]))
+    longer.extend(List[UInt8]("TTTTT".as_bytes()))
+    at = _haplotype_at(aligner.align(Span(longer), Span(haplotype), Costs.edit(), Mode.INFIX, ties=Ties.LEFT))
+    for p in range(len(haplotype) + 1):
+        assert_equal(at[p], 4 + p + (1 if p >= 8 else 0), String(t"letter {p}"))
 
 
 def main() raises:

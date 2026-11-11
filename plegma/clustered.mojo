@@ -789,14 +789,36 @@ def _differences(mut aligner: Aligner, longer: List[UInt8], shorter: List[UInt8]
     return out^
 
 
-def _spelling(seq: List[UInt8], placed: Alignment, at: List[Int], site: _Site) -> Int:
-    """Which spelling of `site` a read carries, placed in the longer haplotype as `placed` (`at`: `_query_at`): 0 the
-    longer's, 1 the shorter's, -1 neither, or a place the read does not span wholly short of its alignment's ends,
-    where a read running past the haplotype's end piles its overhang."""
-    if site.start <= placed.reference_start or site.end >= placed.reference_end:
+def _haplotype_at(alignment: Alignment) -> List[Int]:
+    """`_query_at` the other way round: for a haplotype placed inside a read (`alignment`'s query the haplotype, its
+    reference the read; `Mode.INFIX`, so every haplotype letter is placed), for each haplotype letter `0 ..= len` the
+    read letter it stands before, a gap's letters counting before the haplotype letter after them."""
+    var out = List[Int](capacity=alignment.query_end - alignment.query_start + 1)
+    var r = alignment.reference_start
+    var ops = _ops(alignment.cigar)
+    for ref op in ops:
+        var length = op[0]
+        var letter = op[1]
+        if letter == UInt8(ord("D")):
+            r += length
+            continue
+        for _ in range(length):
+            out.append(r)
+            if letter != UInt8(ord("I")):
+                r += 1
+    out.append(r)
+    return out^
+
+
+def _spelling(seq: List[UInt8], start: Int, end: Int, at: List[Int], lo: Int, hi: Int, site: _Site) -> Int:
+    """Which spelling of `site` a read carries, placed over a haplotype's letters `start ..< end` (`at`: the read
+    letter each haplotype letter from `start` stands before), the site lying on that haplotype's `lo ..< hi`: 0 the
+    longer's spelling, 1 the shorter's, -1 neither, or a place the read does not span wholly short of its
+    placement's ends, where a read running past the haplotype's end piles its overhang."""
+    if lo <= start or hi >= end:
         return -1
     var letters = List[UInt8]()
-    for q in range(at[site.start - placed.reference_start], at[site.end - placed.reference_start]):
+    for q in range(at[lo - start], at[hi - start]):
         letters.append(seq[q])
     if letters == site.longer:
         return 0
@@ -816,14 +838,17 @@ def _sides(
 ) raises -> List[Int]:
     """For each of `reads`, the haplotype of `made` whose letters it carries where the two differ: 0 or 1, `TO_BOTH`
     when it covers no such place (a stretch where the two read alike, or one neither reaches), -1 when it carries as
-    many of one's as of the other's. Every read of `builders` (labelled or not) is placed inside the longer
-    (`Mode.INFIX`) and its letters over each place it spans wholly compared with the two spellings there; a place
+    many of one's as of the other's. Every read of `builders` (labelled or not) is placed on a haplotype
+    (`Mode.INFIX`) and its letters over each place it spans wholly compared with the two spellings there -- a read
+    labelled with the shorter's haplotype on the shorter, at each place's span there, every other read on the
+    longer; a place
     decides only where each spelling is carried by `MIN_CARRIERS` of them and `MIN_CARRIER_SHARE` of those spelling
     it either way, or where `labels` (a haplotype per read of `seqs`, -1 none) back it (`PHASED_CARRIERS`)."""
     var out = List[Int](length=len(reads), fill=TO_BOTH)
     var long_index = 0 if len(made[0]) >= len(made[1]) else 1
+    var short_index = 1 - long_index
     ref longer = made[long_index]
-    var sites = _differences(aligner, longer, made[1 - long_index], costs)
+    var sites = _differences(aligner, longer, made[short_index], costs)
     if len(sites) == 0:
         return out^
     # Each read's spelling at each place: row per read of `builders`.
@@ -831,11 +856,40 @@ def _sides(
     var row_of = List[Int](length=len(seqs), fill=-1)
     for b in range(len(builders)):
         ref seq = seqs[builders[b]]
-        var placed = aligner.align(Span(longer), Span(seq), costs, Mode.INFIX, ties=Ties.LEFT)
-        var at = _query_at(placed)
+        # A read labelled with the shorter's haplotype is placed on the shorter, the places read at their spans there
+        # (`_Site.short_start`): it carries that haplotype's letters, and placed on the longer it would differ from it
+        # wherever the two do. NA19007's HLA-DRB1 (*09:01 and *08:03, hundreds of edits apart through the introns):
+        # 77 reads placed on the other haplotype at half a second each, 39 of the window's 47 s, for 2 unlabelled
+        # reads. Every other read is placed on the longer.
+        var h = labels[builders[b]] if len(labels) > 0 else -1
+        var on_shorter = h == short_index
+        ref haplotype = made[short_index if on_shorter else long_index]
+        # A read is placed inside the haplotype, unless it is the longer of the two: then the haplotype inside it.
+        # A haplotype built from a few labelled reads can be a fraction of the window (HG02106's HLA-DPB1: 2,716 and
+        # 3,732 letters from 7 of 71 reads), and a 15.7 kb read forced inside 3.7 kb is a 12 kb gap, which an
+        # alignment's cost grows with: 1.8 s a read, 57 of the window's 59 s. The other way round the two differ by
+        # what the read's errors and the haplotypes' differences make, and every haplotype letter has its read
+        # letter.
+        var start: Int
+        var end: Int
+        var at: List[Int]
+        if len(seq) > len(haplotype):
+            var inside = aligner.align(Span(seq), Span(haplotype), costs, Mode.INFIX, ties=Ties.LEFT)
+            at = _haplotype_at(inside)
+            start = 0
+            end = len(haplotype)
+        else:
+            var placed = aligner.align(Span(haplotype), Span(seq), costs, Mode.INFIX, ties=Ties.LEFT)
+            at = _query_at(placed)
+            start = placed.reference_start
+            end = placed.reference_end
         var row = List[Int](length=len(sites), fill=-1)
         for k in range(len(sites)):
-            row[k] = _spelling(seq, placed, at, sites[k])
+            ref site = sites[k]
+            if on_shorter:
+                row[k] = _spelling(seq, start, end, at, site.short_start, site.short_end, site)
+            else:
+                row[k] = _spelling(seq, start, end, at, site.start, site.end, site)
         spelt.append(row^)
         row_of[builders[b]] = b
     var counted = List[Bool](length=len(sites), fill=False)
@@ -855,7 +909,6 @@ def _sides(
         counted[k] = fewer >= MIN_CARRIERS and Float64(fewer) >= MIN_CARRIER_SHARE * Float64(carriers[0] + carriers[1])
         if not counted[k]:
             # Labels back it: the longer haplotype's reads spell it 0, the other's 1.
-            var short_index = 1 - long_index
             var mine = own[2 * long_index]
             var theirs = own[2 * short_index + 1]
             var mine_all = own[2 * long_index] + own[2 * long_index + 1]
