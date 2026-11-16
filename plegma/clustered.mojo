@@ -507,8 +507,10 @@ def clustered_consensus(
         var distinct = True
         var runs = List[Int]()
         var single = True
-        for a in range(len(made)):
-            for b in range(a + 1, len(made)):
+        # Over the clusters still standing: a refinement that leaves one stops with `made` as it was (the two
+        # consensus sequences of the round before), and one cluster has nothing to merge.
+        for a in range(len(groups)):
+            for b in range(a + 1, len(groups)):
                 if made[a] == made[b]:
                     distinct = False
                 elif _one_unit_apart(made[a], made[b]) and Float64(

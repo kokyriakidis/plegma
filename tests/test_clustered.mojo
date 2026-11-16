@@ -151,6 +151,39 @@ def test_a_cluster_under_min_freq_joins_the_other() raises:
     assert_true(distance(_text(got.consensus[0]), _text(one)) <= 1)
 
 
+def test_a_refinement_down_to_one_cluster() raises:
+    """A refinement round that drops a cluster under the floor leaves one: one consensus of every read comes out
+    (pgphase's chr20:22,644,019-22,644,096 region, 57 reads of a GAG repeat; it read past the clusters before)."""
+    var reads = List[List[UInt8]]()
+    var anchors = List[Int]()
+    var strands = List[Int]()
+    with open("tests/data/collapsed_clusters/reads.txt", "r") as f:
+        for line in f.read().split("\n"):
+            if line.byte_length() == 0:
+                continue
+            var parts = line.split(":")
+            var seq = List[UInt8]()
+            for b in parts[0].as_bytes():
+                seq.append(b)
+            reads.append(seq^)
+            anchors.append(Int(parts[1]))
+            strands.append(Int(parts[2]))
+    var n = len(reads)
+    var options = _unpinned()
+    options.poa.scoring.match_score = 2
+    options.poa.scoring.mismatch = 6
+    options.poa.scoring.open1 = 6
+    options.poa.scoring.extend1 = 2
+    options.poa.scoring.open2 = 24
+    options.poa.scoring.extend2 = 1
+    options.two_lengths_db = 8.0
+    var got = clustered_consensus(reads^, anchors, strands, 2, Float64(Float32(0.12)), options)
+    assert_equal(len(got.consensus), 1)
+    assert_equal(len(got.placements), n)
+    for k in range(n):
+        assert_equal(got.placements[k].cluster, 0)
+
+
 def test_one_read_third_letter_does_not_hide_a_het() raises:
     # HG002 chr18:25,307,645, an A deleted from CATAGGGG: one MSA column tells the haplotypes apart, and one read
     # (another A after the G run) has a G there. Seeded at the furthest row alone, that read was the second mode and
