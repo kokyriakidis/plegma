@@ -40,6 +40,11 @@ build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan
 build-capi = { cmd = "mojo build --emit shared-lib -D ASSERT=none -I . -I deps/sporos -I deps/karan -Xlinker -rpath -Xlinker '$ORIGIN' capi/plegma_capi.mojo -o build/libplegma.so && bash capi/bundle_runtime.sh", depends-on = ["prepare"] }
 build-test-capi = { cmd = "c++ -std=c++17 -O2 -Icapi capi/test_capi.cpp -Lbuild -lplegma -Wl,-rpath,$PIXI_PROJECT_ROOT/build -pthread -o build/test_capi", depends-on = ["build-capi"] }
 test-capi = { cmd = "./build/test_capi", depends-on = ["build-test-capi"] }
+# The static library: build/libplegma.a, the C API with the Mojo runtime functions it calls (capi/build_static.sh),
+# for static executables; built for x86-64-v3 on x86-64 (PLEGMA_TARGET_CPU chooses another). Linux.
+build-static = { cmd = "bash capi/build_static.sh", depends-on = ["prepare"] }
+build-test-static = { cmd = "c++ -std=c++17 -O2 -static -Icapi capi/test_capi.cpp build/libplegma.a -pthread -o build/test_capi_static && mojo build --emit object -D ASSERT=none -I . -I deps/sporos -I deps/karan capi/test_static_parallel.mojo -o build/test_static_parallel.o && cc -O2 -static capi/test_static_parallel.c build/test_static_parallel.o build/plegma_static_runtime.o -lm -pthread -o build/test_static_parallel", depends-on = ["build-static"] }
+test-static = { cmd = "./build/test_capi_static && MALLOC_CHECK_=3 ./build/test_static_parallel", depends-on = ["build-test-static"] }
 test-python = { cmd = "python3 python/test_plegma.py", depends-on = ["build-capi"] }
 # Random inputs through every option combination, every output checked: `pixi run fuzz [cases] [seed]`.
 fuzz = { cmd = "python3 -I experiments/validate/fuzz.py build/plegma build/fuzz", depends-on = ["build-cli"] }

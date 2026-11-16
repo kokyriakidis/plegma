@@ -39,6 +39,7 @@ git clone --recurse-submodules https://github.com/kokyriakidis/plegma
 cd plegma
 pixi run build-cli    # the command line tool: build/plegma
 pixi run build-capi   # the shared library: build/libplegma.so (with the Mojo runtime beside it)
+pixi run build-static # the static library: build/libplegma.a (no Mojo runtime needed; Linux)
 ```
 
 ## Command line
@@ -141,6 +142,22 @@ target_link_libraries(mytool PRIVATE plegma::plegma)
 By hand: `-I<plegma>/capi -L<plegma>/build -lplegma -Wl,-rpath,<plegma>/build`. `build-capi` copies the Mojo runtime
 libraries beside `libplegma.so`, where it finds them by its run path (`$ORIGIN`), so `build/` alone is what a tool
 links against and ships: no pixi environment at run time, glibc 2.35 and libstdc++ of GCC 12 or newer.
+
+### Static library
+
+`pixi run build-static` builds `build/libplegma.a`, the same C API for static linking: a static executable
+(`-static`) or a shared library (the code is position independent), with no Mojo runtime at run time. Mojo's
+runtime only ships as shared libraries, so `capi/plegma_static_runtime.c` implements the 12 runtime functions the C
+API calls (memory, the profiling and stack trace hooks, and the CPU threads `parallelize` uses) with libc and
+pthreads. On x86-64 it is built for x86-64-v3 (AVX2), so it runs on machines other than the build machine;
+`PLEGMA_TARGET_CPU=native` (or another CPU) chooses otherwise. `pixi run test-static` runs the C API tests and a
+threaded test linked `-static`.
+
+```sh
+c++ -static -I<plegma>/capi mytool.cpp <plegma>/build/libplegma.a -pthread
+```
+
+With CMake, `plegma::static` in place of `plegma::plegma`.
 
 ### Python
 
