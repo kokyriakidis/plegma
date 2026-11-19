@@ -2,11 +2,13 @@
 caller asks for), each cluster's consensus polished against its own reads, and every read aligned to its cluster's.
 
 The clusters start as `cluster_rows` splits the spanning reads by the MSA columns where they disagree; then, as
-k-means does, each read goes to the consensus it aligns to more cheaply and each cluster's consensus is made again
+k-means does, each read goes to the consensus it differs from least (`MOVING_COSTS`: a substitution weighs more than
+a letter slipped in a run) and each cluster's consensus is made again
 from its reads, until no read moves. Two clusters stay apart only while each holds at least `min_freq` of the reads
-and their consensus sequences differ by more than one letter in a homopolymer run (`_apart_by_runs_alone`: the
+and their consensus sequences differ by more than homopolymer run lengths the reads fit as one (`_two_lengths`: the
 reads' length errors there split one haplotype's reads as readily as two haplotypes'), nor only by one unit of a
-short tandem repeat with the smaller under `MIN_UNIT_SPLIT_FREQ` of the reads. A read covering neither anchor
+short tandem repeat with the smaller under `MIN_UNIT_SPLIT_FREQ` of the reads. Every run two clusters differ by is
+set so, whatever else they differ by: one length in both where the reads fit one. A read covering neither anchor
 (`INSIDE`) builds no consensus; it is aligned inside the one it fits best.
 """
 
@@ -22,6 +24,17 @@ from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel, reads_
 from .kernel import BOTH, INSIDE, LEFT, RIGHT, Scoring
 from .poa import poa
 
+
+comptime RUN_PAIR_COSTS = Costs(4, 6, 2, -1, 0)
+"""`_run_pairs`'s alignment of two consensus sequences: gap-affine, a substitution 4, a gap of k letters 6 + 2k
+(WFA2-lib's default), so an indel of several letters stays one gap. It only finds the runs the two differ by (the
+records are written later, by the caller's alignment to its reference); minimap2's asm5 (40, 78 + 7k, 162 + 3k) kept
+more than karan's 80 MB of wavefronts on long pairs (HG002 chr20's VNTR regions)."""
+
+comptime MOVING_COSTS = Costs(5, 2, 1, -1, 0)
+"""The refinement's costs of a read against a consensus: a one-letter gap 3, a substitution 5, under the 6 of the
+insertion and deletion that would otherwise spell it (no costs weigh a substitution more than two one-letter gaps:
+the alignment then writes it as those two)."""
 
 comptime MAX_REFINEMENTS = 4
 """Rounds of moving reads to their nearest consensus, at most."""
@@ -159,7 +172,8 @@ def _apart_by_runs_alone(
             for k in range(count):
                 if b[j + k] != b[j]:
                     return False
-            if _run_at(b, j) < noise_run:
+            # As a deletion's: the run long enough even in `a` (else `a` against `b` and `b` against `a` disagree).
+            if _run_at(b, j) < noise_run or _run_at(b, j) - count < noise_run - 1:
                 return False
             # The letters `b` has more: `a`'s run of them beside the gap.
             if i < len(a) and a[i] == b[j]:
@@ -172,6 +186,77 @@ def _apart_by_runs_alone(
             j += count
         count = 0
     return True
+
+
+def _run_pairs(
+    mut aligner: Aligner, a: List[UInt8], b: List[UInt8], noise_run: Int, mut runs_a: List[Int], mut runs_b: List[Int]
+) raises:
+    """Every place `a` and `b` differ by letters added to or dropped from a run of one letter at least `noise_run`
+    long (as `_apart_by_runs_alone` counts them), whatever else they differ by: the run's start in `a` in `runs_a`
+    and the same run's start in `b` in `runs_b`, ascending, each run once. A run's length is decided apart from what
+    else the two differ by: a run length is the reads' commonest error wherever it lies, and two consensus sequences
+    apart by a short tandem repeat's units (or a SNP) beside a run kept each its own reads' run length untested
+    against both haplotypes' reads."""
+    runs_a.clear()
+    runs_b.clear()
+    if noise_run <= 0 or a == b:
+        return
+    # Gaps opened at a cost, so an indel of several letters stays one gap: at unit costs a repeat unit the two differ
+    # by can split into a letter dropped from a run beside the repeat and the rest further on (HG002 chr20:21,208,762,
+    # one TG of (TG)n: read as one T of the TTT before it and a G, both haplotypes then cut to TT).
+    var found = aligner.align(Span(a), Span(b), RUN_PAIR_COSTS, Mode.GLOBAL, ties=Ties.LEFT)
+    var i = 0  # in a
+    var j = 0  # in b
+    var count = 0
+    for c in found.cigar.as_bytes():
+        if c >= UInt8(ord("0")) and c <= UInt8(ord("9")):
+            count = count * 10 + Int(c - UInt8(ord("0")))
+            continue
+        if c == UInt8(ord("=")) or c == UInt8(ord("X")):
+            i += count
+            j += count
+        elif c == UInt8(ord("D")):
+            # Letters of `a`'s run `b` lacks, the run long enough even in `b`, and `b` holding that run beside the gap.
+            var one = True
+            for k in range(count):
+                one = one and a[i + k] == a[i]
+            var at_b = j if j < len(b) and b[j] == a[i] else (j - 1 if j > 0 and b[j - 1] == a[i] else -1)
+            if one and at_b >= 0:
+                _pair_runs(a, b, _run_start(a, i), _run_start(b, at_b), count, noise_run, runs_a, runs_b)
+            i += count
+        else:
+            var one = True
+            for k in range(count):
+                one = one and b[j + k] == b[j]
+            var at_a = i if i < len(a) and a[i] == b[j] else (i - 1 if i > 0 and a[i - 1] == b[j] else -1)
+            if one and at_a >= 0:
+                _pair_runs(a, b, _run_start(a, at_a), _run_start(b, j), count, noise_run, runs_a, runs_b)
+            j += count
+        count = 0
+
+
+def _pair_runs(
+    a: List[UInt8],
+    b: List[UInt8],
+    sa: Int,
+    sb: Int,
+    count: Int,
+    noise_run: Int,
+    mut runs_a: List[Int],
+    mut runs_b: List[Int],
+):
+    """`_run_pairs`'s test of one gap of `count` letters between `a`'s run at `sa` and `b`'s at `sb`: a pair only
+    where the two runs' lengths differ by the gap alone (a substitution in or beside a run pairs runs of different
+    extent: C TTTT G TTTT C against C T10 C would pair a T4 with the T10) and the longer is at least `noise_run`, the
+    shorter `noise_run - 1`, whichever of the two holds it (`a` against `b` as `b` against `a`); each run once."""
+    var la = _run_at(a, sa)
+    var lb = _run_at(b, sb)
+    if abs(la - lb) != count or max(la, lb) < noise_run or min(la, lb) < noise_run - 1:
+        return
+    if len(runs_a) > 0 and (runs_a[len(runs_a) - 1] == sa or runs_b[len(runs_b) - 1] == sb):
+        return
+    runs_a.append(sa)
+    runs_b.append(sb)
 
 
 def _one_unit_apart(a: List[UInt8], b: List[UInt8]) -> Bool:
@@ -199,53 +284,6 @@ def _one_unit_apart(a: List[UInt8], b: List[UInt8]) -> Bool:
         after = after and longer[i + p + k] == longer[i + k]
         before = before and longer[i - p + k] == longer[i + k]
     return after or before
-
-
-def _runs_in(a: List[UInt8], b: List[UInt8], runs: List[Int]) -> List[Int]:
-    """The length in `b` of each run of `a` starting at `runs` (ascending), `a` and `b` apart only at those runs: a
-    run of `b` starts where `a`'s does, shifted by the runs before it."""
-    var out = List[Int]()
-    var shift = 0
-    for s in runs:
-        var e = s
-        while e < len(a) and a[e] == a[s]:
-            e += 1
-        var f = s + shift
-        while f < len(b) and b[f] == a[s]:
-            f += 1
-        out.append(f - (s + shift))
-        shift += out[len(out) - 1] - (e - s)
-    return out^
-
-
-def _with_runs(
-    a: List[UInt8], b: List[UInt8], runs: List[Int], shorter: List[Int], longer: List[Int]
-) raises -> List[List[UInt8]]:
-    """`a` and `b`, apart only at the runs of `a` starting at `runs` (ascending), rebuilt from `a` with each such run
-    `shorter[k]` long in the one whose run there is shorter and `longer[k]` in the other."""
-    var in_b = _runs_in(a, b, runs)
-    var b_longer = List[Bool]()
-    for k in range(len(runs)):
-        b_longer.append(in_b[k] > _run_at(a, runs[k]))
-    var out = List[List[UInt8]]()
-    out.append(List[UInt8]())
-    out.append(List[UInt8]())
-    for side in range(2):
-        var at = 0
-        for k in range(len(runs)):
-            var s = runs[k]
-            var e = s
-            while e < len(a) and a[e] == a[s]:
-                e += 1
-            for i in range(at, s):
-                out[side].append(a[i])
-            var long_here = (side == 1) == b_longer[k]
-            for _ in range(longer[k] if long_here else shorter[k]):
-                out[side].append(a[s])
-            at = e
-        for i in range(at, len(a)):
-            out[side].append(a[i])
-    return out^
 
 
 def _run_start(seq: List[UInt8], i: Int) -> Int:
@@ -296,68 +334,89 @@ def _length_in(cigar: String, consensus_start: Int, letters: List[UInt8], s: Int
     return length if covered_left and covered_right else -1
 
 
+def _flanks(consensus: List[UInt8], s: Int, e: Int) -> Tuple[Int, Int]:
+    """The letters either side of `consensus`'s run `s ..< e` as the model codes them (`FLANK_UNKNOWN` at an end)."""
+    var left = Int(encode_base(consensus[s - 1])) if s > 0 else FLANK_UNKNOWN
+    var right = Int(encode_base(consensus[e])) if e < len(consensus) else FLANK_UNKNOWN
+    return (left if left <= 3 else FLANK_UNKNOWN, right if right <= 3 else FLANK_UNKNOWN)
+
+
 def _two_lengths(
     mut aligner: Aligner,
-    consensus: List[UInt8],
-    s: Int,
-    other: Int,
+    made: List[List[UInt8]],
+    starts: List[Int],
+    groups: List[List[Int]],
     seqs: List[List[UInt8]],
-    reads: List[Int],
     anchors: List[Int],
     strands: List[Int],
     model: HomopolymerModel,
     mut shorter: Int,
     mut longer: Int,
+    mut single: Int,
+    mut said: List[List[Int]],
 ) raises -> Float64:
-    """How much better two true lengths of the run at `s` explain the reads' lengths there than one, under `model`:
-    the log likelihood ratio in dB, each read under two from either length with probability a half; the two lengths
-    in `shorter` and `longer`, searched from 4 under the shorter of the run's length and `other` (the other
-    cluster's) to 4 over the longer. All the reads together, not each cluster's: clusters split by the run's length
-    hold the reads biased apart. Where the model does not reach that far (a run longer than its rows), it cannot say:
-    the two lengths the clusters have, apart (`Float64.MAX`) when they differ by more than a letter, as without a
-    model, else one (`-Float64.MAX`)."""
-    var e = s
-    while e < len(consensus) and consensus[e] == consensus[s]:
-        e += 1
-    var base = Int(encode_base(consensus[s]))
-    if base > 3:
-        return -Float64.MAX
-    var left = Int(encode_base(consensus[s - 1])) if s > 0 else FLANK_UNKNOWN
-    var right = Int(encode_base(consensus[e])) if e < len(consensus) else FLANK_UNKNOWN
-    left = left if left <= 3 else FLANK_UNKNOWN
-    right = right if right <= 3 else FLANK_UNKNOWN
+    """How much better two true lengths of one run explain the reads' lengths there than one, under `model`: the
+    log likelihood ratio in dB, each read under two from either length with probability a half. The run starts at
+    `starts[k]` in `made[k]` (k 0 and 1, the two clusters' consensus sequences), and each cluster's reads
+    (`groups[k]`) are measured on their own consensus, with its flanks: the two may differ beside the run. The two
+    lengths in `shorter` and `longer`, the one in `single` (-1 where the model cannot say), searched from 4 under the
+    shorter of the two clusters' lengths to 4 over the longer; each cluster's reads' lengths in `said[k]` (-1 none).
+    All the reads together, not each cluster's: clusters split by the run's length hold the reads biased apart.
+    Where the model does not reach that far (a run longer than its rows), it cannot say: the two lengths the
+    clusters have, apart (`Float64.MAX`) when they differ by more than a letter, as without a model, else one
+    (`-Float64.MAX`)."""
+    single = -1
+    var base = Int(encode_base(made[0][starts[0]]))
+    var run_length = List[Int]()
     var lengths = List[Int]()
     var on = List[Int]()
-    for r in reads:
-        var found = aligner.align(Span(consensus), Span(seqs[r]), Costs.edit(), _mode(anchors[r]), ties=Ties.LEFT)
-        var m = _length_in(found.cigar, found.reference_start, seqs[r], s, e, consensus[s])
-        if m >= 0:
-            lengths.append(m)
-            on.append(strands[r])
-    if len(lengths) < 2:
+    var lefts = List[Int]()
+    var rights = List[Int]()
+    said.clear()
+    for k in range(2):
+        var s = starts[k]
+        var e = s
+        while e < len(made[k]) and made[k][e] == made[k][s]:
+            e += 1
+        run_length.append(e - s)
+        var f = _flanks(made[k], s, e)
+        var mine = List[Int]()
+        for r in groups[k]:
+            var found = aligner.align(Span(made[k]), Span(seqs[r]), Costs.edit(), _mode(anchors[r]), ties=Ties.LEFT)
+            var m = _length_in(found.cigar, found.reference_start, seqs[r], s, e, made[k][s])
+            mine.append(m)
+            if m >= 0:
+                lengths.append(m)
+                on.append(strands[r])
+                lefts.append(f[0])
+                rights.append(f[1])
+        said.append(mine^)
+    if base > 3 or len(lengths) < 2:
         return -Float64.MAX
-    var n0 = e - s
-    var low = max(2, min(n0, other) - 4)
-    var high = max(n0, other) + 4
+    var low = max(2, min(run_length[0], run_length[1]) - 4)
+    var high = max(run_length[0], run_length[1]) + 4
     if not model.covers(base, high):
-        shorter = min(n0, other)
-        longer = max(n0, other)
+        shorter = min(run_length[0], run_length[1])
+        longer = max(run_length[0], run_length[1])
         return Float64.MAX if longer - shorter > 1 else -Float64.MAX
     var one = -Float64.MAX
     for n in range(low, high + 1):
         var total = 0.0
         for k in range(len(lengths)):
-            total += model.log_probability(base, left, right, n, lengths[k], on[k])
-        one = max(one, total)
+            total += model.log_probability(base, lefts[k], rights[k], n, lengths[k], on[k])
+        # Ties to the longer: reads lose letters in runs.
+        if total >= one:
+            one = total
+            single = n
     var two = -Float64.MAX
-    shorter = n0
-    longer = n0 + 1
+    shorter = run_length[0]
+    longer = run_length[0] + 1
     for n1 in range(low, high + 1):
         for n2 in range(n1 + 1, high + 1):
             var total = 0.0
             for k in range(len(lengths)):
-                var x = model.log_probability(base, left, right, n1, lengths[k], on[k])
-                var y = model.log_probability(base, left, right, n2, lengths[k], on[k])
+                var x = model.log_probability(base, lefts[k], rights[k], n1, lengths[k], on[k])
+                var y = model.log_probability(base, lefts[k], rights[k], n2, lengths[k], on[k])
                 var top = max(x, y)
                 total += top + 10.0 * log10(0.5 * 10.0 ** ((x - top) / 10.0) + 0.5 * 10.0 ** ((y - top) / 10.0))
             if total > two:
@@ -453,6 +512,12 @@ def clustered_consensus(
     if len(groups) <= 1:
         groups = [builders.copy()]
     var costs = alignment_costs(options.poa.scoring)
+    # A read moves to the consensus it differs from least, a substitution weighing more than a letter slipped in a run
+    # (reads slip in runs far more often than they misread a letter), as the first split weighs them. At the
+    # scoring's costs a gap letter cost more than a mismatch, so reads moved by their run lengths, not by a SNP's
+    # letter: HG002 chr20:56,892,630, G in a poly-T on 28 of 62 reads: the G cluster came to hold one T-run length's
+    # reads instead, its consensus lost the G, and the two merged as apart by a run alone (written G on both).
+    var moving = MOVING_COSTS
     var aligner = Aligner(warm=False)
     var made = List[List[UInt8]]()
     for g in groups:
@@ -468,11 +533,11 @@ def clustered_consensus(
             var next = List[List[Int]](length=len(made), fill=List[Int]())
             for r in builders:
                 var best = label[r] if label[r] >= 0 else 0
-                var best_cost = _aligned(aligner, made[best], seqs[r], build_anchor[r], costs).cost
+                var best_cost = _aligned(aligner, made[best], seqs[r], build_anchor[r], moving).cost
                 for k in range(len(made)):
                     if k == best:
                         continue
-                    var cost = _aligned(aligner, made[k], seqs[r], build_anchor[r], costs).cost
+                    var cost = _aligned(aligner, made[k], seqs[r], build_anchor[r], moving).cost
                     if cost < best_cost:
                         best = k
                         best_cost = cost
@@ -489,6 +554,9 @@ def clustered_consensus(
                 groups = kept^
                 if len(groups) <= 1:
                     break
+                # Every label again: the dropped cluster's reads kept its number, past the clusters left (or another's).
+                for r in builders:
+                    label[r] = -1
                 for k in range(len(groups)):
                     for r in groups[k]:
                         label[r] = k
@@ -502,9 +570,29 @@ def clustered_consensus(
             made.clear()
             for g in groups:
                 made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
+        # A read of a cluster dropped in the last round joins the consensus it differs from least.
+        if len(groups) >= 2:
+            var placed = List[Bool](length=n, fill=False)
+            for g in groups:
+                for r in g:
+                    placed[r] = True
+            for r in builders:
+                if placed[r]:
+                    continue
+                var best = 0
+                var best_cost = _aligned(aligner, made[0], seqs[r], build_anchor[r], moving).cost
+                for k in range(1, len(made)):
+                    var cost = _aligned(aligner, made[k], seqs[r], build_anchor[r], moving).cost
+                    if cost < best_cost:
+                        best = k
+                        best_cost = cost
+                groups[best].append(r)
         # Clusters spelling the same consensus are one; so are clusters apart only by homopolymer lengths, unless a
         # homopolymer model finds two lengths at one of those runs (`options.two_lengths_db`).
-        var distinct = True
+        # Each pair that is one joins (`root`: union of clusters); with two clusters, as one flag.
+        var root = List[Int]()
+        for k in range(len(groups)):
+            root.append(k)
         var runs = List[Int]()
         var single = True
         # Over the clusters still standing: a refinement that leaves one stops with `made` as it was (the two
@@ -512,53 +600,123 @@ def clustered_consensus(
         for a in range(len(groups)):
             for b in range(a + 1, len(groups)):
                 if made[a] == made[b]:
-                    distinct = False
+                    _join(root, a, b)
                 elif _one_unit_apart(made[a], made[b]) and Float64(
                     min(len(groups[a]), len(groups[b]))
                 ) < MIN_UNIT_SPLIT_FREQ * Float64(len(builders)):
-                    distinct = False
-                elif _apart_by_runs_alone(aligner, made[a], made[b], options.noise_run, runs, single):
-                    # With a model: kept apart where it finds two lengths at one of the runs, then every differing run
-                    # at the two lengths all the reads fit, the cluster with the shorter run the shorter. Without:
-                    # apart unless every difference is a single letter.
-                    var two = not single
-                    if homopolymers.loaded():
-                        two = False
-                        var short_of = List[Int]()
-                        var long_of = List[Int]()
-                        var in_b = _runs_in(made[a], made[b], runs)
-                        for k in range(len(runs)):
-                            var n1 = 0
-                            var n2 = 0
-                            var gain = _two_lengths(
-                                aligner,
-                                made[a],
-                                runs[k],
-                                in_b[k],
-                                seqs,
-                                builders,
-                                build_anchor,
-                                strand_of,
-                                homopolymers,
-                                n1,
-                                n2,
-                            )
-                            two = two or gain > options.two_lengths_db
-                            short_of.append(n1)
-                            long_of.append(n2)
-                        if two:
-                            var fitted = _with_runs(made[a], made[b], runs, short_of, long_of)
-                            made[a] = fitted[0].copy()
-                            made[b] = fitted[1].copy()
-                    distinct = distinct and two
-        if len(groups) <= 1 or not distinct:
+                    _join(root, a, b)
+                else:
+                    var only_runs = _apart_by_runs_alone(aligner, made[a], made[b], options.noise_run, runs, single)
+                    if not homopolymers.loaded():
+                        # Without a model: apart unless every difference is a single letter of a run.
+                        if only_runs and single:
+                            _join(root, a, b)
+                        continue
+                    # With a model, each run the two differ by, whatever else they differ by: two lengths where all
+                    # the reads fit two better than one (`_two_lengths`), the cluster with the shorter run the
+                    # shorter, else the one length in both. Clusters apart by runs alone stay apart only where a
+                    # run has two. One run's two lengths no longer make every other run two (each was fitted to
+                    # the pair it found), nor does another difference spare a run the test.
+                    var runs_a = List[Int]()
+                    var runs_b = List[Int]()
+                    _run_pairs(aligner, made[a], made[b], options.noise_run, runs_a, runs_b)
+                    var set_a = List[Int]()
+                    var set_b = List[Int]()
+                    var two = False
+                    var pair = List[List[UInt8]]()
+                    pair.append(made[a].copy())
+                    pair.append(made[b].copy())
+                    var pair_groups = List[List[Int]]()
+                    pair_groups.append(groups[a].copy())
+                    pair_groups.append(groups[b].copy())
+                    for k in range(len(runs_a)):
+                        var len_a = _run_at(made[a], runs_a[k])
+                        var len_b = _run_at(made[b], runs_b[k])
+                        var n1 = 0
+                        var n2 = 0
+                        var one = -1
+                        var said = List[List[Int]]()
+                        var starts = List[Int]()
+                        starts.append(runs_a[k])
+                        starts.append(runs_b[k])
+                        var gain = _two_lengths(
+                            aligner,
+                            pair,
+                            starts,
+                            pair_groups,
+                            seqs,
+                            build_anchor,
+                            strand_of,
+                            homopolymers,
+                            n1,
+                            n2,
+                            one,
+                            said,
+                        )
+                        if gain > options.two_lengths_db:
+                            two = True
+                            set_a.append(n1 if len_a < len_b else n2)
+                            set_b.append(n2 if len_a < len_b else n1)
+                        elif one > 0:
+                            set_a.append(one)
+                            set_b.append(one)
+                        else:
+                            set_a.append(len_a)
+                            set_b.append(len_b)
+                        # A cluster whose reads report the letter once there has no run, as in `phased_consensus`:
+                        # the search starts at 2.
+                        if len(said) == 2 and reads_say_one(said[0]):
+                            set_a[k] = 1
+                        if len(said) == 2 and reads_say_one(said[1]):
+                            set_b[k] = 1
+                    made[a] = _set_runs(made[a].copy(), runs_a, set_a)
+                    made[b] = _set_runs(made[b].copy(), runs_b, set_b)
+                    if (only_runs and not two) or made[a] == made[b]:
+                        _join(root, a, b)
+        # The clusters joined made one again from their reads; with every cluster one, the consensus of every read.
+        # One flag for all pairs made three clusters one wherever two of them were (a third haplotype's lost).
+        var merged = List[List[Int]]()
+        var made_merged = List[List[UInt8]]()
+        for k in range(len(groups)):
+            if _root(root, k) != k:
+                continue
+            var members = List[Int]()
+            var parts = 0
+            for j in range(len(groups)):
+                if _root(root, j) == k:
+                    members.extend(groups[j].copy())
+                    parts += 1
+            made_merged.append(
+                made[k].copy() if parts
+                == 1 else _consensus_of(seqs, members, build_anchor, strand_of, options, homopolymers)
+            )
+            merged.append(members^)
+        if len(groups) <= 1 or len(merged) <= 1:
             groups = [builders.copy()]
             made = [_consensus_of(seqs, builders, build_anchor, strand_of, options, homopolymers)]
+        else:
+            groups = merged^
+            made = made_merged^
     var cluster_of = List[Int](length=n, fill=-1)
     for k in range(len(groups)):
         for r in groups[k]:
             cluster_of[r] = k
     return _placed(aligner, made^, seqs, cluster_of, anchor_of, costs)
+
+
+def _root(root: List[Int], k: Int) -> Int:
+    var r = k
+    while root[r] != r:
+        r = root[r]
+    return r
+
+
+def _join(mut root: List[Int], a: Int, b: Int):
+    """Clusters `a` and `b` one (`root`: each cluster's parent, a root its own)."""
+    var ra = _root(root, a)
+    var rb = _root(root, b)
+    if ra != rb:
+        root[max(ra, rb)] = min(ra, rb)
 
 
 def _placed(
@@ -662,6 +820,41 @@ def _best_length(
                 continue
             any = True
             total += model.log_probability(base, left, right, n, lengths[k], strands[reads[k]])
+        if any and total >= score:
+            score = total
+            best = n
+    return best
+
+
+def _best_shared_length(
+    model: HomopolymerModel,
+    base: Int,
+    flanks0: Tuple[Int, Int],
+    flanks1: Tuple[Int, Int],
+    lengths0: List[Int],
+    lengths1: List[Int],
+    strands: List[Int],
+    reads0: List[Int],
+    reads1: List[Int],
+    low: Int,
+    high: Int,
+    mut score: Float64,
+) -> Int:
+    """`_best_length` over two haplotypes' reads together, each read scored with its own haplotype's flanks: the one
+    length both share most likely, its log likelihood in dB in `score` (ties to the longer); -1 with no read."""
+    var best = -1
+    score = -Float64.MAX
+    for n in range(low, high + 1):
+        var total = 0.0
+        var any = False
+        for k in range(len(reads0)):
+            if lengths0[k] >= 0:
+                any = True
+                total += model.log_probability(base, flanks0[0], flanks0[1], n, lengths0[k], strands[reads0[k]])
+        for k in range(len(reads1)):
+            if lengths1[k] >= 0:
+                any = True
+                total += model.log_probability(base, flanks1[0], flanks1[1], n, lengths1[k], strands[reads1[k]])
         if any and total >= score:
             score = total
             best = n
@@ -950,10 +1143,10 @@ def phased_consensus(
     (see `clustered_consensus`). A read of neither builds as well: made first from the labelled reads, the two are
     made again with each such read on the haplotype whose letters it carries where they differ, on both where it
     covers no such place, on neither where it carries as many of each (`_sides`); it is then placed where it fits
-    best. Where the two differ only by the lengths of runs of one
-    letter and a homopolymer model is loaded, each such run is decided on both haplotypes' reads together: their own
-    lengths for the two only when that explains the reads `options.two_lengths_db` better than one length for both, else that
-    one length in both (a run is far more often the same on the two haplotypes than not). Two clusters always, the
+    best. Where the two differ by the length of a run of one letter and a homopolymer model is loaded, each such run
+    is decided on both haplotypes' reads together, whatever else the two differ by: their own lengths for the two only
+    when that explains the reads `options.two_lengths_db` better than one length for both, else that one length in
+    both (a run is far more often the same on the two haplotypes than not). Two clusters always, the
     second's consensus the first's when no read is on haplotype 1."""
     var n = len(seqs)
     if len(haplotypes) != n:
@@ -1010,56 +1203,70 @@ def phased_consensus(
         for k in range(2):
             if grew[k]:
                 made[k] = _consensus_of(seqs, groups[k], anchor_of, strand_of, options, homopolymers)
-    var runs = List[Int]()
-    var single = True
-    if (
-        homopolymers.loaded()
-        and made[0] != made[1]
-        and _apart_by_runs_alone(aligner, made[0], made[1], max(options.noise_run, 2), runs, single)
-    ):
-        var both = groups[0].copy()
-        both.extend(groups[1].copy())
+    # Each run the two differ by is decided on both haplotypes' reads together, whatever else the two differ by.
+    var runs0 = List[Int]()
+    var runs1 = List[Int]()
+    if homopolymers.loaded() and made[0] != made[1]:
+        _run_pairs(aligner, made[0], made[1], max(options.noise_run, 2), runs0, runs1)
+    if len(runs0) > 0:
         var first = List[Int]()
         var second = List[Int]()
         var lengths0 = List[Int]()
         var lengths1 = List[Int]()
-        var in_1 = _runs_in(made[0], made[1], runs)
-        for k in range(len(runs)):
-            var s = runs[k]
+        for k in range(len(runs0)):
+            var s = runs0[k]
             var e = s
             while e < len(made[0]) and made[0][e] == made[0][s]:
                 e += 1
+            var s1 = runs1[k]
+            var e1 = s1
+            while e1 < len(made[1]) and made[1][e1] == made[1][s1]:
+                e1 += 1
             var base = Int(encode_base(made[0][s]))
-            var left = Int(encode_base(made[0][s - 1])) if s > 0 else FLANK_UNKNOWN
-            var right = Int(encode_base(made[0][e])) if e < len(made[0]) else FLANK_UNKNOWN
-            left = left if left <= 3 else FLANK_UNKNOWN
-            right = right if right <= 3 else FLANK_UNKNOWN
+            # Each haplotype's reads scored with its own consensus's flanks: the two may differ beside the run.
+            var flanks0 = _flanks(made[0], s, e)
+            var flanks1 = _flanks(made[1], s1, e1)
             # From 4 under the shorter of the two haplotypes' lengths to 4 over the longer: they may be far apart.
-            var low = max(2, min(e - s, in_1[k]) - 4)
-            var high = max(e - s, in_1[k]) + 4
+            var low = max(2, min(e - s, e1 - s1) - 4)
+            var high = max(e - s, e1 - s1) + 4
             if not homopolymers.covers(base, high):
                 # A run longer than the model's rows: it cannot say, so each haplotype keeps its own consensus's
                 # length (searched within the rows alone, both came out at the longest row: T59 as T50).
                 first.append(e - s)
-                second.append(in_1[k])
+                second.append(e1 - s1)
                 continue
+            # Each haplotype's reads measured on its own consensus: the two may differ beside the run.
             _read_lengths(aligner, made[0], s, e, seqs, groups[0], anchor_of, lengths0)
-            _read_lengths(aligner, made[0], s, e, seqs, groups[1], anchor_of, lengths1)
-            var lengths = lengths0.copy()
-            lengths.extend(lengths1.copy())
+            _read_lengths(aligner, made[1], s1, e1, seqs, groups[1], anchor_of, lengths1)
             var shared_score = 0.0
             var score0 = 0.0
             var score1 = 0.0
-            var shared = _best_length(
-                homopolymers, base, left, right, lengths, strand_of, both, low, high, shared_score
+            var shared = _best_shared_length(
+                homopolymers,
+                base,
+                flanks0,
+                flanks1,
+                lengths0,
+                lengths1,
+                strand_of,
+                groups[0],
+                groups[1],
+                low,
+                high,
+                shared_score,
             )
-            var own0 = _best_length(homopolymers, base, left, right, lengths0, strand_of, groups[0], low, high, score0)
-            var own1 = _best_length(homopolymers, base, left, right, lengths1, strand_of, groups[1], low, high, score1)
+            var own0 = _best_length(
+                homopolymers, base, flanks0[0], flanks0[1], lengths0, strand_of, groups[0], low, high, score0
+            )
+            var own1 = _best_length(
+                homopolymers, base, flanks1[0], flanks1[1], lengths1, strand_of, groups[1], low, high, score1
+            )
             if shared < 0 or own0 < 0 or own1 < 0:
                 # Too few reads to say: as the two consensus sequences have it.
-                first.append(-1)
-                second.append(-1)
-            elif score0 + score1 - shared_score > options.two_lengths_db:
+                first.append(e - s)
+                second.append(e1 - s1)
+                continue
+            if score0 + score1 - shared_score > options.two_lengths_db:
                 first.append(own0)
                 second.append(own1)
             else:
@@ -1067,16 +1274,12 @@ def phased_consensus(
                 second.append(shared)
             # A haplotype whose reads report the letter once there has no run (`reads_say_one`): the search above
             # starts at 2 (chr20:8,254,476, 42 reads T against the other haplotype's 26 TTT: written TT, the truth T).
-            if first[k] >= 0 and reads_say_one(lengths0):
+            if reads_say_one(lengths0):
                 first[k] = 1
-            if second[k] >= 0 and reads_say_one(lengths1):
+            if reads_say_one(lengths1):
                 second[k] = 1
-        # Both rebuilt from the first (the two differ only at these runs), unless a run had too few reads to say.
-        var decided = True
-        for k in range(len(runs)):
-            decided = decided and first[k] >= 0
-        if decided:
-            var a = made[0].copy()
-            made[0] = _set_runs(a, runs, first)
-            made[1] = _set_runs(a, runs, second)
+        var a = made[0].copy()
+        var b = made[1].copy()
+        made[0] = _set_runs(a, runs0, first)
+        made[1] = _set_runs(b, runs1, second)
     return _placed(aligner, made^, seqs, cluster_of, anchor_of, alignment_costs(options.poa.scoring))

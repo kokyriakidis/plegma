@@ -5,7 +5,7 @@ from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 from karan import distance
 
 from karan import Aligner, Costs, Mode, Ties
-from plegma.clustered import _haplotype_at, clustered_consensus, phased_consensus
+from plegma.clustered import _haplotype_at, _run_pairs, clustered_consensus, phased_consensus
 from plegma.consensus import ConsensusOptions, consensus
 from plegma.homopolymer import HomopolymerModel
 from plegma.kernel import BOTH, INSIDE, LEFT, RIGHT
@@ -569,6 +569,84 @@ def test_a_haplotype_inside_a_read_has_each_letters_read_letter() raises:
     at = _haplotype_at(aligner.align(Span(longer), Span(haplotype), Costs.edit(), Mode.INFIX, ties=Ties.LEFT))
     for p in range(len(haplotype) + 1):
         assert_equal(at[p], 4 + p + (1 if p >= 8 else 0), String(t"letter {p}"))
+
+
+def _pgphase_options() -> ConsensusOptions:
+    """pgphase's plegma options for its MSA regions (msa.mojo `_options`): unpinned, its scoring."""
+    var options = _unpinned()
+    options.poa.scoring.match_score = 2
+    options.poa.scoring.mismatch = 6
+    options.poa.scoring.open1 = 6
+    options.poa.scoring.extend1 = 2
+    options.poa.scoring.open2 = 24
+    options.poa.scoring.extend2 = 1
+    options.two_lengths_db = 8.0
+    return options^
+
+
+def test_a_snp_in_a_run_keeps_its_reads() raises:
+    """HG002 chr20:56,892,617-56,892,658 (a pgphase region no read's phase set held): a G at a poly-T's start on 28 of
+    62 reads, the run a letter or two short or long on many. Moved by alignment cost at the scoring's costs (a gap
+    letter dearer than a mismatch), reads went to the consensus of their run length: the G cluster's consensus lost
+    its G, the two were apart by a run alone and merged, the G written on both. Moved as the first split weighs
+    differences, the 28 stay together."""
+    var reads = List[List[UInt8]]()
+    var anchors = List[Int]()
+    var strands = List[Int]()
+    with open("tests/data/snp_in_run/reads.txt", "r") as f:
+        for line in f.read().split("\n"):
+            if line.byte_length() == 0:
+                continue
+            var parts = line.split(":")
+            var seq = List[UInt8]()
+            for b in parts[0].as_bytes():
+                seq.append(b)
+            reads.append(seq^)
+            anchors.append(Int(parts[1]))
+            strands.append(Int(parts[2]))
+    var with_g = 0
+    for r in reads:
+        with_g += Int("CCTTG" in _text(r))
+    assert_equal(with_g, 28)
+    var got = clustered_consensus(reads^, anchors, strands, 2, Float64(Float32(0.12)), _pgphase_options())
+    assert_equal(len(got.consensus), 2)
+    var g = 0 if "CCTTG" in _text(got.consensus[0]) else 1
+    assert_true("CCTTG" in _text(got.consensus[g]), _text(got.consensus[g]))
+    assert_true(not ("CCTTG" in _text(got.consensus[1 - g])), _text(got.consensus[1 - g]))
+    assert_true(len(got.members[g]) >= 26, String(t"{len(got.members[g])} reads with the G"))
+
+
+def _pairs(a: String, b: String) raises -> List[Tuple[Int, Int]]:
+    var aligner = Aligner()
+    var runs_a = List[Int]()
+    var runs_b = List[Int]()
+    _run_pairs(aligner, List[UInt8](a.as_bytes()), List[UInt8](b.as_bytes()), 3, runs_a, runs_b)
+    var out = List[Tuple[Int, Int]]()
+    for k in range(len(runs_a)):
+        out.append((runs_a[k], runs_b[k]))
+    return out^
+
+
+def test_run_pairs_finds_each_run_difference_and_only_those() raises:
+    # A run a letter apart: the run's start in each.
+    var one = _pairs("ACGTTTTTTACG", "ACGTTTTTACG")
+    assert_equal(len(one), 1)
+    assert_equal(one[0][0], 3)
+    assert_equal(one[0][1], 3)
+    # Beside a SNP elsewhere, the run is still found (the two apart by more than runs).
+    var with_snp = _pairs("ACCGTTTTTTAGC", "ACAGTTTTTAGC")
+    assert_equal(len(with_snp), 1)
+    assert_equal(with_snp[0][0], 4)
+    # One unit of a (TG)n apart: no run (HG002 chr20:21,208,762; at unit costs the unit split into a T of the TTT
+    # before the repeat and a G, and that T read as a run's letter).
+    var unit = _pairs("CTCCTGGAATTTGTGTGTGTGTGTGTGTGTGGCAGCAG", "CTCCTGGAATTTGTGTGTGTGTGTGTGTGGCAGCAG")
+    assert_equal(len(unit), 0)
+    # A substitution splitting a run: no pair of runs whose lengths differ by more than the gap.
+    var split = _pairs("CTTTTGTTTTC", "CTTTTTTTTTTC")
+    assert_equal(len(split), 0)
+    # Either way round: a one-letter run against three is no run difference (the shorter under noise_run - 1).
+    assert_equal(len(_pairs("ACTGA", "ACTTTGA")), 0)
+    assert_equal(len(_pairs("ACTTTGA", "ACTGA")), 0)
 
 
 def main() raises:

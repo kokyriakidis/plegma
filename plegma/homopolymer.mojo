@@ -34,9 +34,14 @@ def reads_say_one(lengths: List[Int]) -> Bool:
     """Whether the reads' lengths of a run, at least `ONE_LETTER_READS` of them, put it one letter long at their lower
     median: no run. The model holds no rows under 2, so `most_likely` cannot say 1 and a search over its rows makes the
     run 2 long (HG002 chr20:8,254,476, 42 reads T, written TT); HiFi reads report 1 for a true 2 at 5 in 10,000."""
-    if len(lengths) < ONE_LETTER_READS:
+    # Reads with no length there (-1: they stop short of the run, or hold another letter in it) do not vote: counted,
+    # they made a run most reads give 3 one letter long (-1, -1, 1, 1, 3, 3, 3: lower median 1).
+    var sorted_lengths = List[Int]()
+    for m in lengths:
+        if m >= 0:
+            sorted_lengths.append(m)
+    if len(sorted_lengths) < ONE_LETTER_READS:
         return False
-    var sorted_lengths = lengths.copy()
     sort(sorted_lengths)
     return sorted_lengths[(len(sorted_lengths) - 1) // 2] == 1
 
@@ -388,7 +393,7 @@ struct HomopolymerModel(Copyable, Movable):
             var rows = self.by_n.unsafe_ptr()
             for k in range(len(lengths)):
                 var row = rows.unsafe_offset(
-                    self._by_n(base, strands[k], left, right, min(lengths[k], self.m_count - 1))
+                    self._by_n(base, strands[k], left, right, min(max(lengths[k], 0), self.m_count - 1))
                 )
                 var n = 0
                 while n < self.n_pad:
@@ -414,7 +419,7 @@ struct HomopolymerModel(Copyable, Movable):
             if at0 < 0 or at1 < 0:
                 continue
             for k in range(len(lengths)):
-                var m = min(lengths[k], self.m_count - 1)
+                var m = min(max(lengths[k], 0), self.m_count - 1)
                 if strands[k] == 0:
                     score += self.table[at0 + m]
                 elif strands[k] == 1:

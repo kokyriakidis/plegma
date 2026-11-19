@@ -2,7 +2,7 @@ from std.math import log10
 from std.random import random_ui64, seed
 from std.testing import assert_equal, assert_true, TestSuite
 
-from plegma.homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel
+from plegma.homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from plegma.polish import polish
 
 comptime PATH = "build/test_homopolymer.csv"
@@ -78,6 +78,20 @@ def test_polish_takes_the_runs_most_likely_length() raises:
     assert_true(plain == short)
     var modelled = polish(short, reads, members, 50, likely_rounds=0, homopolymers=model, strands=strands)
     assert_true(modelled == truth)
+
+
+def test_reads_say_one_counts_only_reads_with_a_length() raises:
+    # Reads with no length there (-1) do not vote: counted, they took the lower median to 1.
+    assert_true(not reads_say_one(_lengths("-1,-1,1,1,3,3,3")))
+    assert_true(reads_say_one(_lengths("1,1,1,-1,-1,-1,-1")))
+    assert_true(not reads_say_one(_lengths("1,1,-1,-1")))
+
+
+def _lengths(text: String) raises -> List[Int]:
+    var out = List[Int]()
+    for word in text.split(","):
+        out.append(Int(word))
+    return out^
 
 
 def main() raises:
