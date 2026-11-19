@@ -5,7 +5,7 @@ from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 from karan import distance
 
 from karan import Aligner, Costs, Mode, Ties
-from plegma.clustered import _haplotype_at, _run_pairs, clustered_consensus, phased_consensus
+from plegma.clustered import _haplotype_at, _length_in, _run_pairs, clustered_consensus, phased_consensus
 from plegma.consensus import ConsensusOptions, consensus
 from plegma.homopolymer import HomopolymerModel
 from plegma.kernel import BOTH, INSIDE, LEFT, RIGHT
@@ -647,6 +647,60 @@ def test_run_pairs_finds_each_run_difference_and_only_those() raises:
     # Either way round: a one-letter run against three is no run difference (the shorter under noise_run - 1).
     assert_equal(len(_pairs("ACTGA", "ACTTTGA")), 0)
     assert_equal(len(_pairs("ACTTTGA", "ACTGA")), 0)
+    # One gap at the meeting of two runs (AAAA TTTT against AAA TTT: the alignment's one gap AT) is a letter of each.
+    var junction = _pairs("CAAAATTTTG", "CAAATTTG")
+    assert_equal(len(junction), 2)
+    assert_equal(junction[0][0], 1)
+    assert_equal(junction[1][0], 5)
+    assert_equal(junction[1][1], 4)
+    var aligner = Aligner()
+    var ra = List[Int]()
+    var rb = List[Int]()
+    assert_true(
+        _run_pairs(aligner, List[UInt8]("CAAAATTTTG".as_bytes()), List[UInt8]("CAAATTTG".as_bytes()), 3, ra, rb)
+    )
+    assert_true(
+        not _run_pairs(
+            aligner, List[UInt8]("CCGTTTTTTAGC".as_bytes()), List[UInt8]("CAGTTTTTAGC".as_bytes()), 3, ra, rb
+        )
+    )
+
+
+def test_run_pairs_of_sequences_too_far_apart_is_none() raises:
+    # Two haplotypes kilobases apart (a VNTR expansion, alleles hundreds of edits apart): an alignment past the
+    # aligner's memory is no runs, not an error out of the consensus.
+    seed(7)
+    var a = _random(20000)
+    var b = List[UInt8]()
+    for k in range(len(a)):
+        if k >= 6000 and k < 11000:
+            continue
+        b.append(a[k] if k % 50 != 0 else (UInt8(ord("A")) if a[k] != UInt8(ord("A")) else UInt8(ord("C"))))
+    var aligner = Aligner()
+    var ra = List[Int]()
+    var rb = List[Int]()
+    _ = _run_pairs(aligner, a, b, 3, ra, rb)
+
+
+def _measured(cons: String, rd: String, s: Int, e: Int) raises -> Int:
+    var c = List[UInt8](cons.as_bytes())
+    var r = List[UInt8](rd.as_bytes())
+    var aligner = Aligner()
+    var found = aligner.align(Span(c), Span(r), Costs.edit(), Mode.GLOBAL, ties=Ties.LEFT)
+    return _length_in(found.cigar, found.reference_start, r, s, e, c[s], c)
+
+
+def test_a_read_run_is_its_own_between_the_flank_letters() raises:
+    assert_equal(_measured("CGTAAAATGC", "CGTAAAAATGC", 3, 7), 5)
+    assert_equal(_measured("CGTAAAATGC", "CGTAAATGC", 3, 7), 3)
+    # A repeat unit's gap placed leftmost takes the run's last letter: the read's own run is still A4.
+    assert_equal(_measured("CAAAATATATAG", "CAAAATATAG", 1, 5), 4)
+    assert_equal(_measured("CAAAATATATAG", "CAAATATAG", 1, 5), 3)
+    # Another letter inside the run: no vote.
+    assert_equal(_measured("CGTAAAATGC", "CGTAAGAATGC", 3, 7), -1)
+    # A read without the letter between two runs of one letter: its run ends at another letter than the flank's.
+    assert_equal(_measured("GATTTTCTTTTTTGA", "GATTTTTTTTTTGA", 2, 6), -1)
+    assert_equal(_measured("GATTTTCTTTTTTGA", "GATTTTTTTTTTGA", 7, 13), -1)
 
 
 def main() raises:

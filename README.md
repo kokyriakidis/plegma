@@ -209,10 +209,14 @@ For a diploid caller (abPOA's `-d`):
   leaves a haplotype pieced together from its few labelled reads there.
 
 Both return each cluster's reads and each read's CIGAR to its cluster's consensus. A read on neither anchor
-(`PLEGMA_ANCHOR_INSIDE`) builds nothing and is only aligned within a cluster. Clusters apart only by homopolymer
-lengths are merged unless, with a model, two lengths explain the reads `two_lengths_db` better than one (without a
-model, unless one differs by more than one letter): read length errors in runs split one haplotype's reads far more
-often than a true difference does. Likewise, clusters apart by one short tandem repeat unit need 30% of the reads.
+(`PLEGMA_ANCHOR_INSIDE`) builds nothing and is only aligned within a cluster. With a model, every homopolymer run two
+consensus sequences differ by (found by an affine alignment of the two, whatever else they differ by) takes two
+lengths only where two explain the reads `two_lengths_db` better than one, else the one length in both; clusters
+apart by such runs alone are merged (without a model, unless one differs by more than one letter): read length
+errors in runs split one haplotype's reads far more often than a true difference does. A read's run length is the
+letters between the two it aligns to the run's flanks. Likewise, clusters apart by one short tandem repeat unit need
+30% of the reads. Reads move between clusters at a substitution 5, a letter slipped in a run 3, so a SNP beside a run
+keeps its reads together.
 
 ## How it works
 

@@ -189,50 +189,132 @@ def _apart_by_runs_alone(
 
 
 def _run_pairs(
-    mut aligner: Aligner, a: List[UInt8], b: List[UInt8], noise_run: Int, mut runs_a: List[Int], mut runs_b: List[Int]
-) raises:
+    mut aligner: Aligner,
+    a: List[UInt8],
+    b: List[UInt8],
+    noise_run: Int,
+    mut runs_a: List[Int],
+    mut runs_b: List[Int],
+) -> Bool:
     """Every place `a` and `b` differ by letters added to or dropped from a run of one letter at least `noise_run`
-    long (as `_apart_by_runs_alone` counts them), whatever else they differ by: the run's start in `a` in `runs_a`
-    and the same run's start in `b` in `runs_b`, ascending, each run once. A run's length is decided apart from what
-    else the two differ by: a run length is the reads' commonest error wherever it lies, and two consensus sequences
-    apart by a short tandem repeat's units (or a SNP) beside a run kept each its own reads' run length untested
-    against both haplotypes' reads."""
+    long, whatever else they differ by: the run's start in `a` in `runs_a` and the same run's start in `b` in
+    `runs_b`, ascending, each run once; True when that is every difference (the two apart by runs alone, as one
+    alignment says, not two). A gap at the meeting of two runs (AAAA TTTT against AAA TTT: one gap AT) is a letter of
+    each. A run's length is decided apart from what else the two differ by: a run length is the reads' commonest
+    error wherever it lies, and two consensus sequences apart by a short tandem repeat's units (or a SNP) beside a run
+    kept each its own reads' run length untested against both haplotypes' reads. Two sequences too far apart to align
+    within the aligner's memory: no runs, and not apart by runs alone."""
     runs_a.clear()
     runs_b.clear()
     if noise_run <= 0 or a == b:
-        return
+        return False
     # Gaps opened at a cost, so an indel of several letters stays one gap: at unit costs a repeat unit the two differ
     # by can split into a letter dropped from a run beside the repeat and the rest further on (HG002 chr20:21,208,762,
     # one TG of (TG)n: read as one T of the TTT before it and a G, both haplotypes then cut to TT).
-    var found = aligner.align(Span(a), Span(b), RUN_PAIR_COSTS, Mode.GLOBAL, ties=Ties.LEFT)
+    var cigar = String()
+    try:
+        cigar = aligner.align(Span(a), Span(b), RUN_PAIR_COSTS, Mode.GLOBAL, ties=Ties.LEFT).cigar
+    except:
+        return False
+    var all_runs = True
     var i = 0  # in a
     var j = 0  # in b
     var count = 0
-    for c in found.cigar.as_bytes():
+    for c in cigar.as_bytes():
         if c >= UInt8(ord("0")) and c <= UInt8(ord("9")):
             count = count * 10 + Int(c - UInt8(ord("0")))
             continue
-        if c == UInt8(ord("=")) or c == UInt8(ord("X")):
+        if c == UInt8(ord("=")) or c == UInt8(ord("M")):
+            i += count
+            j += count
+        elif c == UInt8(ord("X")):
+            all_runs = False
             i += count
             j += count
         elif c == UInt8(ord("D")):
-            # Letters of `a`'s run `b` lacks, the run long enough even in `b`, and `b` holding that run beside the gap.
-            var one = True
-            for k in range(count):
-                one = one and a[i + k] == a[i]
-            var at_b = j if j < len(b) and b[j] == a[i] else (j - 1 if j > 0 and b[j - 1] == a[i] else -1)
-            if one and at_b >= 0:
-                _pair_runs(a, b, _run_start(a, i), _run_start(b, at_b), count, noise_run, runs_a, runs_b)
+            all_runs = _gap_runs(a, i, count, b, j, noise_run, runs_a, runs_b, False) and all_runs
             i += count
         else:
-            var one = True
-            for k in range(count):
-                one = one and b[j + k] == b[j]
-            var at_a = i if i < len(a) and a[i] == b[j] else (i - 1 if i > 0 and a[i - 1] == b[j] else -1)
-            if one and at_a >= 0:
-                _pair_runs(a, b, _run_start(a, at_a), _run_start(b, j), count, noise_run, runs_a, runs_b)
+            all_runs = _gap_runs(b, j, count, a, i, noise_run, runs_b, runs_a, True) and all_runs
             j += count
         count = 0
+    return all_runs and len(runs_a) > 0
+
+
+def _gap_runs(
+    longer: List[UInt8],
+    at: Int,
+    count: Int,
+    shorter: List[UInt8],
+    at_short: Int,
+    noise_run: Int,
+    mut runs_long: List[Int],
+    mut runs_short: List[Int],
+    swapped: Bool,
+) -> Bool:
+    """`_run_pairs`'s reading of one gap: `longer`'s letters `at ..< at + count` that `shorter` lacks before its
+    letter `at_short`. One letter's block lengthens the run beside it; two (the meeting of two runs) lengthen the run
+    ending at the gap's start and the one starting at its end; each pair in `runs_long` and `runs_short` (`a`'s and
+    `b`'s lists the other way round when `swapped`). True when the gap is run letters alone."""
+    var cut = at
+    while cut < at + count and longer[cut] == longer[at]:
+        cut += 1
+    for k in range(cut, at + count):
+        if longer[k] != longer[cut]:
+            return False
+    if cut == at + count:
+        # One letter: the shorter's run beside the gap, after it or before it.
+        var x = longer[at]
+        var side = at_short if at_short < len(shorter) and shorter[at_short] == x else (
+            at_short - 1 if at_short > 0 and shorter[at_short - 1] == x else -1
+        )
+        if side < 0:
+            return False
+        return _pair(
+            longer,
+            shorter,
+            _run_start(longer, at),
+            _run_start(shorter, side),
+            count,
+            noise_run,
+            runs_long,
+            runs_short,
+            swapped,
+        )
+    # Two letters: the first block ends the run before the gap, the second starts the run after it.
+    if at_short == 0 or at_short >= len(shorter):
+        return False
+    if shorter[at_short - 1] != longer[at] or shorter[at_short] != longer[cut]:
+        return False
+    var first = _pair(
+        longer,
+        shorter,
+        _run_start(longer, at),
+        _run_start(shorter, at_short - 1),
+        cut - at,
+        noise_run,
+        runs_long,
+        runs_short,
+        swapped,
+    )
+    var second = _pair(longer, shorter, cut, at_short, at + count - cut, noise_run, runs_long, runs_short, swapped)
+    return first and second
+
+
+def _pair(
+    longer: List[UInt8],
+    shorter: List[UInt8],
+    s_long: Int,
+    s_short: Int,
+    count: Int,
+    noise_run: Int,
+    mut runs_long: List[Int],
+    mut runs_short: List[Int],
+    swapped: Bool,
+) -> Bool:
+    if swapped:
+        return _pair_runs(shorter, longer, s_short, s_long, count, noise_run, runs_short, runs_long)
+    return _pair_runs(longer, shorter, s_long, s_short, count, noise_run, runs_long, runs_short)
 
 
 def _pair_runs(
@@ -244,19 +326,20 @@ def _pair_runs(
     noise_run: Int,
     mut runs_a: List[Int],
     mut runs_b: List[Int],
-):
-    """`_run_pairs`'s test of one gap of `count` letters between `a`'s run at `sa` and `b`'s at `sb`: a pair only
+) -> Bool:
+    """`_run_pairs`'s test of one block of `count` letters between `a`'s run at `sa` and `b`'s at `sb`: a pair only
     where the two runs' lengths differ by the gap alone (a substitution in or beside a run pairs runs of different
     extent: C TTTT G TTTT C against C T10 C would pair a T4 with the T10) and the longer is at least `noise_run`, the
     shorter `noise_run - 1`, whichever of the two holds it (`a` against `b` as `b` against `a`); each run once."""
     var la = _run_at(a, sa)
     var lb = _run_at(b, sb)
     if abs(la - lb) != count or max(la, lb) < noise_run or min(la, lb) < noise_run - 1:
-        return
+        return False
     if len(runs_a) > 0 and (runs_a[len(runs_a) - 1] == sa or runs_b[len(runs_b) - 1] == sb):
-        return
+        return True
     runs_a.append(sa)
     runs_b.append(sb)
+    return True
 
 
 def _one_unit_apart(a: List[UInt8], b: List[UInt8]) -> Bool:
@@ -293,45 +376,74 @@ def _run_start(seq: List[UInt8], i: Int) -> Int:
     return b
 
 
-def _length_in(cigar: String, consensus_start: Int, letters: List[UInt8], s: Int, e: Int, letter: UInt8) -> Int:
-    """The length a read reports for the consensus's run `s ..< e` of `letter`, from its CIGAR against the consensus
-    (from `consensus_start`): its letters aligned within the run and inserted inside it or at its ends; -1 when it
-    does not cover the letters either side of the run, or holds another letter inside it (no vote, as shasta2's)."""
+def _length_in(
+    cigar: String, consensus_start: Int, letters: List[UInt8], s: Int, e: Int, letter: UInt8, consensus: List[UInt8]
+) -> Int:
+    """The length a read reports for `consensus`'s run `s ..< e` of `letter`, from its CIGAR against it (from
+    `consensus_start`): the read's own run of the letter where the alignment puts the consensus's (its letters aligned
+    within the run or inserted inside it or at its ends, and those of the letter beside them), bounded in the read by
+    the consensus's two flank letters (`s - 1` and `e`, each another letter); -1 when the read's run is not so
+    bounded (a run at the consensus's end has no flank), or holds another letter (no vote, as shasta2's). The read's
+    run, not the letters the alignment puts on the consensus's: a gap placed leftmost can take the run's last letter
+    with the start of a repeat unit beside it (consensus C AAAA TATATA G, read C AAAA TATA G: the deletion AT took the
+    fourth A and the read's A4 counted 3; at unit costs the unit split into letters dropped either side,
+    1=1D3=1D6=). Bounded by the flank letters themselves: a read without the letter between two runs of one letter
+    (T4 C T11 read as T15) has its run end at another letter than the flank's, and does not count its whole stretch
+    for each (as polish's `_run_lengths` refuses it). A read's vote needs only its own letters there, not one
+    alignment of them: requiring each flank aligned to a letter would leave out the reads whose gap a unit beside the
+    run placed at the flank."""
+    if s == 0 or e >= len(consensus):
+        return -1
     var i = consensus_start
     var j = 0
     var count = 0
-    var length = 0
-    var covered_left = False
-    var covered_right = False
+    var first = -1
+    var last = -1
+    var at_s = -1
     for c in cigar.as_bytes():
         if c >= UInt8(ord("0")) and c <= UInt8(ord("9")):
             count = count * 10 + Int(c - UInt8(ord("0")))
             continue
         for _ in range(count):
+            if i == s and at_s < 0:
+                at_s = j
             if c == UInt8(ord("I")):
-                if i >= s and i <= e:
-                    if letters[j] == letter:
-                        length += 1
-                    elif i > s and i < e:
-                        return -1
+                if i >= s and i <= e and letters[j] == letter:
+                    first = j if first < 0 else first
+                    last = j
+                elif i > s and i < e:
+                    return -1
                 j += 1
             elif c == UInt8(ord("D")):
-                covered_left = covered_left or i == s - 1
-                covered_right = covered_right or i == e
                 i += 1
             else:
-                if i == s - 1:
-                    covered_left = True
-                if i == e:
-                    covered_right = True
                 if i >= s and i < e:
                     if letters[j] != letter:
                         return -1
-                    length += 1
+                    first = j if first < 0 else first
+                    last = j
                 i += 1
                 j += 1
         count = 0
-    return length if covered_left and covered_right else -1
+    if first < 0:
+        # Every letter of the run deleted: none in the read where the consensus has it, if its flanks say so.
+        if at_s <= 0 or at_s >= len(letters):
+            return -1
+        if letters[at_s - 1] == consensus[s - 1] and letters[at_s] == consensus[e]:
+            return 0
+        return -1
+    for q in range(first, last + 1):
+        if letters[q] != letter:
+            return -1
+    while first > 0 and letters[first - 1] == letter:
+        first -= 1
+    while last + 1 < len(letters) and letters[last + 1] == letter:
+        last += 1
+    if first == 0 or last + 1 >= len(letters):
+        return -1
+    if letters[first - 1] != consensus[s - 1] or letters[last + 1] != consensus[e]:
+        return -1
+    return last - first + 1
 
 
 def _flanks(consensus: List[UInt8], s: Int, e: Int) -> Tuple[Int, Int]:
@@ -383,7 +495,7 @@ def _two_lengths(
         var mine = List[Int]()
         for r in groups[k]:
             var found = aligner.align(Span(made[k]), Span(seqs[r]), Costs.edit(), _mode(anchors[r]), ties=Ties.LEFT)
-            var m = _length_in(found.cigar, found.reference_start, seqs[r], s, e, made[k][s])
+            var m = _length_in(found.cigar, found.reference_start, seqs[r], s, e, made[k][s], made[k])
             mine.append(m)
             if m >= 0:
                 lengths.append(m)
@@ -606,10 +718,9 @@ def clustered_consensus(
                 ) < MIN_UNIT_SPLIT_FREQ * Float64(len(builders)):
                     _join(root, a, b)
                 else:
-                    var only_runs = _apart_by_runs_alone(aligner, made[a], made[b], options.noise_run, runs, single)
                     if not homopolymers.loaded():
                         # Without a model: apart unless every difference is a single letter of a run.
-                        if only_runs and single:
+                        if _apart_by_runs_alone(aligner, made[a], made[b], options.noise_run, runs, single) and single:
                             _join(root, a, b)
                         continue
                     # With a model, each run the two differ by, whatever else they differ by: two lengths where all
@@ -619,7 +730,7 @@ def clustered_consensus(
                     # the pair it found), nor does another difference spare a run the test.
                     var runs_a = List[Int]()
                     var runs_b = List[Int]()
-                    _run_pairs(aligner, made[a], made[b], options.noise_run, runs_a, runs_b)
+                    var only_runs = _run_pairs(aligner, made[a], made[b], options.noise_run, runs_a, runs_b)
                     var set_a = List[Int]()
                     var set_b = List[Int]()
                     var two = False
@@ -793,7 +904,7 @@ def _read_lengths(
     lengths.clear()
     for r in reads:
         var found = aligner.align(Span(consensus), Span(seqs[r]), Costs.edit(), _mode(anchors[r]), ties=Ties.LEFT)
-        lengths.append(_length_in(found.cigar, found.reference_start, seqs[r], s, e, consensus[s]))
+        lengths.append(_length_in(found.cigar, found.reference_start, seqs[r], s, e, consensus[s], consensus))
 
 
 def _best_length(
@@ -1207,7 +1318,7 @@ def phased_consensus(
     var runs0 = List[Int]()
     var runs1 = List[Int]()
     if homopolymers.loaded() and made[0] != made[1]:
-        _run_pairs(aligner, made[0], made[1], max(options.noise_run, 2), runs0, runs1)
+        _ = _run_pairs(aligner, made[0], made[1], max(options.noise_run, 2), runs0, runs1)
     if len(runs0) > 0:
         var first = List[Int]()
         var second = List[Int]()
