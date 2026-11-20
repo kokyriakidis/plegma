@@ -718,21 +718,26 @@ def test_phased_with_no_labelled_read_builds_from_the_unlabelled() raises:
     assert_true(got.consensus[0] == got.consensus[1])
 
 
-def test_phased_haplotype_without_reads_is_the_others() raises:
-    """With every labelled read on haplotype 0, an unlabelled read with errors of its own does not become
-    haplotype 1: that one is haplotype 0's consensus."""
+def test_phased_haplotype_without_labels_is_its_unlabelled_reads() raises:
+    """A phase set covering one haplotype only: 8 reads labelled 0, the other allele's 5 reads unlabelled. Haplotype 1
+    is made from the unlabelled reads, so the heterozygote stays (taking haplotype 0's consensus for it would lose
+    it)."""
     seed(223)
-    var truth = _random(300)
+    var a = _random(400)
+    var b = a.copy()
+    var letters = "ACGT".as_bytes()
+    for i in [60, 170, 290]:
+        b[i] = letters[0] if b[i] != letters[0] else letters[1]
     var reads = List[List[UInt8]]()
     var labels = List[Int]()
-    for _ in range(6):
-        reads.append(truth.copy())
-        labels.append(0)
-    reads.append(_mutated(truth, 0.03))
-    labels.append(-1)
-    var got = phased_consensus(reads^, labels)
-    assert_true(got.consensus[0] == truth)
-    assert_true(got.consensus[1] == truth)
+    for k in range(13):
+        reads.append(a.copy() if k < 8 else b.copy())
+        labels.append(0 if k < 8 else -1)
+    var options = ConsensusOptions()
+    options.poa.seeded = False
+    var got = phased_consensus(reads^, labels, options=options)
+    assert_true(got.consensus[0] == a)
+    assert_true(got.consensus[1] == b)
 
 
 def test_phased_reads_all_inside_build_as_spanning() raises:

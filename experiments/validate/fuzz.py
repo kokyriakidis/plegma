@@ -132,8 +132,8 @@ def check_gfa(seqs, path, with_consensus):
 
 
 def check_cli(binary, work):
-    """Fixed checks of the command line itself: gzipped input (headers' anchor= and strand= words included) reads as
-    the plain file, CRLF line ends as LF; bad options and values fail with one line on stderr and status 1."""
+    """Fixed checks of the command line itself: gzipped input (headers' anchor= and strand= words included) and FASTQ
+    read as the plain FASTA file, CRLF line ends as LF; bad options and values fail with one line on stderr and status 1."""
     import gzip
 
     failures = 0
@@ -151,8 +151,13 @@ def check_cli(binary, work):
         f.write(text)
     with open(plain + ".crlf", "wb") as f:
         f.write(text.replace(b"\n", b"\r\n"))
+    # The same records as FASTQ, header words and all; a quality line starting with '@' is no header.
+    with open(plain + ".fq", "w") as f:
+        lines = text.decode().split("\n")
+        for k in range(0, len(lines) - 1, 2):
+            f.write("@%s\n%s\n+\n%s\n" % (lines[k][1:], lines[k + 1], "@" + "I" * (len(lines[k + 1]) - 1)))
     want = subprocess.run([binary, "poa", "-N", "-r", "2", plain], capture_output=True).stdout
-    for variant in (plain + ".gz", plain + ".crlf"):
+    for variant in (plain + ".gz", plain + ".crlf", plain + ".fq"):
         got = subprocess.run([binary, "poa", "-N", "-r", "2", variant], capture_output=True).stdout
         if got != want or not want:
             failures += 1

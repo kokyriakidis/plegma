@@ -314,8 +314,9 @@ def phased_consensus(
     is decided on both haplotypes' reads together, whatever else the two differ by: their own lengths for the two only
     when that explains the reads `options.two_lengths_db` better than one length for both, else that one length in
     both (a run is far more often the same on the two haplotypes than not). Two clusters always: a haplotype no read
-    is labelled with has the other's consensus, and with no labelled read at all both are the unlabelled reads'. With
-    every read inside, all of them build as if spanning (as `clustered_consensus` has it)."""
+    is labelled with is made from the unlabelled reads alone (every one of them, as the other's consensus differs
+    from itself nowhere), and with no labelled read at all both are the unlabelled reads' one consensus. With every
+    read inside, all of them build as if spanning (as `clustered_consensus` has it)."""
     var n = len(seqs)
     if len(haplotypes) != n:
         raise Error(t"{len(haplotypes)} haplotypes for {n} sequences")
@@ -403,14 +404,12 @@ def phased_consensus(
                 if sides[i] == k or sides[i] == TO_BOTH:
                     groups[k].append(unlabelled[i])
                     grew[k] = True
+        # A haplotype no read is labelled with is made from the unlabelled reads sent to both (the two read alike
+        # before, so every one is): a phase set covering one haplotype only leaves the other's reads unlabelled,
+        # and they still make it. One noisy unlabelled read alone makes it as well.
         for k in range(2):
-            if grew[k] and labelled[k]:
+            if grew[k]:
                 made[k] = _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers)
-        # A haplotype no read is labelled with stays the other's: unlabelled reads alone (each one there because it
-        # covers no place the two differ, which they do not) would make one noisy read a second haplotype.
-        for k in range(2):
-            if not labelled[k] and labelled[1 - k]:
-                made[k] = made[1 - k].copy()
     # Each run the two differ by is decided on both haplotypes' reads together, whatever else the two differ by.
     var runs0 = List[Int]()
     var runs1 = List[Int]()

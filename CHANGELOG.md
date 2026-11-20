@@ -24,9 +24,8 @@
   gain to the top of 32 bits; the round was reverted and polishing stopped early.
 - Homopolymer model csv: run lengths past 65,535 were read into another row, integers past 63 bits were written
   outside the table, and a trailing comma or an exponent without digits was accepted. These now fail.
-- `phased_consensus`: with no labelled read both haplotypes came out empty; a haplotype no read was labelled with was
-  built from unlabelled reads alone (one noisy read became a second haplotype); with every read inside, both were
-  empty.
+- `phased_consensus`: with no labelled read both haplotypes came out empty (every read placed as an insertion); with
+  every read inside, both were empty.
 - C API: a `count` of `SIZE_MAX` (or a length of 2^62) aborted the caller's process in the allocator; it now fails
   with a message. `plegma_options_init(NULL)` crashed.
 - Python: integers a C `int32_t` cannot hold wrapped silently (`anchors=[2**32]` ran as both).

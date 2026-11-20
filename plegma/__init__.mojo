@@ -21,13 +21,16 @@ is implementation and may change.
   while they raise its likelihood under a pair HMM), optionally with a
   `HomopolymerModel` (shasta2's empirical run-length error model, `load`ed
   from its csv): every run then at its most likely length given the reads'.
-- The POA of a read set: `poa` -> `Poa` under `PoaOptions`, each read
+- The POA of a read set: `poa` -> `Poa` under `PoaOptions` (the spanning
+  reads' order `GUIDE_ORDER`, `INPUT_ORDER` or `LONGEST_FIRST`; the band's
+  cap `BAND_MAX`; `check` raises on options it cannot run with), each read
   anchored `BOTH`, `LEFT` or `RIGHT` (a local assembly's reads: spanning it,
   or fixed at one anchor; with none spanning, each side assembled and the two
   joined, or one side alone, one-directional).
 - One call from reads to consensus: `consensus` under `ConsensusOptions`
-  (what `plegma poa -r 0` writes, with a `HomopolymerModel` as `-H`), the
-  function behind the C API (`capi/plegma.h`, `capi/plegma.hpp`,
+  (what `plegma poa -r 0` writes, with a `HomopolymerModel` as `-H`;
+  `polished` the same from a `Poa` already made), the function behind the C
+  API (`capi/plegma.h`, `capi/plegma.hpp`,
   `build/libplegma.so`) a local assembler calls instead of the command.
 - Several consensus sequences of one read set (haplotypes, as a diploid caller asks abPOA's `-d` for):
   `clustered_consensus` -> `Clustered` (per cluster its consensus and members; per read its `Placement`, the
@@ -41,6 +44,8 @@ is implementation and may change.
   flanks, its letters in the reference letters' columns), for calling variants
   against that reference.
 - `VERSION`, as `plegma --version` and the C API's `plegma_version` give it.
+- Tracing: `PLEGMA_TRACE` (see `plegma/trace.mojo`) writes the decisions
+  behind a result on stderr; nothing to call.
 - minimap2's pinned alignment (2.31, -x asm5 as dipcall runs it): `pins` ->
   `Pins` (the points its alignment of a sequence to the reference passes
   through), `pins_in_context` (the same with flanks as the seeds' context),
@@ -50,7 +55,7 @@ is implementation and may change.
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
 from .clustered import clustered_consensus
 from .clusters import cluster_rows
-from .consensus import ConsensusOptions, consensus
+from .consensus import ConsensusOptions, consensus, polished
 from .graph import Graph, Runs, cigar_runs
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import (
@@ -77,7 +82,7 @@ from .phased import phased_consensus
 from .pinned import WindowScratch, align_pinned, window_nodes
 from .pins import Pins, pinned_pairing, pins, pins_in_context
 from .placement import Clustered, Placement, alignment_costs
-from .poa import Poa, PoaOptions, poa
+from .poa import BAND_MAX, GUIDE_ORDER, INPUT_ORDER, LONGEST_FIRST, Poa, PoaOptions, poa
 from .polish import polish
 from .reference import on_reference
 from .version import VERSION

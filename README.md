@@ -227,7 +227,8 @@ For a diploid caller (abPOA's `-d`):
   labelled reads and three quarters of them), on both where it covers no such place, on neither where it carries as
   many of each. A phase set ending inside the window then no longer leaves a haplotype pieced together from its few
   labelled reads there. With no labelled read both haplotypes are the unlabelled reads' consensus; a haplotype no
-  read is labelled with is the other's.
+  read is labelled with is made from the unlabelled reads (a phase set covering one haplotype leaves the other's
+  reads unlabelled).
 
 Both return each cluster's reads and each read's CIGAR to its cluster's consensus. A read on neither anchor
 (`PLEGMA_ANCHOR_INSIDE`) builds nothing and is only aligned within a cluster. With a model, every homopolymer run two
