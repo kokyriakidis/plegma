@@ -131,6 +131,46 @@ def check_gfa(seqs, path, with_consensus):
     return None
 
 
+def check_cli(binary, work):
+    """Fixed checks of the command line itself: gzipped input (headers' anchor= and strand= words included) reads as
+    the plain file, CRLF line ends as LF; bad options and values fail with one line on stderr and status 1."""
+    import gzip
+
+    failures = 0
+    plain = os.path.join(work, "cli.fa")
+    rng = random.Random(5)
+    base = "".join(rng.choice("ACGT") for _ in range(300))
+    with open(plain, "w") as f:
+        for i in range(8):
+            side = ["both", "left", "right"][i % 3]
+            part = base if side == "both" else (base[:200] if side == "left" else base[100:])
+            f.write(">r%d anchor=%s strand=%d\n%s\n" % (i, side, i % 2, mutate(rng, part, 0.03)))
+    with open(plain, "rb") as f:
+        text = f.read()
+    with gzip.open(plain + ".gz", "wb") as f:
+        f.write(text)
+    with open(plain + ".crlf", "wb") as f:
+        f.write(text.replace(b"\n", b"\r\n"))
+    want = subprocess.run([binary, "poa", "-N", "-r", "2", plain], capture_output=True).stdout
+    for variant in (plain + ".gz", plain + ".crlf"):
+        got = subprocess.run([binary, "poa", "-N", "-r", "2", variant], capture_output=True).stdout
+        if got != want or not want:
+            failures += 1
+            print("FAIL cli: %s does not read as %s" % (variant, plain))
+    bad = [["poa", "-r", "7"], ["poa", "-d", "0"], ["poa", "-P", "-1"], ["poa", "-b", "x"], ["poa", "-O", "4,x"],
+           ["poa", "-q", "2"], ["poa", "-m", "3"], ["poa", "-Z"], ["ref", "-t", "0"], ["ref", "-m", "1"],
+           ["poa", "-l"], ["frob"], ["poa", os.path.join(work, "missing.fa")]]
+    for args in bad:
+        # The plain file as input (with -l a FASTA, not a list of files), but where the input is the fault.
+        cmd = [binary] + args + ([] if args == ["frob"] or args[-1].endswith("missing.fa") else [plain])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        lines = proc.stderr.strip().splitlines()
+        if proc.returncode != 1 or len(lines) != 1 or not lines[0].startswith("plegma: "):
+            failures += 1
+            print("FAIL cli: %s exits %d with %r" % (" ".join(cmd), proc.returncode, proc.stderr[:200]))
+    return failures
+
+
 def main():
     binary, work = sys.argv[1], sys.argv[2]
     cases = int(sys.argv[3]) if len(sys.argv) > 3 else 200
@@ -142,7 +182,7 @@ def main():
                    ["-N", "-L", "-d", "3"]]
     # A bare -F takes a flanks file made per case.
     ref_options = [[], ["-t", "2"], ["-a", "1"], ["-d", "3"], ["-P", "0"], ["-P", "1"], ["-F"], ["-F", "-t", "3"]]
-    failures = 0
+    failures = check_cli(binary, work)
     runs = 0
     for c in range(cases):
         kind, seqs = make_case(rng)
