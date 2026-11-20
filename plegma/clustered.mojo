@@ -162,6 +162,10 @@ def clustered_consensus(
     for g in groups:
         made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
     if len(groups) >= 2:
+        # A read costing the same against every consensus tells the clusters nothing (a partial read short of every
+        # place they differ): where their sizes decide (`min_freq`, `MIN_UNIT_SPLIT_FREQ`) it counts evenly for each
+        # (`_share`), or the first input row's cluster, which takes it, outnumbered the other by input order alone.
+        var telling = List[Bool](length=n, fill=True)
         var floor = max(1, Int(min_freq * Float64(len(builders)) + 0.999999))
         var label = List[Int](length=n, fill=-1)
         for k in range(len(groups)):
@@ -174,10 +178,13 @@ def clustered_consensus(
             for r in builders:
                 var best = label[r] if label[r] >= 0 else 0
                 var best_cost = _aligned(aligner, made[best], seqs[r], build_anchor[r], moving).cost
+                telling[r] = False
                 for k in range(len(made)):
                     if k == best:
                         continue
                     var cost = _aligned(aligner, made[k], seqs[r], build_anchor[r], moving).cost
+                    if cost != best_cost:
+                        telling[r] = True
                     if cost < best_cost:
                         best = k
                         best_cost = cost
@@ -193,9 +200,10 @@ def clustered_consensus(
                         "refinement ", refinement, ": ", moves, " reads moved, ", _sizes(next), " (floor ", floor, ")"
                     ),
                 )
+            var untold = len(builders) - _telling(builders, telling)
             var kept = List[List[Int]]()
             for g in next:
-                if len(g) >= floor:
+                if _share(g, telling, untold, len(next)) >= Float64(floor):
                     kept.append(g.copy())
             if len(kept) < len(next):
                 # A cluster under the floor: its reads are another's, so one cluster fewer.
@@ -238,6 +246,7 @@ def clustered_consensus(
         # Clusters spelling the same consensus are one; so are clusters apart only by homopolymer lengths, unless a
         # homopolymer model finds two lengths at one of those runs (`options.two_lengths_db`).
         # Each pair that is one joins (`root`: union of clusters); with two clusters, as one flag.
+        var untold_now = len(builders) - _telling(builders, telling)
         var root = List[Int]()
         for k in range(len(groups)):
             root.append(k)
@@ -250,8 +259,9 @@ def clustered_consensus(
                 if made[a] == made[b]:
                     _join(root, a, b)
                     trace.line(CLUSTERED, String("clusters ", a, " and ", b, " one: the same consensus"))
-                elif _one_unit_apart(made[a], made[b]) and Float64(
-                    min(len(groups[a]), len(groups[b]))
+                elif _one_unit_apart(made[a], made[b]) and min(
+                    _share(groups[a], telling, untold_now, len(groups)),
+                    _share(groups[b], telling, untold_now, len(groups)),
                 ) < MIN_UNIT_SPLIT_FREQ * Float64(len(builders)):
                     _join(root, a, b)
                     trace.line(
@@ -395,6 +405,21 @@ def clustered_consensus(
             lengths.write(", " if k > 0 else "", len(made[k]))
         trace.line(CLUSTERED, String(len(groups), " clusters of ", _sizes(groups), " reads, ", lengths, " letters"))
     return _placed(aligner, made^, seqs, cluster_of, anchor_of, costs)
+
+
+def _telling(reads: List[Int], telling: List[Bool]) -> Int:
+    """How many of `reads` tell the clusters apart (`telling`)."""
+    var n = 0
+    for r in reads:
+        if telling[r]:
+            n += 1
+    return n
+
+
+def _share(reads: List[Int], telling: List[Bool], untold: Int, clusters: Int) -> Float64:
+    """A cluster's size where sizes decide: its reads that tell the clusters apart, and its even share of the
+    `untold` reads that do not."""
+    return Float64(_telling(reads, telling)) + Float64(untold) / Float64(max(1, clusters))
 
 
 def _sizes(groups: List[List[Int]]) -> String:
