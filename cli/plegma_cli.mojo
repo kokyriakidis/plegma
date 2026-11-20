@@ -15,6 +15,7 @@ from sporos import read_fasta
 
 from plegma.clusters import cluster_rows
 from plegma.graph import GAP, Graph
+from plegma.homopolymer import STRAND_UNKNOWN
 from plegma.kernel import BOTH, Topology
 from plegma.poa import Poa, poa
 from plegma.polish import polish
@@ -75,9 +76,14 @@ def _poa(mut records: Records, options: Options) raises -> Aligned:
         for r in range(len(msa)):
             rows.append(String(unsafe_from_utf8=upper(msa.seq(r))))
         start = Graph.from_msa(msa.names, rows)
+    var before = records.names.copy()
     var out = Aligned(poa(records.names, records.seqs, records.anchors, options.consensus.poa, start^))
     if options.homopolymers.loaded():
         out.strands = records.strands.copy()
+        # A read `-s` reverse-complemented (its name changed) is on the other strand to the consensus now.
+        for r in range(len(records)):
+            if records.names[r] != before[r] and out.strands[r] != STRAND_UNKNOWN:
+                out.strands[r] = 1 - out.strands[r]
     if len(out.consensus) > 0:
         # Reads anchored at one end: the consensus polished against every read, each aligned as it is anchored, but
         # another copy's.
