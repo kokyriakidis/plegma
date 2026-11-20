@@ -25,7 +25,7 @@ from std.math import isfinite
 
 from karan import Aligner, Alignment, Costs, Mode
 
-from .graph import Graph
+from .graph import DELETION, INSERTION, Graph, cigar_runs
 from .kernel import (
     BOTH,
     EXTENSION,
@@ -63,6 +63,17 @@ comptime JOIN_IDENTITY = 0.75
 """The least share of an overlap's letters a karan overlap matches."""
 comptime JOIN_EDIT = 19
 """What an edit costs in that overlap, a match earning 1."""
+comptime JOIN_EDIT_STRICT = 100
+"""The same, for the overlap of the ends found again with edits dearer still (a longer overlap shifted by tandem
+copies a few percent apart loses to the true one even then)."""
+comptime JOIN_DRIFT = 16
+"""Pins whose diagonals are within this many letters of each other place right alike (the two sides' insertions and
+deletions move it)."""
+comptime JOIN_MARGIN = 1.5
+comptime JOIN_MARGIN_FLOOR = 0.002
+"""A placement on another diagonal agreeing within `JOIN_MARGIN` times the best's edits a letter, plus
+`JOIN_MARGIN_FLOOR`, leaves the two sides unjoined: a tandem array whose copies are as alike as the two consensus
+sequences."""
 
 comptime FOREIGN_SPANNING = 3
 """The fewest spanning reads whose consensus a read anchored at one end is checked against (`_foreign`)."""
@@ -684,71 +695,148 @@ def _support(reach: List[Int], at: Int) -> Int:
     return n
 
 
-def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_reach: List[Int]) raises -> List[UInt8]:
-    """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end: at
-    a pin of minimap2's chain between them whose 19-mer is unique in both (a tandem array's copies may chain to the
-    wrong copy), when they place `right` reaching `left`'s end (wherever it starts) with an overlap of `JOIN_LEAST`
-    letters or more; else at an overlap karan finds between `left`'s last and `right`'s first `JOIN_ENDS`
-    letters, as long and `JOIN_IDENTITY` alike; empty when they do not overlap.
+@fieldwise_init
+struct _Placing(Copyable, Movable):
+    """A way to join the two sides: right's letters from `cut_right` on after left's first `cut_left` (right
+    starting at `diagonal` in left's letters there); how well the two agree over the overlap it implies (`edits` in
+    `letters`), and where it puts each of left's letters in right (`path`)."""
 
-    Of the pins, the one where the side worse supported there is best supported: left's letters before it come from
-    the left reads that reach it (`left_reach`, each read's reach along left from the left anchor), right's after it from the
-    right reads that reach back to it (`right_reach`, from the right anchor). Each side's sequence near its far end is
-    the few longest reads' alone. Taking the middle pin, HG00512's HLA-DRB1 haplotype 1 (no read spanning, 9 left
-    reads and 18 right) had a stretch of 1.1 kb from the one right read reaching that far, against 9 left reads
-    there, and its 9 insertions and 2 deletions (12 of 13 reads disagreeing at each) shifted exons 3 to 6 out of
-    frame; the allele was read *08:01:05 for *08:03."""
+    var diagonal: Int
+    var cut_left: Int
+    var cut_right: Int
+    var edits: Int
+    var letters: Int
+    var how: String
+    var path: List[Int]
+    """The right letter each of left's overlap letters lands on, from the overlap's start."""
+
+    def lands(self, at_left: Int) -> Int:
+        """The right letter left's letter `at_left` lands on (outside the overlap: as the diagonal puts it)."""
+        var k = at_left - max(0, self.diagonal)
+        if k >= 0 and k < len(self.path):
+            return self.path[k]
+        return at_left - self.diagonal
+
+    def rate(self) -> Float64:
+        return Float64(self.edits) / Float64(max(1, self.letters))
+
+
+def _walk(found: Alignment, left_from: Int, right_from: Int, mut path: List[Int]) raises:
+    """Append to `path` the right letter each left letter of `found` lands on (left the query, starting at
+    `left_from`; right the reference, at `right_from` plus the alignment's start in it; a left letter right lacks at
+    the next right letter)."""
+    var runs = cigar_runs(found.cigar)
+    var j = right_from + found.reference_start
+    for x in range(len(runs.ops)):
+        var op = runs.ops[x]
+        for _ in range(runs.counts[x]):
+            if op == DELETION:
+                j += 1
+            else:
+                path.append(j)
+                if op != INSERTION:
+                    j += 1
+
+
+def _placing(
+    mut aligner: Aligner, left: List[UInt8], right: List[UInt8], cut_left: Int, cut_right: Int, var how: String
+) raises -> _Placing:
+    """Right placed so that left's letter `cut_left` meets right's `cut_right` (a pin; or left's end meeting right's
+    `cut_right`, an overlap of the ends): the two sides aligned from there back to the overlap's start and on to
+    left's end, right's far ends free (the two sides' insertions and deletions move the overlap's ends); its edits,
+    its letters in left, and the right letter each of them lands on (`path`, from the overlap's start)."""
+    var lo = max(0, cut_left - cut_right)
+    var out = _Placing(cut_left - cut_right, cut_left, cut_right, 0, len(left) - lo, how^, List[Int]())
+    if cut_left > lo:
+        # Back from the meeting point: left's letters before it against a suffix of right's before it.
+        var back = aligner.align(Span(right)[0:cut_right], Span(left)[lo:cut_left], Costs.edit(), Mode.SUFFIX)
+        out.edits += back.cost
+        _walk(back, lo, 0, out.path)
+    if cut_left < len(left):
+        # On from it: left's letters after it against a prefix of right's after it.
+        var on = aligner.align(Span(right)[cut_right:], Span(left)[cut_left:], Costs.edit(), Mode.PREFIX)
+        out.edits += on.cost
+        _walk(on, cut_left, cut_right, out.path)
+    return out^
+
+
+def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_reach: List[Int]) raises -> List[UInt8]:
+    """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end, by
+    `JOIN_LEAST` letters or more; empty when they do not overlap, or when where they do is not clear.
+
+    The ways to place right: the pins of minimap2's chain between them whose 19-mer is unique in both, grouped by
+    the diagonal they put right on (`JOIN_DRIFT`), each placing right so that it reaches left's end; and the
+    overlaps karan finds between left's last and right's first `JOIN_ENDS` letters, a match earning 1 against edits
+    of `JOIN_EDIT` and of `JOIN_EDIT_STRICT`. Each is scored by how well the two sides agree over all the overlap it
+    implies: the fewest edits a letter wins, if under `1 - JOIN_IDENTITY`. One 19-mer cannot place a join inside a
+    tandem array, where a copy's 19-mer may be unique in both sides and still another copy's; the whole overlap's
+    agreement can, as the two sides' copies differ. Where a placement on another diagonal agrees nearly as well
+    (`JOIN_MARGIN`), the copies there are too alike to tell, and the two sides are not joined.
+
+    At a pin's diagonal, the join is at the pin where the side worse supported there is best supported: left's
+    letters before it come from the left reads that reach it (`left_reach`, each read's reach along left from the
+    left anchor), right's after it from the right reads that reach back to it (`right_reach`). Each side's sequence
+    near its far end is the few longest reads' alone. Taking the middle pin, HG00512's HLA-DRB1 haplotype 1 (no read
+    spanning, 9 left reads and 18 right) had a stretch of 1.1 kb from the one right read reaching that far, against 9
+    left reads there, and its 9 insertions and 2 deletions (12 of 13 reads disagreeing at each) shifted exons 3 to 6
+    out of frame; the allele was read *08:01:05 for *08:03."""
+    var trace = Trace()
+    var aligner = Aligner(warm=False)
+    var placings = List[_Placing]()
     var found = pins(left, right)
     var unique = unique_pins(left, right, found)
-    var kept = List[Int]()
+    # The pins that place right reaching left's end with JOIN_LEAST letters of overlap, by diagonal.
+    var keys = List[UInt64]()
     for m in range(len(found.r)):
         # In left's letters right runs from r - q (before left's start when a right read reaches past the left
-        # anchor) to r - q + its length, which must reach left's end (or the join would drop left's last letters);
-        # the two overlap by JOIN_LEAST letters or more. (Requiring right to start inside left and end strictly past
-        # it left sides that overlap wholly unjoined, as when one right read reaches past the left anchor.)
-        var r = found.r[m]
-        var q = found.q[m]
-        var start = r - q
+        # anchor) to r - q + its length, which must reach left's end (or the join would drop left's last letters).
+        var start = found.r[m] - found.q[m]
         var end = start + len(right)
         if unique[m] and end >= len(left) and min(len(left), end) - max(0, start) >= JOIN_LEAST:
-            kept.append(m)
-    if len(kept) > 0:
-        # As well supported, the pin nearer the middle of the chain, where the join was taken before.
+            keys.append((UInt64(start + (1 << 30)) << 32) | UInt64(m))
+    sort(keys)
+    var k = 0
+    while k < len(keys):
+        # One group: pins whose diagonals are within JOIN_DRIFT of the one before.
+        var group = List[Int]()
+        var last = Int(keys[k] >> 32) - (1 << 30)
+        while k < len(keys) and Int(keys[k] >> 32) - (1 << 30) - last <= JOIN_DRIFT:
+            last = Int(keys[k] >> 32) - (1 << 30)
+            group.append(Int(keys[k] & 0xFFFFFFFF))
+            k += 1
+        # Its join: the pin best supported on both sides; as well supported, the one nearer the group's middle.
         var best = -1
         var best_support = -1
         var best_off = 0
-        for k in range(len(kept)):
-            var m = kept[k]
+        for g in range(len(group)):
+            var m = group[g]
             var support = min(_support(left_reach, found.r[m]), _support(right_reach, len(right) - found.q[m]))
-            var off = abs(k - len(kept) // 2)
+            var off = abs(g - len(group) // 2)
             if support > best_support or (support == best_support and off < best_off):
                 best = m
                 best_support = support
                 best_off = off
-        var r = found.r[best]
-        var q = found.q[best]
-        Trace().line(
-            POA,
-            String(
-                "join at the pin left ",
-                r,
-                " / right ",
-                q,
-                " (",
-                len(kept),
-                " pins kept of ",
-                len(found.r),
-                "; ",
-                best_support,
-                " reads either side)",
-            ),
+        placings.append(
+            _placing(
+                aligner,
+                left,
+                right,
+                found.r[best],
+                found.q[best],
+                String(
+                    "the pin left ",
+                    found.r[best],
+                    " / right ",
+                    found.q[best],
+                    " (",
+                    len(group),
+                    " pins; ",
+                    best_support,
+                    " reads either side)",
+                ),
+            )
         )
-        var out = List[UInt8](capacity=r + len(right) - q)
-        for i in range(r):
-            out.append(left[i])
-        for j in range(q, len(right)):
-            out.append(right[j])
-        return out^
+    # The overlaps of the ends.
     var a_start = max(0, len(left) - JOIN_ENDS)
     var a = List[UInt8](capacity=len(left) - a_start)
     for i in range(a_start, len(left)):
@@ -757,25 +845,71 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
     for j in range(min(len(right), JOIN_ENDS)):
         b.append(right[j])
     var mode = Mode.ends_free(reference_start=len(a), query_end=len(b)).with_match_score(1)
-    var aligner = Aligner(warm=False)
-    # Edits far dearer than a match earns (minimap2's 19 to 1): a longer overlap shifted by tandem copies, its letters
-    # a few percent apart, loses to the true one, its letters as alike as the two consensus sequences.
-    var got = aligner.align(Span(a), Span(b), Costs.linear(JOIN_EDIT, JOIN_EDIT), mode)
-    var spans = got.query_end - got.query_start
-    var trace = Trace()
-    if got.reference_end != len(a) or got.query_start != 0 or spans < JOIN_LEAST:
-        trace.line(POA, String("no pin to join at, and no overlap of ", JOIN_LEAST, " letters or more at the ends"))
-        return List[UInt8]()
-    if Float64(got.cost) > Float64(JOIN_EDIT) * (1.0 - JOIN_IDENTITY) * Float64(spans):
+    for edit in [JOIN_EDIT, JOIN_EDIT_STRICT]:
+        var got = aligner.align(Span(a), Span(b), Costs.linear(edit, edit), mode)
+        if got.reference_end != len(a) or got.query_start != 0 or got.query_end - got.query_start < JOIN_LEAST:
+            continue
+        placings.append(
+            _placing(
+                aligner,
+                left,
+                right,
+                len(left),
+                got.query_end,
+                String("an overlap of the ends, ", got.query_end, " letters (edits ", edit, ")"),
+            )
+        )
+    var best = -1
+    for c in range(len(placings)):
+        ref p = placings[c]
+        if p.letters < JOIN_LEAST or p.rate() > 1.0 - JOIN_IDENTITY:
+            continue
+        if (
+            best < 0
+            or p.rate() < placings[best].rate()
+            or (p.rate() == placings[best].rate() and p.letters > placings[best].letters)
+        ):
+            best = c
+    if best < 0:
         trace.line(
-            POA, String("no pin to join at; the ends' overlap of ", spans, " letters under ", JOIN_IDENTITY, " alike")
+            POA,
+            String(
+                "not joined: ", len(placings), " placings, none ", JOIN_IDENTITY, " alike over ", JOIN_LEAST, " letters"
+            ),
         )
         return List[UInt8]()
-    trace.line(POA, String("join at an overlap of the ends: ", spans, " letters, cost ", got.cost))
-    var out = List[UInt8](capacity=len(left) + len(right) - got.query_end)
-    for i in range(len(left)):
+    ref chosen = placings[best]
+    # Another placement whose meeting point lies on the chosen one's path (within JOIN_DRIFT) is the same one, its
+    # diagonal moved by the two sides' insertions and deletions. (An overlap of the ends meets at left's end: its
+    # last letter, one right letter before.)
+    for c in range(len(placings)):
+        ref p = placings[c]
+        var at_end = p.cut_left >= len(left)
+        var meets = chosen.lands(p.cut_left - 1 if at_end else p.cut_left)
+        var same = abs(meets - (p.cut_right - 1 if at_end else p.cut_right)) <= JOIN_DRIFT
+        if not same and p.letters >= JOIN_LEAST:
+            if p.rate() <= chosen.rate() * JOIN_MARGIN + JOIN_MARGIN_FLOOR:
+                trace.line(
+                    POA,
+                    String(
+                        "not joined: ",
+                        chosen.how,
+                        " at ",
+                        chosen.rate(),
+                        " edits a letter, ",
+                        p.how,
+                        " ",
+                        p.diagonal - chosen.diagonal,
+                        " letters off at ",
+                        p.rate(),
+                    ),
+                )
+                return List[UInt8]()
+    trace.line(POA, String("join at ", chosen.how, ": ", chosen.edits, " edits in ", chosen.letters, " letters"))
+    var out = List[UInt8](capacity=chosen.cut_left + len(right) - chosen.cut_right)
+    for i in range(chosen.cut_left):
         out.append(left[i])
-    for j in range(got.query_end, len(right)):
+    for j in range(chosen.cut_right, len(right)):
         out.append(right[j])
     return out^
 
