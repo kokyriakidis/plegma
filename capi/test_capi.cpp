@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -313,6 +314,18 @@ int main(int argc, char** argv)
         o.size = 0;
         check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)),
               "options not set by plegma_options_init fail");
+        // A count or length no caller means (a size_t of -1, say) fails before anything is allocated for it.
+        check(fails(plegma_consensus(SIZE_MAX, letters, lengths, nullptr, nullptr, nullptr, nullptr)),
+              "a count of SIZE_MAX fails");
+        check(fails(plegma_clustered_consensus(SIZE_MAX, letters, lengths, nullptr, nullptr, nullptr, nullptr, 2, 0.25)),
+              "a clustered count of SIZE_MAX fails");
+        std::int32_t hap[] = {0};
+        check(fails(plegma_phased_consensus(SIZE_MAX, letters, lengths, nullptr, nullptr, hap, nullptr, nullptr)),
+              "a phased count of SIZE_MAX fails");
+        std::size_t huge[] = {std::size_t(1) << 62};
+        check(fails(plegma_consensus(1, letters, huge, nullptr, nullptr, nullptr, nullptr)), "a length of 2^62 fails");
+        plegma_options_init(nullptr);
+        check(true, "plegma_options_init(NULL) does nothing");
         const std::uint8_t* none[] = {nullptr};
         std::size_t zero[] = {0};
         plegma_result* empty = plegma_consensus(1, none, zero, nullptr, nullptr, nullptr, nullptr);

@@ -183,7 +183,14 @@ def plegma_version() abi("C") -> Pointer[UInt8, ImmStaticOrigin]:
 
 
 @export
-def plegma_options_init(settings: Bytes) abi("C"):
+def plegma_options_init(settings: Settings) abi("C"):
+    """`settings` filled with the defaults (nothing for a null pointer)."""
+    if not settings:
+        return
+    _options_init(settings.value())
+
+
+def _options_init(settings: Bytes):
     var defaults = ConsensusOptions()
     settings.unsafe_bitcast[UInt32]()[] = UInt32(_OPTIONS_SIZE)
     _set_int(settings, _POLISH_ROUNDS, defaults.polish_rounds)
@@ -255,6 +262,11 @@ comptime Values = OptionalPointer[Int32, MutUntrackedOrigin]
 comptime Settings = OptionalPointer[UInt8, MutUntrackedOrigin]
 
 
+comptime _TOO_MANY = 1 << 40
+"""No read set or read is this long: a count or length past it is a caller's mistake (a negative size_t, an
+uninitialised one), refused before anything is allocated for it."""
+
+
 def _reads(
     count: Int,
     sequences: Sequences,
@@ -266,14 +278,16 @@ def _reads(
     mut strand_of: List[Int],
 ) raises:
     """The caller's reads, anchors and strands (unset ones at their defaults); `consensus` checks the values."""
-    if count < 0:
-        raise Error(t"count {count}: must be 0 or more")
+    if count < 0 or count >= _TOO_MANY:
+        raise Error(t"count {count}: must be 0 or more, and fewer than {_TOO_MANY}")
     if count > 0 and (not sequences or not lengths):
         raise Error("sequences and lengths must be given for count > 0")
     for r in range(count):
         var n = lengths.value()[unsafe_offset=r]
         var source = sequences.value()[unsafe_offset=r]
-        if n < 0 or (n > 0 and not source):
+        if n < 0 or n >= _TOO_MANY:
+            raise Error(t"read {r}: length {n}: must be 0 or more, and fewer than {_TOO_MANY}")
+        if n > 0 and not source:
             raise Error(t"read {r}: no letters for length {n}")
         var seq = List[UInt8](capacity=n)
         for i in range(n):
@@ -292,9 +306,10 @@ def _consensus(
     model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
     settings: Settings,
 ) raises -> List[List[UInt8]]:
-    var seqs = List[List[UInt8]](capacity=count)
-    var anchor_of = List[Int](capacity=count)
-    var strand_of = List[Int](capacity=count)
+    # Not reserved for `count`: `_reads` checks it first (a size_t of -1 would abort the allocation).
+    var seqs = List[List[UInt8]]()
+    var anchor_of = List[Int]()
+    var strand_of = List[Int]()
     _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
     var options = _settings(settings.value()) if settings else ConsensusOptions()
     if model:
@@ -314,9 +329,10 @@ def _clustered(
     min_freq: Float64,
     mut result: Result,
 ) raises:
-    var seqs = List[List[UInt8]](capacity=count)
-    var anchor_of = List[Int](capacity=count)
-    var strand_of = List[Int](capacity=count)
+    # Not reserved for `count`: `_reads` checks it first (a size_t of -1 would abort the allocation).
+    var seqs = List[List[UInt8]]()
+    var anchor_of = List[Int]()
+    var strand_of = List[Int]()
     _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
     var options = _settings(settings.value()) if settings else ConsensusOptions()
     var got: Clustered
@@ -382,13 +398,14 @@ def _phased(
     settings: Settings,
     mut result: Result,
 ) raises:
-    var seqs = List[List[UInt8]](capacity=count)
-    var anchor_of = List[Int](capacity=count)
-    var strand_of = List[Int](capacity=count)
+    # Not reserved for `count`: `_reads` checks it first (a size_t of -1 would abort the allocation).
+    var seqs = List[List[UInt8]]()
+    var anchor_of = List[Int]()
+    var strand_of = List[Int]()
     _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
     if count > 0 and not haplotypes:
         raise Error("haplotypes must be given for count > 0")
-    var haps = List[Int](capacity=count)
+    var haps = List[Int]()
     for r in range(count):
         haps.append(Int(haplotypes.value()[unsafe_offset=r]))
     var options = _settings(settings.value()) if settings else ConsensusOptions()
