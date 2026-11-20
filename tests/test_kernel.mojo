@@ -273,5 +273,52 @@ def test_prefix_and_suffix_modes_place_partial_reads() raises:
         assert_equal(found.nodes[150 + j], j)
 
 
+def test_16_bit_rows_far_apart_in_base_keep_the_alignment() raises:
+    """A 20 kb path and a 30-letter source chain joining it near its end, the path aligned to it in SUFFIX mode: the
+    chain's rows have bases some 38,000 below the path's at the join, past what 16 bits hold. Narrowed, the
+    difference wrapped and the chain's scores came in far too high (67,510, past the 40,000 of matching every
+    letter); 16-bit lanes must give 32-bit lanes' alignment."""
+    var a = _random(20000, 5)
+    var graph = Graph()
+    _ = graph.add("a", a.as_bytes())
+    var b = List[UInt8](_random(30, 6).as_bytes())
+    var aligned = List[Int](length=30, fill=-1)
+    for i in range(19000, 20000):
+        b.append(a.as_bytes()[i])
+        aligned.append(Int(graph.paths[0][i]))
+    _ = graph.fuse_nodes("b", Span(b), aligned)
+    var topology = Topology(graph)
+    var row_of = List[Int](length=len(graph), fill=-1)
+    var narrow = Workspace()
+    var wide = Workspace()
+    var got = narrow.align(graph, topology, topology.order, SOURCE, SINK, a.as_bytes(), Scoring(), row_of, SUFFIX)
+    var want = wide._align[DType.int32](
+        graph, topology, topology.order, SOURCE, SINK, a.as_bytes(), Scoring(), row_of, SUFFIX, 10, 0.01
+    )
+    assert_equal(got.score, want.score)
+    assert_equal(got.score, 2 * 20000)
+
+
+def test_a_large_mismatch_penalty_takes_32_bit_lanes() raises:
+    """The profile holds -mismatch: past some 16,000 it wrapped 16-bit lanes in every mode."""
+    var base = _random(40, 11)
+    var query = _mutated(base, 7, 12)
+    var graph = Graph()
+    _ = graph.add("a", base.as_bytes())
+    var topology = Topology(graph)
+    var row_of = List[Int](length=len(graph), fill=-1)
+    for mismatch in [20000, 40000]:
+        var s = Scoring()
+        s.mismatch = Int32(mismatch)
+        for mode in [GLOBAL, LOCAL, EXTENSION, PREFIX, SUFFIX]:
+            var picked = Workspace()
+            var wide = Workspace()
+            var got = picked.align(graph, topology, topology.order, SOURCE, SINK, query.as_bytes(), s, row_of, mode)
+            var want = wide._align[DType.int32](
+                graph, topology, topology.order, SOURCE, SINK, query.as_bytes(), s, row_of, mode, 10, 0.01
+            )
+            assert_equal(got.score, want.score)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

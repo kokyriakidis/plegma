@@ -88,9 +88,10 @@ def _banded(mode: Int) -> Bool:
 def _fits_16_bits(scoring: Scoring, m: Int, n: Int) -> Bool:
     """Whether every score an alignment of `m` letters to `n` nodes can reach fits 16-bit lanes: a cell is
     never below deleting every node and inserting every letter, never above matching every letter, and the gap
-    scan adds at most the extension cost of the whole query to that. The floor stays above half the sentinel,
-    below which a score counts as unreached."""
-    var low = -Int(scoring.gap(n)) - Int(scoring.gap(m))
+    scan adds at most the extension cost of the whole query to that, a mismatch at most its penalty below it (the
+    profile holds -mismatch itself). The floor stays above half the sentinel, below which a score counts as
+    unreached."""
+    var low = -Int(scoring.gap(n)) - Int(scoring.gap(m)) - Int(scoring.mismatch)
     var high = Int(scoring.match_score) * m + Int(max(scoring.extend1, scoring.extend2)) * (m + 1)
     return low > Int(_neg[DType.int16]()) // 2 + 500 and high < 30000
 
@@ -595,7 +596,7 @@ struct Workspace(Movable):
                         var moved = (
                             self.shifted.unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
                         )
-                        _moved[dt](prow, moved, 3 * pstride, S(delta))
+                        _moved[dt](prow, moved, 3 * pstride, delta)
                         prow = moved
                     var ph = prow.unsafe_offset(V)
                     var pd1 = prow.unsafe_offset(pstride + V)
@@ -1038,22 +1039,31 @@ def _beats(score: Int, base: Int, best: Int, best_ok: Bool, neg: Int) -> Bool:
 
 
 @inline(.always)
-def _moved[
-    dt: DType
-](source: MutPointer[Scalar[dt], _], into: MutPointer[Scalar[dt], _], count: Int, delta: Scalar[dt]):
+def _moved[dt: DType](source: MutPointer[Scalar[dt], _], into: MutPointer[Scalar[dt], _], count: Int, delta: Int):
     """`count` scores from `source` into `into`, each plus `delta` (a lower base's to a higher one's: delta <= 0),
-    cells at the sentinel kept at it."""
+    cells at the sentinel kept at it. A delta past half the lanes' range (two predecessors' bases tens of thousands
+    apart in 16 bits) is added in full width and clamped at the sentinel: narrowed, it wrapped and the lower row's
+    scores came in far too high."""
     comptime V = simd_width_of[dt]()
     comptime Vec = SIMD[dt, V]
+    if delta < Int(_neg[dt]()) or delta > -Int(_neg[dt]()):
+        var floor = Int(_neg[dt]())
+        for c in range(count):
+            var v = source[unsafe_offset=c]
+            into[unsafe_offset=c] = _neg[dt]() if v <= _neg[dt]() else Scalar[dt](
+                min(max(Int(v) + delta, floor), -2 * floor)
+            )
+        return
+    var shift = Scalar[dt](delta)
     var neg = Vec(_neg[dt]())
     var i = 0
     while i + V <= count:
         var v = source.unsafe_load[width=V](i)
-        into.unsafe_store(i, v.le(neg).select(neg, _floor(v + Vec(delta))))
+        into.unsafe_store(i, v.le(neg).select(neg, _floor(v + Vec(shift))))
         i += V
     while i < count:
         var v = source[unsafe_offset=i]
-        into[unsafe_offset=i] = _neg[dt]() if v <= _neg[dt]() else _floor(v + delta)
+        into[unsafe_offset=i] = _neg[dt]() if v <= _neg[dt]() else _floor(v + shift)
         i += 1
 
 
