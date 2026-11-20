@@ -324,31 +324,15 @@ struct Workspace(Movable):
         var reach = _reach(band_b, band_f, band_max, m) if banded else m + 1
         # 16-bit lanes when every score fits them, or, banded, when the band is narrow enough that a row's scores
         # kept relative to a base of its own fit them however long the alignment (`REBASED_SPAN`).
-        var found: GraphAlignment
         if _fits_16_bits(scoring, m, len(nodes)) or (banded and _rebased_fits(scoring, reach)):
-            found = self._align[DType.int16](
+            var got = self._align[DType.int16](
                 graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max, banded
             )
-            if found.cells < 0:
-                found = self._align[DType.int32](
-                    graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max
-                )
-        else:
-            found = self._align[DType.int32](
-                graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max
-            )
-        # A read anchored at one end always reaches an end, so a band that lost its path is not retried as a global
-        # one is: under a third of matching every letter (abPOA's poor score), the band doubled and uncapped once
-        # more, the better kept. Its diagonal follows the graph's heaviest remaining path, which the read's own may
-        # leave by more than the band.
-        if banded and (mode == PREFIX or mode == SUFFIX) and reach <= m:
-            if found.score < Int(scoring.match_score) * m // 3:
-                var wider = self.align(
-                    graph, topology, nodes, left, right, query, scoring, row_of, mode, 2 * band_b + 10, 2 * band_f
-                )
-                if wider.score > found.score:
-                    return wider^
-        return found^
+            if got.cells >= 0:
+                return got^
+        return self._align[DType.int32](
+            graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max
+        )
 
     def _align[
         dt: DType
