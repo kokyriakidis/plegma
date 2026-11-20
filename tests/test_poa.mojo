@@ -408,5 +408,21 @@ def test_a_one_sided_read_out_of_band_is_aligned_again_wider() raises:
     assert_true(distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth)) <= 5)
 
 
+def test_a_long_overlap_around_a_tandem_array_joins_at_its_copy_number() raises:
+    """Two sides overlapping by 2.1 kb: a 25-copy array and unique sequence either side of it, reads at 5% errors.
+    Each copy number is placed from the join's meeting point and aligned out from there, its far ends free: placed
+    from the overlap's start, the consensus sequences' indels over 2 kb drifted it by more than a copy, the right
+    copy number scored worse than one a copy off, and the sides were left apart."""
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    for record in _fasta("tests/data/tandem_flanked_join/reads.fa"):
+        anchors.append(LEFT if "anchor=left" in record[0] else (RIGHT if "anchor=right" in record[0] else BOTH))
+        seqs.append(record[1].copy())
+    var truth = _fasta("tests/data/tandem_flanked_join/truth.fa")[0][1].copy()
+    var made = consensus(seqs^, anchors)
+    assert_equal(len(made), 1)
+    assert_true(distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth)) <= 10)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

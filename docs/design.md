@@ -55,8 +55,10 @@ while most reads go on (`Graph.heaviest_path`), the right one backward (`Graph.h
 joined where they agree (`_join`): each way to place the right side over the left's end by 200 letters or more
 (minimap2's pins between them on a 19-mer unique in both, grouped by diagonal; karan overlaps of their ends) is
 aligned from its meeting point over the whole overlap, the fewest edits a letter wins, at its best-supported pin;
-where another placement off its path agrees nearly as well (a tandem array whose copies are as alike as the
-consensus is noisy) the sides stay apart. The graph is rebuilt on the joined sequence. One side: its consensus cut
+where another placement off its path agrees nearly as well the sides stay apart. Inside a tandem array (`_period`:
+the distance at which the overlap's 8-mers recur) the candidates are the copy numbers: the meeting point moved by
+whole copies to the same place in another copy (`_same_phase`), each aligned out from there, compared on the left
+letters both align (`_copy_join`); the copy number is taken only where every other agrees clearly worse. The graph is rebuilt on the joined sequence. One side: its consensus cut
 where fewer than `-c` reads (5) reach, each read's reach the consensus columns its letters are in (`_reach`; a
 one-directional assembly). Polishing aligns each read as it is anchored (`polish`'s `anchors`: karan's `PREFIX` or
 `SUFFIX`, or the consensus inside a longer read's prefix or suffix), counts disagreement against the reads covering

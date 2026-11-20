@@ -53,9 +53,12 @@
 - Joins inside tandem arrays: one 19-mer pin, unique in each side, could be another copy's, and the join dropped or
   doubled copies. Each way to place the two sides is now scored by how well they agree over the whole overlap; where
   two placements on different diagonals agree nearly as well, the sides are left apart. Inside a tandem array
-  every copy number is a candidate (the best placement shifted by whole periods). Simulated assemblies (held-out
-  seeds): wrong joins 38 to 10; where no read crosses the array and its copies differ by fewer letters than the
-  consensus's own errors, the sides now stay apart (a few joins right only by chance before are refused too).
+  (its period found from where its k-mers recur, so copies with indels count) every copy number is a candidate:
+  the join's meeting point moved by whole copies to the same place in another copy, aligned out from there with
+  the far ends free, and compared with the others on the letters both align. Simulated local assemblies, 504
+  held-out cases: wrong joins 38 to 0 (main grid 8 to 0). Where no read crosses an array and its copies differ by
+  fewer letters than the consensus's own errors the copy number cannot be told, and the sides stay apart: 29 of
+  the joins right before were right on two or three letters of evidence and are refused now.
 - A one-sided assembly's cut (`-c`) and the join's read support took a read's length for its reach along the
   consensus; they now take the consensus columns its letters are in. `-c 1` skipped the cut.
 - A one-sided read whose alignment lost its path in the band (at 10% errors) was never aligned again, as an end is
