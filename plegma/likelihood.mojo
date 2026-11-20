@@ -23,6 +23,9 @@ comptime MAX_COPYING = 0.7
 """Past this share of inserted letters copying a neighbour, the sequences' indels lengthen and shorten runs (as
 nanopore reads' do), which the pair HMM's uniform insertions misjudge: on such read sets its edits made the
 consensus worse, and `_likely` leaves it as it is. Uniform errors copy a neighbour some 45% of the time."""
+comptime MIN_INSERTED = 20
+"""The fewest inserted letters `MAX_COPYING`'s share is judged on: on clean reads one insertion copying its
+neighbour was all of them, and the stage was left out."""
 comptime RUN_GAIN = 1.0
 """A likelihood edit lengthening a run (a letter inserted beside its like, or a one-letter unit copied) gains at
 least this much: on simulated local assemblies 36 of the pair HMM's 38 errors the edit distance would have undone
@@ -103,7 +106,7 @@ def _likely(
     var run_gain = RUN_GAIN
     for _ in range(rounds):
         paths.fill(realigned, current, sequences, members, anchors)
-        if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
+        if paths.inserted >= MIN_INSERTED and Float64(paths.copying) > MAX_COPYING * Float64(paths.inserted):
             break
         var length = len(current)
         # The model's rates, each kept within [1e-4, 0.3].
