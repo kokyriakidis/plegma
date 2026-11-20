@@ -389,5 +389,21 @@ def test_the_consensus_does_not_depend_on_read_order() raises:
         assert_true(consensus(rotated^) == want)
 
 
+def test_a_one_sided_read_out_of_band_is_aligned_again_wider() raises:
+    """A 1 kb local assembly at 10% errors, its two sides overlapping by 200 letters: a right read aligned to the
+    right side's graph lost its path in the band (its diagonal follows the graph's heaviest remaining path) and scored
+    far under a third of a perfect score; never retried (an end is always reached), it left the right side 18 letters
+    long and the two sides apart. Aligned again with the band doubled, the assembly is one sequence near the truth."""
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    for record in _fasta("tests/data/band_retry/reads.fa"):
+        anchors.append(LEFT if "anchor=left" in record[0] else RIGHT)
+        seqs.append(record[1].copy())
+    var truth = _fasta("tests/data/band_retry/truth.fa")[0][1].copy()
+    var made = consensus(seqs^, anchors)
+    assert_equal(len(made), 1)
+    assert_true(distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth)) <= 5)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
