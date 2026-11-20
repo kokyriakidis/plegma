@@ -52,9 +52,10 @@
 - `plegma poa -d` and `-a` were ignored when any read was anchored at one end; they now fail with a message.
 - Joins inside tandem arrays: one 19-mer pin, unique in each side, could be another copy's, and the join dropped or
   doubled copies. Each way to place the two sides is now scored by how well they agree over the whole overlap; where
-  two placements on different diagonals agree nearly as well, the sides are left apart. Simulated assemblies
-  (held-out seeds): wrong joins 38 to 23, every one left inside an array whose copies are as alike as the
-  consensus is noisy; none of the joins right before lost but one, now refused.
+  two placements on different diagonals agree nearly as well, the sides are left apart. Inside a tandem array
+  every copy number is a candidate (the best placement shifted by whole periods). Simulated assemblies (held-out
+  seeds): wrong joins 38 to 10; where no read crosses the array and its copies differ by fewer letters than the
+  consensus's own errors, the sides now stay apart (a few joins right only by chance before are refused too).
 - A one-sided assembly's cut (`-c`) and the join's read support took a read's length for its reach along the
   consensus; they now take the consensus columns its letters are in. `-c 1` skipped the cut.
 - A one-sided read whose alignment lost its path in the band (at 10% errors) was never aligned again, as an end is

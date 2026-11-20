@@ -66,6 +66,11 @@ comptime JOIN_EDIT = 19
 comptime JOIN_EDIT_STRICT = 100
 """The same, for the overlap of the ends found again with edits dearer still (a longer overlap shifted by tandem
 copies a few percent apart loses to the true one even then)."""
+comptime JOIN_MAX_PERIOD = 500
+comptime JOIN_PERIOD_IDENTITY = 0.8
+"""An overlap whose letters repeat a period on (at most `JOIN_MAX_PERIOD`) this often is a tandem array's."""
+comptime JOIN_SHIFTS = 64
+"""The most copies either way a placement inside a tandem array is shifted by, to be scored too."""
 comptime JOIN_DRIFT = 16
 """Pins whose diagonals are within this many letters of each other place right alike (the two sides' insertions and
 deletions move it)."""
@@ -763,6 +768,37 @@ def _placing(
     return out^
 
 
+def _best(placings: List[_Placing]) -> Int:
+    """The placement with the fewest edits a letter (of two as good, the longer overlap), among those over `JOIN_LEAST`
+    letters and `JOIN_IDENTITY` alike; -1 for none."""
+    var best = -1
+    for c in range(len(placings)):
+        ref p = placings[c]
+        if p.letters < JOIN_LEAST or p.rate() > 1.0 - JOIN_IDENTITY:
+            continue
+        if (
+            best < 0
+            or p.rate() < placings[best].rate()
+            or (p.rate() == placings[best].rate() and p.letters > placings[best].letters)
+        ):
+            best = c
+    return best
+
+
+def _period(seq: List[UInt8], start: Int, end: Int) -> Int:
+    """The shortest period `seq[start:end]` repeats with (`JOIN_PERIOD_IDENTITY` of its letters the same a period on,
+    at least two copies, at most `JOIN_MAX_PERIOD` letters), or 0 for none."""
+    var n = end - start
+    for p in range(2, min(JOIN_MAX_PERIOD, n // 2) + 1):
+        var same = 0
+        for x in range(start, end - p):
+            if seq[x] == seq[x + p]:
+                same += 1
+        if Float64(same) >= JOIN_PERIOD_IDENTITY * Float64(n - p):
+            return p
+    return 0
+
+
 def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_reach: List[Int]) raises -> List[UInt8]:
     """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end, by
     `JOIN_LEAST` letters or more; empty when they do not overlap, or when where they do is not clear.
@@ -868,17 +904,37 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
             )
         except:
             pass
-    var best = -1
-    for c in range(len(placings)):
-        ref p = placings[c]
-        if p.letters < JOIN_LEAST or p.rate() > 1.0 - JOIN_IDENTITY:
-            continue
-        if (
-            best < 0
-            or p.rate() < placings[best].rate()
-            or (p.rate() == placings[best].rate() and p.letters > placings[best].letters)
-        ):
-            best = c
+    var best = _best(placings)
+    if best >= 0:
+        # Inside a tandem array the chain follows one copy, and the placement a copy or more off may be no candidate
+        # at all: with the overlap periodic, every shift of the best by whole periods is one (each copy number the
+        # two sides could have between them), scored alike.
+        var at = placings[best].diagonal
+        var cut_left = placings[best].cut_left
+        var cut_right = placings[best].cut_right
+        var period = _period(left, max(0, at), len(left))
+        if period > 0:
+            for k in range(-JOIN_SHIFTS, JOIN_SHIFTS + 1):
+                var shifted = cut_right - k * period
+                var diagonal = cut_left - shifted
+                if k == 0 or shifted < 0 or shifted > len(right) or diagonal + len(right) < len(left):
+                    continue
+                if len(left) - max(0, diagonal) < JOIN_LEAST:
+                    continue
+                try:
+                    placings.append(
+                        _placing(
+                            aligner,
+                            left,
+                            right,
+                            cut_left,
+                            shifted,
+                            String("a copy shift of ", k, " (period ", period, ") from ", placings[best].how),
+                        )
+                    )
+                except:
+                    pass
+            best = _best(placings)
     if best < 0:
         trace.line(
             POA,
