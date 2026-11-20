@@ -48,7 +48,7 @@ is implementation and may change.
 """
 
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
-from .clustered import Clustered, Placement, alignment_costs, clustered_consensus, phased_consensus
+from .clustered import clustered_consensus
 from .clusters import cluster_rows
 from .consensus import ConsensusOptions, consensus
 from .graph import Graph, Runs, cigar_runs
@@ -73,8 +73,10 @@ from .kernel import (
     align_to_graph,
 )
 from .order import guide_order
+from .phased import phased_consensus
 from .pinned import WindowScratch, align_pinned, window_nodes
 from .pins import Pins, pinned_pairing, pins, pins_in_context
+from .placement import Clustered, Placement, alignment_costs
 from .poa import Poa, PoaOptions, poa
 from .polish import polish
 from .reference import on_reference

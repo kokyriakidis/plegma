@@ -5,7 +5,9 @@ from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 from karan import distance
 
 from karan import Aligner, Costs, Mode, Ties
-from plegma.clustered import _haplotype_at, _length_in, _run_pairs, clustered_consensus, phased_consensus
+from plegma.clustered import clustered_consensus
+from plegma.phased import _haplotype_at, phased_consensus
+from plegma.runs import _length_in, _run_pairs
 from plegma.consensus import ConsensusOptions, consensus
 from plegma.homopolymer import HomopolymerModel
 from plegma.kernel import BOTH, INSIDE, LEFT, RIGHT
