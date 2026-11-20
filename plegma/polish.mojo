@@ -639,7 +639,10 @@ def polish(
                             swap(copied, ahead)
                         for j in range(lo, hi + 1):
                             best = min(best, copied[j - lo] + backward[bands.start[c] + j - lo])
-                    block_gain[b] += wk * (base - best)
+                    # A unit of p letters deleted or copied changes the read's distance by p at most: its band
+                    # may not reach both ends of the unit (best then INF, and nine such reads wrapped the gain to
+                    # the top of 32 bits).
+                    block_gain[b] += wk * (base - min(best, base + Int32(p)))
             # This segment's best edits: far apart, or the best alone inside a tandem repeat (or after a round
             # whose edits clashed).
             var alone = one_each or mask.covers(s, e)

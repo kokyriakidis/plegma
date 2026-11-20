@@ -148,5 +148,38 @@ def test_consensus_checks_its_arguments() raises:
     assert_equal(len(consensus(List[List[UInt8]]())), 1)
 
 
+def test_unit_deletion_out_of_a_reads_band_does_not_wrap() raises:
+    """Reads whose band cannot reach both ends of a repeat unit gain nothing by deleting it: ten of them (an
+    insertion of 40 letters inside the repeat) wrapped the unit deletion's gain to the top of 32 bits, the round was
+    reverted, and the flank's error was never mended."""
+    seed(1)
+    var f1 = _random(150)
+    var f2 = _random(150)
+    var x = _random(40)
+    var unit = "TGGTGA".as_bytes()
+    var short = f1.copy()
+    for _ in range(20):
+        short.extend(List[UInt8](unit))
+    short.extend(f2.copy())
+    var long = f1.copy()
+    for _ in range(10):
+        long.extend(List[UInt8](unit))
+    long.extend(x.copy())
+    for _ in range(10):
+        long.extend(List[UInt8](unit))
+    long.extend(f2.copy())
+    var consensus = short.copy()
+    var at = len(short) - 75
+    consensus[at] = UInt8(ord("A")) if consensus[at] != UInt8(ord("A")) else UInt8(ord("C"))
+    var reads = List[List[UInt8]]()
+    var members = List[Int]()
+    for k in range(19):
+        reads.append(long.copy() if k < 10 else short.copy())
+        members.append(k)
+    var polished = polish(consensus, reads, members, 10, likely_rounds=0)
+    for t in range(1, 151):
+        assert_equal(polished[len(polished) - t], short[len(short) - t])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
