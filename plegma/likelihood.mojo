@@ -1,0 +1,406 @@
+"""Polishing's second stage: one-letter and whole-unit edits kept while they raise the reads' likelihood under a pair
+HMM (`_likely`), the matrices filled in the same bands as the edit distance's."""
+
+from std.math import log
+
+from .bands import (
+    _Bands,
+    MAX_PERIOD,
+    _Paths,
+    REPEAT_DISTANCE,
+    REPEAT_K,
+    _Realigned,
+    RepeatMask,
+    SEGMENT,
+    SLOTS,
+    _code,
+    _periods,
+    _segments,
+)
+
+
+comptime MAX_COPYING = 0.7
+"""Past this share of inserted letters copying a neighbour, the sequences' indels lengthen and shorten runs (as
+nanopore reads' do), which the pair HMM's uniform insertions misjudge: on such read sets its edits made the
+consensus worse, and `_likely` leaves it as it is. Uniform errors copy a neighbour some 45% of the time."""
+comptime RUN_GAIN = 1.0
+"""A likelihood edit lengthening a run (a letter inserted beside its like, or a one-letter unit copied) gains at
+least this much: on simulated local assemblies 36 of the pair HMM's 38 errors the edit distance would have undone
+were runs it lengthened, and with this floor their errors fell 88 -> 67 (0 and 8 lets every one or none through,
+88 and 118)."""
+comptime MIN_GAIN = 0.01
+"""A likelihood edit gains at least this much (natural log, summed over the sequences)."""
+
+
+@always_inline
+def _log(x: Float64) -> Float64:
+    return log(x) if x > 0 else -1e300
+
+
+def _sites(paths: _Paths, support: Int, share: Float64, mut site: List[Bool]):
+    """Per consensus boundary: whether, within two letters, `support` sequences disagree and `share` of those whose
+    alignments span it."""
+    var stride = paths.stride
+    site.resize(stride, False)
+    var near = 0
+    for i in range(min(2, stride)):
+        near += Int(paths.discord[i])
+    for i in range(stride):
+        if i + 2 < stride:
+            near += Int(paths.discord[i + 2])
+        if i - 3 >= 0:
+            near -= Int(paths.discord[i - 3])
+        site[i] = near >= max(support, Int(Float64(paths.cover[i]) * share + 0.999))
+
+
+def _lengthens_run(consensus: List[UInt8], i: Int, code: Int) -> Bool:
+    """Whether inserting the letter of `code` before consensus letter `i` lengthens a run of it."""
+    return (i > 0 and _code(consensus[i - 1]) == code) or (i < len(consensus) and _code(consensus[i]) == code)
+
+
+def _likely(
+    var current: List[UInt8],
+    sequences: List[List[UInt8]],
+    members: List[Int],
+    rounds: Int,
+    support: Int,
+    share: Float64,
+    anchors: List[Int],
+    mut realigned: _Realigned,
+) raises -> List[UInt8]:
+    """The edits of `polish`, scored by the sequences' summed log-likelihood instead of their edit distance.
+
+    The model, a pair HMM: before each template letter and after the last, k letters are inserted with probability
+    pi^k (1 - pi), each uniform; a template letter is deleted with probability pd, else read as itself with
+    probability 1 - ps, as each other letter ps / 3. Every alignment counts, so a read one letter short in a run of
+    L counts L ways, where its edit distance counts one; on read sets whose edit distance prefers the consensus to
+    the truth, this likelihood prefers the truth. The rates come from the sequences' alignments to the consensus,
+    every round. Each sequence's forward and backward matrices, in probability, each column rescaled, span the
+    band around its alignment that `polish`'s do, in the same segments; a segment takes its best edit alone a round
+    (gains add up only nearly within one)."""
+    var count = len(members)
+    if count == 0 or rounds <= 0 or len(current) == 0:
+        return current^
+    var paths = _Paths()
+    var bands = _Bands()
+    var forward = List[Float64]()
+    var slotted = List[Float64]()
+    var backward = List[Float64]()
+    var forward_scale = List[Float64]()
+    var backward_scale = List[Float64]()
+    var copied = List[Float64]()
+    var ahead = List[Float64]()
+    var gains = List[Float64]()
+    var site = List[Bool]()
+    var periods = List[Int]()
+    var block_at = List[Int]()
+    var block_period = List[Int]()
+    var block_copy = List[Bool]()
+    var block_gain = List[Float64]()
+    var dirty = List[Bool](length=len(current) + 1, fill=True)
+    comptime LETTERS = "ACGT"
+    var before = List[UInt8]()
+    var run_gain = RUN_GAIN
+    for _ in range(rounds):
+        paths.fill(realigned, current, sequences, members, anchors)
+        if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
+            break
+        var length = len(current)
+        # The model's rates, each kept within [1e-4, 0.3].
+        var letters = Float64(max(1, paths.spanned))
+        var pd = min(0.3, max(1e-4, Float64(paths.deleted) / letters))
+        var ps = min(0.3, max(1e-4, Float64(paths.substituted) / Float64(max(1, paths.matched + paths.substituted))))
+        var per_slot = Float64(paths.inserted) / Float64(max(1, paths.spanned + count))
+        var pi = min(0.3, max(1e-4, per_slot / (1.0 + per_slot)))
+        var stay = pi / 4.0
+        var leave = 1.0 - pi
+        var kept = 1.0 - pd
+        var right = 1.0 - ps
+        var wrong = ps / 3.0
+        _sites(paths, support, share, site)
+        var mask = RepeatMask(Span(current), REPEAT_K, REPEAT_DISTANCE)
+        var bounds = _segments(current, paths.discord, mask)
+        var edit_start = List[Int]()
+        var edit_end = List[Int]()
+        var edit_text = List[List[UInt8]]()
+        for g in range(len(bounds) - 1):
+            var s = bounds[g]
+            var e = bounds[g + 1]
+            var top = e + 1 if e == length else e
+            var any_site = False
+            var any_dirty = False
+            for i in range(s, top):
+                any_site = any_site or site[i]
+                any_dirty = any_dirty or dirty[i]
+            if not any_site or not any_dirty:
+                continue
+            gains.resize((top - s) * SLOTS, 0.0)
+            for x in range(len(gains)):
+                gains[x] = 0.0
+            block_at.clear()
+            block_period.clear()
+            block_copy.clear()
+            for i in range(s, top):
+                if site[i]:
+                    _periods(current, i, s, periods)
+                    for p in periods:
+                        for copy in range(2):
+                            block_at.append(i)
+                            block_period.append(p)
+                            block_copy.append(copy == 1)
+            block_gain.resize(len(block_at), 0.0)
+            for b in range(len(block_gain)):
+                block_gain[b] = 0.0
+            # A read the segment holds only part of (anchored at one end, ending or starting inside) has no
+            # likelihood here: the segment is left to the edit distance, which frees its end, rather than to the
+            # reads spanning it alone, whose own errors would win.
+            var partial = False
+            for k in range(count):
+                var overlaps = paths.span_end[k] > s and paths.span_start[k] < e
+                partial = partial or (overlaps and (paths.span_start[k] > s or paths.span_end[k] < e))
+            if partial:
+                continue
+            var columns = e - s + 1
+            var c_last = columns - 1
+            forward_scale.resize(columns, 0.0)
+            backward_scale.resize(columns, 0.0)
+            for k in range(count):
+                if paths.span_start[k] > s or paths.span_end[k] < e:
+                    continue
+                ref seq = sequences[members[k]]
+                var kb = k * paths.stride
+                var first = Int(paths.enter[kb + s])
+                var last = Int(paths.enter[kb + e]) if e < length else Int(paths.leave[kb + length])
+                bands.fill(paths, k, s, e, first, last)
+                var cells = bands.start[columns]
+                forward.resize(cells, 0.0)
+                slotted.resize(cells, 0.0)
+                backward.resize(cells, 0.0)
+                # Forward: column c holds the read's first ..< j generated by consensus s ..< s + c, before the
+                # slot at s + c; `slotted` the same after it.
+                for j in range(bands.low[0], bands.high[0] + 1):
+                    forward[j - bands.low[0]] = 1.0 if j == first else 0.0
+                forward_scale[0] = 0.0
+                for c in range(columns):
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    var h = 0.0
+                    for j in range(lo, hi + 1):
+                        h = forward[at + j - lo] + stay * h
+                        slotted[at + j - lo] = leave * h
+                    if c == c_last:
+                        break
+                    var letter = current[s + c]
+                    var nlo = bands.low[c + 1]
+                    var nhi = bands.high[c + 1]
+                    var nat = bands.start[c + 1]
+                    var most = 0.0
+                    for j in range(nlo, nhi + 1):
+                        var v = slotted[at + j - lo] * pd if j >= lo and j <= hi else 0.0
+                        if j - 1 >= lo and j - 1 <= hi:
+                            v += slotted[at + j - 1 - lo] * kept * (right if seq[j - 1] == letter else wrong)
+                        forward[nat + j - nlo] = v
+                        most = max(most, v)
+                    if most <= 0:
+                        most = 1e-300
+                    for j in range(nlo, nhi + 1):
+                        forward[nat + j - nlo] /= most
+                    forward_scale[c + 1] = forward_scale[c] + log(most)
+                # Backward: column c holds the read's j ..< last generated from the slot at s + c on.
+                var lo_last = bands.low[c_last]
+                var at_last = bands.start[c_last]
+                for j in reversed(range(lo_last, bands.high[c_last] + 1)):
+                    if e == length:
+                        backward[at_last + j - lo_last] = (
+                            leave if j == last else stay * backward[at_last + j + 1 - lo_last]
+                        )
+                    else:
+                        backward[at_last + j - lo_last] = 1.0 if j == last else 0.0
+                backward_scale[c_last] = 0.0
+                for c in reversed(range(c_last)):
+                    var letter = current[s + c]
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    var nlo = bands.low[c + 1]
+                    var nhi = bands.high[c + 1]
+                    var nat = bands.start[c + 1]
+                    var b = 0.0
+                    var most = 0.0
+                    for j in reversed(range(lo, hi + 1)):
+                        var through = pd * backward[nat + j - nlo] if j >= nlo and j <= nhi else 0.0
+                        if j < last and j + 1 >= nlo and j + 1 <= nhi:
+                            through += kept * (right if seq[j] == letter else wrong) * backward[nat + j + 1 - nlo]
+                        b = leave * through + stay * b
+                        backward[at + j - lo] = b
+                        most = max(most, b)
+                    if most <= 0:
+                        most = 1e-300
+                    for j in range(lo, hi + 1):
+                        backward[at + j - lo] /= most
+                    backward_scale[c] = backward_scale[c + 1] + log(most)
+                var base = _log(backward[bands.start[0] + first - bands.low[0]]) + backward_scale[0]
+                for c in range(columns):
+                    var i = s + c
+                    if i >= top or not site[i]:
+                        continue
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    # Delete letter i: forward before slot i against backward from slot i + 1 (the two slots one).
+                    # Substitute x: after slot i, x read as read letter j or deleted, then backward from slot i + 1.
+                    # Insert x before i: after slot i, x, then backward from slot i (a new slot after x).
+                    var deleted = 0.0
+                    var skipped = 0.0
+                    var read = 0.0
+                    var read_by = SIMD[DType.float64, 4](0)
+                    var skipped_here = 0.0
+                    var read_here = 0.0
+                    var read_here_by = SIMD[DType.float64, 4](0)
+                    for j in range(lo, hi + 1):
+                        var after = slotted[at + j - lo]
+                        var code = _code(seq[j]) if j < last else 4
+                        skipped_here += after * backward[at + j - lo]
+                        if j < last and j + 1 <= hi:
+                            var u = after * backward[at + j + 1 - lo]
+                            read_here += u
+                            if code < 4:
+                                read_here_by[code] += u
+                        if i < e:
+                            var next = bands.at_float(backward, c + 1, j)
+                            deleted += forward[at + j - lo] * next
+                            skipped += after * next
+                            if j < last:
+                                var t = after * bands.at_float(backward, c + 1, j + 1)
+                                read += t
+                                if code < 4:
+                                    read_by[code] += t
+                    var row = c * SLOTS
+                    var here = forward_scale[c] + backward_scale[c] - base
+                    for x in range(4):
+                        var p = pd * skipped_here + kept * (wrong * read_here + (right - wrong) * read_here_by[x])
+                        gains[row + x] += _log(p) + here
+                    if i < e:
+                        var onward = forward_scale[c] + backward_scale[c + 1] - base
+                        gains[row + 4] += _log(deleted) + onward
+                        for x in range(4):
+                            var p = pd * skipped + kept * (wrong * read + (right - wrong) * read_by[x])
+                            gains[row + 5 + x] += _log(p) + onward
+                # Whole units: deleted, forward before slot i - p against backward from slot i; copied, the units'
+                # letters (each with its slot after) between slot i and backward from slot i again.
+                for b in range(len(block_at)):
+                    var c = block_at[b] - s
+                    var p = block_period[b]
+                    var lo = bands.low[c]
+                    var hi = bands.high[c]
+                    var at = bands.start[c]
+                    var total = 0.0
+                    var scale: Float64
+                    if not block_copy[b]:
+                        for j in range(lo, hi + 1):
+                            total += bands.at_float(forward, c - p, j) * backward[at + j - lo]
+                        scale = forward_scale[c - p] + backward_scale[c]
+                    else:
+                        var wide = min(last, hi + p)
+                        copied.resize(wide - lo + 1, 0.0)
+                        ahead.resize(wide - lo + 1, 0.0)
+                        for j in range(lo, wide + 1):
+                            copied[j - lo] = slotted[at + j - lo] if j <= hi else 0.0
+                        scale = forward_scale[c]
+                        for t in range(p):
+                            if t > 0:
+                                var h = 0.0
+                                for j in range(lo, wide + 1):
+                                    h = copied[j - lo] + stay * h
+                                    copied[j - lo] = leave * h
+                            var letter = current[s + c - p + t]
+                            var most = 0.0
+                            for j in range(lo, wide + 1):
+                                var v = copied[j - lo] * pd
+                                if j > lo:
+                                    v += copied[j - 1 - lo] * kept * (right if seq[j - 1] == letter else wrong)
+                                ahead[j - lo] = v
+                                most = max(most, v)
+                            if most <= 0:
+                                most = 1e-300
+                            for j in range(lo, wide + 1):
+                                ahead[j - lo] /= most
+                            scale += log(most)
+                            swap(copied, ahead)
+                        for j in range(lo, hi + 1):
+                            total += copied[j - lo] * backward[at + j - lo]
+                        scale += backward_scale[c]
+                    block_gain[b] += _log(total) + scale - base
+            # The segment's best edit alone.
+            var best = MIN_GAIN
+            var best_x = -1
+            for x in range(len(gains)):
+                var slot = x % SLOTS
+                # After the last letter only insertions are scored.
+                if slot >= 4 and s + x // SLOTS >= length:
+                    continue
+                if slot >= 5 and _code(current[s + x // SLOTS]) == slot - 5:
+                    continue
+                # A letter lengthening a run only where it gains `RUN_GAIN` or more: the pair HMM's alignments multiply
+                # with a run's length, so it favours runs longer than the reads hold.
+                if slot < 4 and gains[x] < run_gain and _lengthens_run(current, s + x // SLOTS, slot):
+                    continue
+                if gains[x] > best:
+                    best = gains[x]
+                    best_x = x
+            for b in range(len(block_gain)):
+                if block_copy[b] and block_period[b] == 1 and block_gain[b] < run_gain:
+                    continue
+                if block_gain[b] > best:
+                    best = block_gain[b]
+                    best_x = len(gains) + b
+            if best_x < 0:
+                continue
+            var text = List[UInt8]()
+            if best_x < len(gains):
+                var slot = best_x % SLOTS
+                var start = s + best_x // SLOTS
+                edit_start.append(start)
+                edit_end.append(start if slot < 4 else start + 1)
+                if slot < 4:
+                    text.append(LETTERS.as_bytes()[slot])
+                elif slot > 4:
+                    text.append(LETTERS.as_bytes()[slot - 5])
+            else:
+                var b = best_x - len(gains)
+                var i = block_at[b]
+                var p = block_period[b]
+                if block_copy[b]:
+                    edit_start.append(i)
+                    edit_end.append(i)
+                    for t in range(i - p, i):
+                        text.append(current[t])
+                else:
+                    edit_start.append(i - p)
+                    edit_end.append(i)
+            edit_text.append(text^)
+        if len(edit_start) == 0:
+            break
+        # Segments are disjoint and listed left to right, and so are their edits.
+        var next = List[UInt8](capacity=length + len(edit_start) * MAX_PERIOD)
+        var marks = List[Int]()
+        var at = 0
+        for t in range(len(edit_start)):
+            for q in range(at, edit_start[t]):
+                next.append(current[q])
+            marks.append(len(next))
+            next.extend(edit_text[t].copy())
+            at = edit_end[t]
+        for q in range(at, length):
+            next.append(current[q])
+        if next == before:
+            # Back to the consensus of two rounds ago: the edits only go back and forth.
+            break
+        before = current^
+        current = next^
+        dirty = List[Bool](length=len(current) + 1, fill=False)
+        for m in marks:
+            for q in range(max(0, m - 2 * SEGMENT), min(len(current) + 1, m + 2 * SEGMENT)):
+                dirty[q] = True
+    return current^

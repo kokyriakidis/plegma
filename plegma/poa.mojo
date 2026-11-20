@@ -45,7 +45,7 @@ from .kernel import (
 from .order import guide_order
 from .pinned import WindowScratch, align_pinned, unique_pins
 from .pins import pins
-from .polish import past_the_end
+from .bands import past_the_end
 
 
 comptime INPUT_ORDER = 0
