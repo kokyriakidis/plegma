@@ -54,7 +54,7 @@ Output options (both):
     -r INT      output [0]: 0 consensus FASTA, 1 MSA FASTA, 2 both, 3 GFA, 4 GFA with the consensus path
     -a INT      consensus [0]: 0 heaviest path, 1 most frequent letter per column
     -d INT      at most INT consensus sequences [1]; at 2 or more the sequences are clustered on the MSA's
-                heterozygous columns and each cluster gets its own
+                heterozygous columns and each cluster gets its own (-d and -a: reads spanning both anchors only)
     -q FLOAT    smallest share of the sequences a cluster and a column's second allele must hold [0.25]
     -P INT[,INT] rounds of consensus polishing, at most [50,20] (global alignment): each sequence aligned to the
                 consensus, and every one-letter or whole-repeat-unit edit kept that lowers their summed edit distance

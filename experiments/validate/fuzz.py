@@ -201,6 +201,20 @@ def main():
         opts = list(rng.choice(pool))
         if rng.random() < 0.3:
             opts += list(rng.choice(pool))
+        if kind == "anchored" and command == "poa":
+            # -d and -a take spanning reads only (the command refuses them with reads anchored at one end).
+            drop = {"-d", "-a"}
+            kept = []
+            skip = False
+            for o in opts:
+                if skip:
+                    skip = False
+                    continue
+                if o in drop:
+                    skip = True
+                    continue
+                kept.append(o)
+            opts = kept
         if "-F" in opts:
             flanks = os.path.join(work, "flanks%d.fa" % c)
             with open(flanks, "w") as f:

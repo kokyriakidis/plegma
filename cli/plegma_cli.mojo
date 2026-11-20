@@ -57,7 +57,16 @@ struct Aligned(Movable):
 
 def _poa(mut records: Records, options: Options) raises -> Aligned:
     """`plegma poa`: `plegma.poa` with the command's options, each record anchored as its header says; the consensus
-    `-r 0` writes as `plegma.consensus` makes it (`polished`), unless `-d` or `-a` asks for another."""
+    `-r 0` writes as `plegma.consensus` makes it (`polished`), unless `-d` or `-a` asks for another (spanning reads
+    only: raises for reads anchored at one end)."""
+    if options.max_consensus > 1 or options.consensus_rule != 0:
+        for anchor in records.anchors:
+            if anchor != BOTH:
+                # The assembly's own consensus is what such reads make: -d and -a would be ignored.
+                raise Error(
+                    "-d and -a take reads spanning both anchors: a read anchored at one end (anchor=left or right)"
+                    " makes one assembly"
+                )
     var start = Graph()
     if options.start_msa.byte_length() > 0:
         var msa = read_fasta(options.start_msa)
