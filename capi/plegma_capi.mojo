@@ -459,7 +459,9 @@ def plegma_result_members(
 
 @export
 def plegma_result_cigar(
-    result: OptionalPointer[Result, MutUntrackedOrigin], index: Int, placement: OptionalPointer[Int64, MutUntrackedOrigin]
+    result: OptionalPointer[Result, MutUntrackedOrigin],
+    index: Int,
+    placement: OptionalPointer[Int64, MutUntrackedOrigin],
 ) abi("C") -> OptionalPointer[UInt8, MutUntrackedOrigin]:
     if not result or index < 0 or index >= len(result.value()[].cigars):
         return None
@@ -490,9 +492,9 @@ def plegma_result_sequence(
 
 
 @export
-def plegma_result_error(result: OptionalPointer[Result, MutUntrackedOrigin]) abi("C") -> OptionalPointer[
-    UInt8, MutUntrackedOrigin
-]:
+def plegma_result_error(
+    result: OptionalPointer[Result, MutUntrackedOrigin]
+) abi("C") -> OptionalPointer[UInt8, MutUntrackedOrigin]:
     if not result or len(result.value()[].error) == 0:
         return None
     return result.value()[].error.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()

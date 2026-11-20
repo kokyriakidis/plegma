@@ -48,8 +48,10 @@ test-static = { cmd = "./build/test_capi_static && MALLOC_CHECK_=3 ./build/test_
 test-python = { cmd = "python3 python/test_plegma.py", depends-on = ["build-capi"] }
 # Random inputs through every option combination, every output checked: `pixi run fuzz [cases] [seed]`.
 fuzz = { cmd = "python3 -I experiments/validate/fuzz.py build/plegma build/fuzz", depends-on = ["build-cli"] }
+# Everything a release is checked with: the unit tests, the C API (shared and static), Python, and the fuzzer.
+test-all = { cmd = "python3 -I experiments/validate/fuzz.py build/plegma build/fuzz 300", depends-on = ["test", "test-capi", "test-static", "test-python", "build-cli"] }
 # The co-optimal letter pairs experiments/chr20/qc_loop.py --coopt scores against.
 build-coopt = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan experiments/chr20/coopt.mojo -o build/coopt", depends-on = ["prepare"] }
-format = "mojo format -l 120 plegma tests experiments cli"
+format = "mojo format -l 120 plegma tests experiments cli capi"
 # Pulls the latest Mojo skills from github.com/modular/skills into .claude/skills for coding agents.
 sync-skills = "bash .claude/sync-skills.sh"
