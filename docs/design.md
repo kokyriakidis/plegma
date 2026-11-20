@@ -4,7 +4,12 @@ Two commands share one library. This file maps the code to them, for whoever cha
 
 ## `plegma poa`: the general POA
 
-`cli/plegma_cli.mojo` `_poa` adds the sequences one at a time, in abPOA's guide order (`-p`, the default,
+The command line is `cli/`: `options.mojo` (the usage text, parsing, every value checked, the library's own checks
+through `ConsensusOptions.check`), `records.mojo` (the input read once, gzip or not, FASTA or FASTQ, with each record's
+`anchor=` and `strand=` header words), `gfa.mojo` (`-r 3`, `-r 4`) and `plegma_cli.mojo` (each command, the outputs;
+an error is one `plegma: ...` line and exit status 1).
+
+`plegma.poa` (`plegma/poa.mojo`) adds the sequences one at a time, in abPOA's guide order (`-p`, the default,
 `plegma/order.mojo`), input order (`-n`) or longest first (`-L`).
 
 - **Alignment to the graph** (`plegma/kernel.mojo`): banded DP over the nodes in topological order, abPOA's scoring
@@ -20,10 +25,16 @@ Two commands share one library. This file maps the code to them, for whoever cha
   (`window_nodes`), in the band the whole sequence would get. Where no pin survives, the one window is the whole graph.
 - **The graph** (`plegma/graph.mojo`): flat arrays of nodes, columns and edges. A sequence joins along its aligned
   nodes (`fuse_nodes`); an MSA's rows make a graph directly (`from_msa`); `msa` writes the rows back.
-- **Consensus**: abPOA's heaviest bundle (`Graph.heaviest_path` over the member paths), then polished in global mode
-  (`plegma/polish.mojo`): one-letter and whole-repeat-unit edits kept while they lower the summed edit distance of the
-  sequences to it, then while they raise their likelihood under a pair HMM. `-d` clusters the sequences on the MSA's
-  heterozygous columns (`plegma/clusters.mojo`), one consensus per cluster.
+- **Consensus** (`plegma/consensus.mojo` `polished`, the one path `plegma.consensus`, the C API and `plegma poa -r 0`
+  share): abPOA's heaviest bundle (`Graph.heaviest_path` over the member paths), then polished in global mode.
+  `-d` clusters the sequences on the MSA's heterozygous columns (`plegma/clusters.mojo` `cluster_rows`), one
+  consensus per cluster; `-a 1` takes each column's most frequent letter.
+- **Polishing** (`plegma/polish.mojo` `polish`, the edit distance stage, driving the others): one-letter and
+  whole-repeat-unit edits kept while they lower the summed edit distance of the sequences to it; then
+  `plegma/likelihood.mojo` (`_likely`), while they raise their likelihood under a pair HMM; then, with a homopolymer
+  model, `plegma/run_lengths.mojo` (`_runs`), every run at its most likely length. All three work on what
+  `plegma/bands.mojo` holds: each read aligned to the consensus (`_Paths`, a one-sided read as it is anchored,
+  `past_the_end`) and its forward and backward matrices in a band around that alignment (`_Bands`).
 
 ### Reads fixed at one anchor (`plegma/poa.mojo`)
 
@@ -32,7 +43,9 @@ header). The spanning reads build the graph first; a left read is then aligned i
 a source and its first letter, every letter, ending at any node; letters past a sink free, so they join as new nodes
 and grow the graph), a right read in `SUFFIX` (from any node, letters before a source free, ending at a sink). Both
 modes run in the adaptive band (`PREFIX` without the diagonal toward an end it does not have), and under `-S` only
-the first or last pinned window takes the read's mode. The consensus runs between the spanning reads' ends
+the first or last pinned window takes the read's mode. A one-sided read is aligned only to the part of the graph
+between the anchors (`_between`: what reaches the spanning reads' ends, or is reached from their starts), unpinned
+once a read has grown the graph past the far anchor, as the pins' windows end at any sink. The consensus runs between the spanning reads' ends
 (`Graph.heaviest_path_spanning`), every read weighing the edges.
 
 With no spanning read each side is assembled alone, the longest read first: the left consensus followed forward
@@ -45,6 +58,19 @@ each position, and lets a read with a free end vote on the letters it covers: in
 the consensus before its start and after its end costs nothing, and an edit there costs it nothing either. The
 likelihood stage, which does not model free ends, leaves a segment some read covers only part of to the edit
 distance.
+
+## Several consensus sequences of one read set (the library, the C API)
+
+- `plegma/clustered.mojo` `clustered_consensus`: the spanning reads first split as `cluster_rows` splits an MSA's rows,
+  then k-means-like rounds (each read to the consensus it differs from least, each consensus made again), then
+  clusters merged that differ only by run lengths the reads fit as one, by one short tandem unit with too few reads,
+  or not at all.
+- `plegma/phased.mojo` `phased_consensus`: reads already phased; each haplotype from its labelled reads, then again with
+  the unlabelled reads on the haplotype whose letters they carry where the two differ (`_sides`).
+- Shared: `plegma/placement.mojo` (`Clustered`, `Placement`: each cluster's consensus, made as `consensus` makes
+  one, and every read's CIGAR to its cluster's) and `plegma/runs.mojo` (the homopolymer runs two consensus sequences
+  differ by, and the lengths a model finds most likely for their reads). `clustered.mojo` re-exports the shared
+  names and `phased_consensus` for callers that import them from it.
 
 ## `plegma ref`: the MSA anchored on a reference
 
@@ -66,10 +92,25 @@ by its own alignment to the reference, then placed in the reference letters' col
 window's anchors in a linked list over a count tree, one 32-byte record per anchor, a tabulated gap penalty and an
 outer segment tree of (priority, leaf) pairs.
 
+## Tracing
+
+`PLEGMA_TRACE` (comma-separated topics, or `all`) writes the decisions behind a result on stderr, one whole line each
+(`plegma/trace.mojo`): `poa` (reads by anchor, order, another copy's reads, reverse-complemented reads, the two
+sides' join or cut), `pins` (chains, pins kept, windows), `polish` (outliers, each round's edit distance and edits or
+revert, each stage's length), `clustered` (first split, moves, each merge and why), `phased` (where unlabelled reads
+went), `reference` (mode, fallback). The variable is read once per top-level call; off, a trace point is one branch.
+
+```sh
+PLEGMA_TRACE=poa,polish plegma poa -N reads.fa > /dev/null
+```
+
 ## Testing and evaluation
 
 - `pixi run test`: unit tests per module (`tests/`); `pixi run fuzz`: random inputs through both commands, every
-  output's invariants checked (`experiments/validate/fuzz.py`).
+  output's invariants checked, and the command line's own behaviour (gzip and CRLF input, bad options) first
+  (`experiments/validate/fuzz.py`); `pixi run test-all`: those, the C API (shared and static) and Python.
+- Refactors: `experiments/validate/golden.py` writes every command's and library call's outputs over fixed inputs;
+  run it before and after a change meant to keep behaviour and `diff -r` the two directories.
 - Consensus accuracy: `experiments/msa/accuracy.py` (simulated reads and real VNTR read sets against abPOA and
   others).
 - Genotyping (`ref`): `experiments/chr20` runs pgrealign's realignment with plegma on chr20 of the HPRC graph and calls

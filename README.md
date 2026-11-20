@@ -104,6 +104,26 @@ other, so a copy-number change stays one event. With `-F` (a FASTA of the refere
 alignment is pinned where minimap2 would pin it at dipcall's settings and is exact between the pins, so differences
 are written as dipcall-made truth sets write them. `-t` sets the number of threads.
 
+### Errors and tracing
+
+A bad option, value or input file stops the command with one line on stderr (`plegma: ...`) and exit status 1.
+
+`PLEGMA_TRACE` shows why a result came out as it did: the decisions behind it, one line each on stderr, for the
+topics named (comma-separated) or `all`. It works the same through the library and the C API.
+
+| Topic | Lines |
+|---|---|
+| `poa` | reads by anchor, order and pinning; another copy's one-sided reads; reverse-complemented reads; with no spanning read, where the two sides joined (or why not) |
+| `pins` | each chain's seeds, the pins kept, the DP windows |
+| `polish` | reads and outliers, each round's summed edit distance and edits (or the round reverted), each stage's length |
+| `clustered` | the first split, reads moved per refinement, each pair of clusters merged or kept apart, and why |
+| `phased` | where the unlabelled reads went |
+| `reference` | sequences and mode, the fallback costs taken or not |
+
+```sh
+PLEGMA_TRACE=poa,polish plegma poa -N la.fa > cons.fa
+```
+
 ## Library
 
 `pixi run build-capi` builds `build/libplegma.so`. One call takes a read set (each read with its anchor and strand)
@@ -203,10 +223,11 @@ For a diploid caller (abPOA's `-d`):
   the reads joins another.
 - `plegma_phased_consensus` (`plegma::phasedConsensus`, `plegma.phased_consensus`) gives the two consensus sequences
   of reads already phased. A read of neither haplotype (-1) builds as well: on the haplotype whose letters it carries
-  where the two differ (each spelling there carried by a quarter of the reads, or by 3 of its own haplotype's labelled reads and
-  three quarters of them), on both where it covers no
-  such place, on neither where it carries as many of each. A phase set ending inside the window then no longer
-  leaves a haplotype pieced together from its few labelled reads there.
+  where the two differ (each spelling there carried by a quarter of the reads, or by 3 of its own haplotype's
+  labelled reads and three quarters of them), on both where it covers no such place, on neither where it carries as
+  many of each. A phase set ending inside the window then no longer leaves a haplotype pieced together from its few
+  labelled reads there. With no labelled read both haplotypes are the unlabelled reads' consensus; a haplotype no
+  read is labelled with is the other's.
 
 Both return each cluster's reads and each read's CIGAR to its cluster's consensus. A read on neither anchor
 (`PLEGMA_ANCHOR_INSIDE`) builds nothing and is only aligned within a cluster. With a model, every homopolymer run two
