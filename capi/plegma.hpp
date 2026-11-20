@@ -183,8 +183,13 @@ inline Clustering clustering(plegma_result* raw, std::size_t count)
         plegma_placement held{};
         const char* cigar = plegma_result_cigar(result.get(), r, &held);
         Placement placement;
+        if (!cigar) {
+            // No placement for this read: the defaults (cluster -1), not the zeroed struct's cluster 0.
+            out.placements.push_back(std::move(placement));
+            continue;
+        }
         placement.cluster = static_cast<int>(held.cluster);
-        placement.cigar = cigar ? cigar : "";
+        placement.cigar = cigar;
         placement.cost = held.cost;
         placement.consensusStart = static_cast<std::size_t>(held.consensus_start);
         placement.consensusEnd = static_cast<std::size_t>(held.consensus_end);
