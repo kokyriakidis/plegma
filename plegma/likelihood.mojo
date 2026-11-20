@@ -331,7 +331,13 @@ def _likely(
                         for j in range(lo, hi + 1):
                             total += copied[j - lo] * backward[at + j - lo]
                         scale += backward_scale[c]
-                    block_gain[b] += _log(total) + scale - base
+                    if total > 0:
+                        block_gain[b] += log(total) + scale - base
+                    else:
+                        # The read's band does not reach both ends of the unit (an insertion of tens of letters
+                        # inside the repeat): log(0) would veto the edit whatever every other read says. A unit of p
+                        # letters deleted costs the read p letters inserted at most, copied p letters deleted.
+                        block_gain[b] += Float64(p) * log(min(pd, stay * leave))
             # The segment's best edit alone.
             var best = MIN_GAIN
             var best_x = -1
