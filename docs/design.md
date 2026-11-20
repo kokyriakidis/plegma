@@ -50,8 +50,9 @@ once a read has grown the graph past the far anchor, as the pins' windows end at
 
 With no spanning read each side is assembled alone, the longest read first: the left consensus followed forward
 while most reads go on (`Graph.heaviest_path`), the right one backward (`Graph.heaviest_path_backward`). Both sides:
-joined at the middle pin of minimap2's chain between them (`pins.pins`), or a short karan overlap of their ends; the
-graph is rebuilt on the joined sequence. One side: its consensus cut where fewer than `-c` reads (5) reach (a
+joined at a pin of minimap2's chain between them (`pins.pins`, the 19-mer unique in both) placing the right side
+over the left's end by 200 letters or more, where both sides have the most reads; or at a short karan overlap of
+their ends; the graph is rebuilt on the joined sequence. One side: its consensus cut where fewer than `-c` reads (5) reach (a
 one-directional assembly). Polishing aligns each read as it is anchored (`polish`'s `anchors`: karan's `PREFIX` or
 `SUFFIX`, or the consensus inside a longer read's prefix or suffix), counts disagreement against the reads covering
 each position, and lets a read with a free end vote on the letters it covers: in its forward and backward matrices
@@ -81,7 +82,8 @@ by its own alignment to the reference, then placed in the reference letters' col
   (karan, asm5's scores made costs: mismatch 40, a gap of k letters min(78 + 7k, 162 + 3k), ties left), or with the
   reference's flanks pinned as minimap2 pins it (`plegma/pins.mojo` `pinned_pairing`: minimap2 2.31's minimizers,
   seed filters, RMQ chaining with its float arithmetic, re-chaining, bad-end and bad-seed filters, pins at the
-  minimizers' middles at dipcall's settings; karan exact between consecutive pins). The port is checked against
+  minimizers' middles at dipcall's settings; karan exact between consecutive pins; then, as minimap2 last does,
+  each gap shifted left through the matched run before it, `_left_aligned`). The port is checked against
   minimap2's own chains (`--print-chains`) and against a Python port, `experiments/chr20/mm2like.py`.
 - **Fallback** (`_fall_back`): when most sequences replace stretches of the reference and those stretches are much of
   their letters (reads of one sequence, not alleles), those are aligned again at pgrealign's costs.
