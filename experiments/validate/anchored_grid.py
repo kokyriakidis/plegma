@@ -39,6 +39,8 @@ def make(path, sc):
     over = sc.get("over", 0)
     before, after = rnd(over), rnd(over)
     reads = []
+    # Each one-sided read's extent along the truth from its anchor (the TRIM check's measure).
+    extents = []
     for _ in range(sc.get("nb", 0)):
         reads.append(("both", mutated(rng, truth, rate)))
     # one-sided: left ends; right starts (letters), first read at the extreme
@@ -51,23 +53,26 @@ def make(path, sc):
         else:
             e = rng.randint(int(sc["lend"][0] * L), int(sc["lend"][1] * L))
         reads.append(("left", mutated(rng, truth[:e] + (after if e >= L else ""), rate)))
+        extents.append(e)
     for k in range(nr):
         if ov is not None:
             s = max(0, m - (ov - ov // 2)) if k < sc.get("deep", 1) else rng.randint(max(0, m - (ov - ov // 2)), min(L - 1, m + L // 4))
         else:
             s = rng.randint(int(sc["rstart"][0] * L), int(sc["rstart"][1] * L))
         reads.append(("right", mutated(rng, (before if s <= 0 else "") + truth[s:], rate)))
+        extents.append(L - s)
     if sc.get("nf"):
         cut = sc.get("fcut", L // 3)
         other = truth[:cut] + mutated(rng, truth[cut:], 0.15)
         for _ in range(sc["nf"]):
             e = rng.randint(int(0.6 * L), L)
             reads.append(("left", mutated(rng, other[:e], rate)))
+            extents.append(e)
     open(path + ".truth.fa", "w").write(">truth\n%s\n" % truth)
     with open(path + ".fa", "w") as f:
         for k, (a, s) in enumerate(reads):
             f.write(">r%d anchor=%s\n%s\n" % (k, a, s))
-    return truth, reads
+    return truth, reads, extents
 
 def fasta(p):
     out = []; n = None
@@ -85,7 +90,7 @@ def dist(tpath, seq, mode, tmp):
 
 def run(task):
     path, sc = task
-    truth, reads = make(path, sc)
+    truth, reads, extents = make(path, sc)
     v = []
     env = dict(os.environ, PLEGMA_TRACE="poa")
     extra = sc.get("args", [])
@@ -130,10 +135,16 @@ def run(task):
         if mode != "global":
             mc = 5
             if "-c" in extra: mc = int(extra[extra.index("-c") + 1])
-            lens = sorted((len(s) for a, s in reads if a in ("left", "right")), reverse=True)
+            # The cut: where fewer than -c reads go on, along the truth (a read's own length stands for its reach
+            # only up to its insertions and deletions). A few letters of slack for the consensus's own errors.
+            lens = sorted(extents, reverse=True)
             cap = lens[min(mc, len(lens)) - 1]
             info["cap"] = cap
-            if len(c) > cap: v.append("TRIM len %d > %d-th longest %d" % (len(c), mc, cap))
+            slack = max(3, len(c) // 500)
+            if len(c) > cap + slack:
+                v.append("TRIM len %d > %d-th furthest read's reach %d" % (len(c), mc, cap))
+            elif len(c) < cap - slack:
+                v.append("TRIM len %d < %d-th furthest read's reach %d" % (len(c), mc, cap))
     if sc.get("nf"):
         info["foreign"] = re.search(r"another copy's[^\n]*", tr).group(0) if "another copy" in tr else "none flagged"
     return path, sc, v, info

@@ -367,19 +367,20 @@ def poa(
         return out^
     # No read spans both anchors: each side on its own, then joined.
     var parts = List[List[UInt8]]()
+    # Each side's reads' reach along its consensus, from its anchor (`_reach`).
+    var left_reach = List[Int]()
+    var right_reach = List[Int]()
     if len(left) > 0:
         var side = _one_side(names, seqs, left, options, PREFIX)
-        parts.append(_letters(side[0], side[0].heaviest_path(Topology(side[0]).order, side[1])))
+        var path = side[0].heaviest_path(Topology(side[0]).order, side[1])
+        parts.append(_letters(side[0], path))
+        left_reach = _reach(side[0], path, side[1], True)
     if len(right) > 0:
         var side = _one_side(names, seqs, right, options, SUFFIX)
-        parts.append(_letters(side[0], side[0].heaviest_path_backward(Topology(side[0]).order, side[1])))
+        var path = side[0].heaviest_path_backward(Topology(side[0]).order, side[1])
+        parts.append(_letters(side[0], path))
+        right_reach = _reach(side[0], path, side[1], False)
     if len(parts) == 2:
-        var left_reach = List[Int](capacity=len(left))
-        for r in left:
-            left_reach.append(len(seqs[r]))
-        var right_reach = List[Int](capacity=len(right))
-        for r in right:
-            right_reach.append(len(seqs[r]))
         var joined = _join(parts[0], parts[1], left_reach, right_reach)
         trace.line(
             POA,
@@ -396,13 +397,13 @@ def poa(
             parts.clear()
             parts.append(joined^)
     elif len(left) > 0:
-        _trim(parts[0], seqs, left, options.min_cover, True)
+        _trim(parts[0], left_reach, options.min_cover, True)
         trace.line(
             POA,
             String("left side alone: ", len(parts[0]), " letters, cut where under ", options.min_cover, " reads go on"),
         )
     else:
-        _trim(parts[0], seqs, right, options.min_cover, False)
+        _trim(parts[0], right_reach, options.min_cover, False)
         trace.line(
             POA,
             String(
@@ -417,14 +418,14 @@ def poa(
         _add_anchored(graph, names, seqs, _longest_first(seqs, right), options, SUFFIX, path_of, aligner, backbone)
         # The consensus again from the graph every read voted in, between the assembled sequence's ends (its path one
         # vote among the reads'): the reads mend what joining or one side's graph got wrong.
-        parts[0] = _letters(
-            graph, graph.heaviest_path_spanning(Topology(graph).order, backbone, len(left) > 0 and len(right) > 0)
-        )
+        var path = graph.heaviest_path_spanning(Topology(graph).order, backbone, len(left) > 0 and len(right) > 0)
+        parts[0] = _letters(graph, path)
         # One side alone: the reads going on past the cut carry the walk past it again.
-        if len(right) == 0:
-            _trim(parts[0], seqs, left, options.min_cover, True)
-        elif len(left) == 0:
-            _trim(parts[0], seqs, right, options.min_cover, False)
+        if len(right) == 0 or len(left) == 0:
+            var paths = List[Int]()
+            for r in left if len(right) == 0 else right:
+                paths.append(path_of[r])
+            _trim(parts[0], _reach(graph, path, paths, len(right) == 0), options.min_cover, len(right) == 0)
     else:
         # Not joined: the left reads on the left side's sequence; the right reads beside it, on their own.
         _add_anchored(graph, names, seqs, _longest_first(seqs, left), options, PREFIX, path_of, aligner)
@@ -636,24 +637,40 @@ def _one_side(
     return (graph^, paths^)
 
 
-def _trim(mut consensus: List[UInt8], seqs: List[List[UInt8]], reads: List[Int], least: Int, from_left: Bool):
+def _reach(graph: Graph, consensus: List[Int], paths: List[Int], from_left: Bool) -> List[Int]:
+    """How far along `consensus` (its nodes) each of `paths` reaches from the anchor it starts at (`from_left`: from
+    the consensus's start, else back from its end): letters to the furthest consensus node it passes. A read's own
+    length would stand for it only where the consensus has the read's letters one for one."""
+    var index = List[Int](length=len(graph), fill=-1)
+    for k in range(len(consensus)):
+        index[consensus[k]] = k
+    var out = List[Int](capacity=len(paths))
+    for p in paths:
+        var furthest = 0
+        for node in graph.paths[p]:
+            var k = index[Int(node)]
+            if k >= 0:
+                furthest = max(furthest, k + 1 if from_left else len(consensus) - k)
+        out.append(furthest)
+    return out^
+
+
+def _trim(mut consensus: List[UInt8], reach: List[Int], least: Int, from_left: Bool):
     """A one-directional consensus cut where fewer than `least` reads go on (or, with fewer reads than that, where the
-    first of them stops): from the left anchor (`from_left`) past the `least`-th longest read's end, else before its
-    start from the right anchor. The reads' lengths stand for their reach, as they all start (or end) at the anchor."""
-    if least <= 1 or len(reads) == 0:
+    first of them stops): from the left anchor (`from_left`) past the `least`-th furthest read's reach along it
+    (`_reach`), else before it from the right anchor. With `least` 1 the cut is past the furthest read."""
+    if least <= 0 or len(reach) == 0:
         return
-    var lengths = List[Int]()
-    for r in reads:
-        lengths.append(len(seqs[r]))
-    sort(lengths)
-    var reach = lengths[len(lengths) - min(least, len(lengths))]
-    if reach >= len(consensus):
+    var reaches = reach.copy()
+    sort(reaches)
+    var cut = reaches[len(reaches) - min(least, len(reaches))]
+    if cut >= len(consensus):
         return
     if from_left:
-        consensus.resize(reach, 0)
+        consensus.resize(cut, 0)
     else:
-        var kept = List[UInt8](capacity=reach)
-        for i in range(len(consensus) - reach, len(consensus)):
+        var kept = List[UInt8](capacity=cut)
+        for i in range(len(consensus) - cut, len(consensus)):
             kept.append(consensus[i])
         consensus = kept^
 
@@ -675,7 +692,7 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
     letters, as long and `JOIN_IDENTITY` alike; empty when they do not overlap.
 
     Of the pins, the one where the side worse supported there is best supported: left's letters before it come from
-    the left reads that reach it (`left_reach`, each read's length from the left anchor), right's after it from the
+    the left reads that reach it (`left_reach`, each read's reach along left from the left anchor), right's after it from the
     right reads that reach back to it (`right_reach`, from the right anchor). Each side's sequence near its far end is
     the few longest reads' alone. Taking the middle pin, HG00512's HLA-DRB1 haplotype 1 (no read spanning, 9 left
     reads and 18 right) had a stretch of 1.1 kb from the one right read reaching that far, against 9 left reads
