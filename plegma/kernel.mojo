@@ -95,6 +95,15 @@ def _fits_16_bits(scoring: Scoring, m: Int, n: Int) -> Bool:
     return low > Int(_neg[DType.int16]()) // 2 + 500 and high < 30000
 
 
+def _rebased_fits(scoring: Scoring, reach: Int) -> Bool:
+    """Whether a banded row of `2 reach + 1` cells kept relative to a base of its own fits 16-bit lanes under
+    `scoring`: a reachable cell is within a gap across the row (and a step's mismatch) of the row's best, which is
+    within `REBASE` of the base. Scores scaled up a hundredfold break this at abPOA's band; the defaults do not at
+    `REBASED_SPAN`."""
+    var spread = Int(scoring.gap(2 * reach + 1)) + Int(scoring.mismatch) + Int(scoring.match_score)
+    return 2 * reach + 1 <= REBASED_SPAN and spread + 2 * REBASE < Int(-_neg[DType.int16]()) // 2 - 500
+
+
 @inline(.always)
 def _fill[dt: DType](p: MutPointer[Scalar[dt], _], count: Int):
     comptime V = simd_width_of[dt]()
@@ -314,7 +323,7 @@ struct Workspace(Movable):
         var reach = _reach(band_b, band_f, band_max, m) if banded else m + 1
         # 16-bit lanes when every score fits them, or, banded, when the band is narrow enough that a row's scores
         # kept relative to a base of its own fit them however long the alignment (`REBASED_SPAN`).
-        if _fits_16_bits(scoring, m, len(nodes)) or (banded and 2 * reach + 1 <= REBASED_SPAN):
+        if _fits_16_bits(scoring, m, len(nodes)) or (banded and _rebased_fits(scoring, reach)):
             var got = self._align[DType.int16](
                 graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max, banded
             )

@@ -6,7 +6,7 @@ from karan import distance
 from plegma.graph import Graph
 from plegma.kernel import BOTH, LEFT, RIGHT
 from plegma.consensus import consensus
-from plegma.poa import PoaOptions, poa
+from plegma.poa import INPUT_ORDER, PoaOptions, poa
 from plegma.polish import polish
 
 
@@ -33,6 +33,10 @@ def _mutated(seq: List[UInt8], rate: Float64) -> List[UInt8]:
         else:
             out.append(c)
     return out^
+
+
+def _b(text: StringSlice) -> List[UInt8]:
+    return List[UInt8](text.as_bytes())
 
 
 def _slice(seq: List[UInt8], start: Int, end: Int) -> List[UInt8]:
@@ -222,6 +226,95 @@ def test_hg00512_drb1_joins_where_both_sides_have_reads() raises:
     assert_equal(len(made), 1)
     var edits = distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth))
     assert_equal(edits, 0, String(t"{edits} edits from HG00512's assembly"))
+
+
+def test_no_reads_make_an_empty_poa() raises:
+    var names = List[String]()
+    var seqs = List[List[UInt8]]()
+    var made = poa(names, seqs, List[Int](), PoaOptions(), Graph())
+    assert_equal(len(made.graph), 0)
+    assert_equal(len(made.consensus), 0)
+
+
+def test_a_right_read_does_not_end_on_a_left_reads_overhang() raises:
+    """Pinned or not, a right read ends among the nodes the spanning reads' end is reached from, never on the
+    letters a left read carries past the right anchor."""
+    for pinned in [True, False]:
+        var names: List[String] = ["s1", "s2", "s3", "l", "r"]
+        var seqs: List[List[UInt8]] = [_b("AC"), _b("AC"), _b("AC"), _b("ACGTACGTAA"), _b("TTGCA")]
+        var anchors: List[Int] = [BOTH, BOTH, BOTH, LEFT, RIGHT]
+        var options = PoaOptions()
+        options.seeded = pinned
+        var made = poa(names, seqs, anchors, options, Graph())
+        ref graph = made.graph
+        ref left = graph.paths[made.shown[3]]
+        var spanning_end = graph.paths[made.shown[0]][1]
+        var past = False
+        var overhang = List[Int32]()
+        for node in left:
+            if past:
+                overhang.append(node)
+            past = past or node == spanning_end
+        for node in graph.paths[made.shown[4]]:
+            assert_true(node not in overhang)
+
+
+def test_unjoined_right_reads_align_to_the_right_side() raises:
+    """Two sides overlapping by 150 letters, too few to join (`JOIN_LEAST`), stay apart; every right read is aligned
+    to the right side's part of the graph, never fused onto the left side's path where the two overlap."""
+    seed(131)
+    var truth = _random(900)
+    var names = List[String]()
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    for k in range(12):
+        var left = k < 6
+        seqs.append(_mutated(_slice(truth, 0, 500) if left else _slice(truth, 350, 900), 0.02))
+        names.append(String(t"r{k}"))
+        anchors.append(LEFT if left else RIGHT)
+    for pinned in [True, False]:
+        var options = PoaOptions()
+        options.seeded = pinned
+        var copy = seqs.copy()
+        var made = poa(names, copy, anchors, options, Graph())
+        assert_equal(len(made.consensus), 2)
+        ref graph = made.graph
+        var left_nodes = List[Int32]()
+        for k in range(6):
+            for node in graph.paths[made.shown[k]]:
+                left_nodes.append(node)
+        for k in range(6, 12):
+            for node in graph.paths[made.shown[k]]:
+                assert_true(node not in left_nodes)
+
+
+def test_scores_scaled_up_keep_the_msa() raises:
+    """Every score a hundredfold is the same optimum, so the same MSA: the band's 16-bit rows then cannot hold a
+    row's spread, and the kernel must widen its lanes rather than wrap."""
+    seed(137)
+    for _ in range(3):
+        var truth = _random(3000)
+        var names = List[String]()
+        var seqs = List[List[UInt8]]()
+        var anchors = List[Int]()
+        for k in range(6):
+            seqs.append(_mutated(truth, 0.1))
+            names.append(String(t"r{k}"))
+            anchors.append(BOTH)
+        var options = PoaOptions()
+        options.seeded = False
+        options.order = INPUT_ORDER
+        var scaled = options.copy()
+        scaled.scoring.match_score *= 100
+        scaled.scoring.mismatch *= 100
+        scaled.scoring.open1 *= 100
+        scaled.scoring.open2 *= 100
+        scaled.scoring.extend1 *= 100
+        scaled.scoring.extend2 *= 100
+        var a = poa(names, seqs, anchors, options, Graph()).graph.msa()
+        var b = poa(names, seqs, anchors, scaled, Graph()).graph.msa()
+        for k in range(len(a)):
+            assert_true(a[k] == b[k])
 
 
 def main() raises:

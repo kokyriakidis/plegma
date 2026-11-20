@@ -158,25 +158,28 @@ struct _Aligner(Movable):
         mut self, graph: Graph, seq: List[UInt8], options: PoaOptions, mode: Int, anchors: List[Int] = List[Int]()
     ) raises -> GraphAlignment:
         """`seq` aligned to `graph` in `mode` (`options.mode` for a spanning read; `PREFIX` or `SUFFIX`). With
-        `anchors` (paths) and not pinned, a read anchored at one end is aligned to the part of the graph between
-        their ends alone (`_between`)."""
+        `anchors` (paths), a read anchored at one end is aligned to the part of the graph between their ends alone
+        (`_between`); pinned (`options.seeded`) only while that part is the whole graph, as the pins' windows reach
+        the graph's every source and sink (a right read would end at a left read's letters past the right anchor)."""
         self.row_of.resize(len(graph), -1)
-        if not options.seeded and len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX):
-            var part = Topology(graph, _between(graph, anchors, mode))
-            return self.workspace.align(
-                graph,
-                part,
-                part.order,
-                SOURCE,
-                SINK,
-                Span(seq),
-                options.scoring,
-                self.row_of,
-                mode,
-                options.band_b,
-                options.band_f,
-                options.band_max,
-            )
+        if len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX):
+            var allowed = _between(graph, anchors, mode)
+            if not options.seeded or False in allowed:
+                var part = Topology(graph, allowed)
+                return self.workspace.align(
+                    graph,
+                    part,
+                    part.order,
+                    SOURCE,
+                    SINK,
+                    Span(seq),
+                    options.scoring,
+                    self.row_of,
+                    mode,
+                    options.band_b,
+                    options.band_f,
+                    options.band_max,
+                )
         var topology = Topology(graph)
         if options.seeded and (mode == GLOBAL or mode == PREFIX or mode == SUFFIX):
             return align_pinned(
@@ -216,7 +219,10 @@ def poa(
 ) raises -> Poa:
     """The POA of `seqs` (`names` theirs), each anchored as `anchors` says (`BOTH`, `LEFT` or `RIGHT`), into
     `start` (a graph made from an existing MSA, or empty). With `options.strand` a spanning read that scores poorly
-    may be reverse-complemented (it and its name then change in `seqs` and `names`)."""
+    may be reverse-complemented (it and its name then change in `seqs` and `names`). No reads and an empty `start`:
+    an empty graph and no consensus."""
+    if len(seqs) == 0 and len(start.paths) == 0:
+        return Poa(start^, List[Int](), List[Int]())
     var spanning = List[Int]()
     var left = List[Int]()
     var right = List[Int]()
@@ -327,9 +333,12 @@ def poa(
         var order = _longest_first(seqs, right)
         if len(order) > 0:
             path_of[order[0]] = graph.add(names[order[0]], Span(seqs[order[0]]))
+            # Each aligned to the right side's part of the graph alone (what reaches the longest's end), not pinned
+            # to the left side's path.
+            var right_side: List[Int] = [path_of[order[0]]]
             for k in range(1, len(order)):
                 var r = order[k]
-                var found = aligner.align(graph, seqs[r], options, SUFFIX)
+                var found = aligner.align(graph, seqs[r], options, SUFFIX, right_side)
                 path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
     for r in range(len(seqs)):
         shown.append(path_of[r])
