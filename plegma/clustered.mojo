@@ -1241,6 +1241,14 @@ def _sides(
     return out^
 
 
+def _any_builds(anchor_of: List[Int]) -> Bool:
+    """Whether any read is anchored (`BOTH`, `LEFT` or `RIGHT`), not inside."""
+    for a in anchor_of:
+        if a != INSIDE:
+            return True
+    return False
+
+
 def phased_consensus(
     var seqs: List[List[UInt8]],
     haplotypes: List[Int],
@@ -1257,8 +1265,9 @@ def phased_consensus(
     best. Where the two differ by the length of a run of one letter and a homopolymer model is loaded, each such run
     is decided on both haplotypes' reads together, whatever else the two differ by: their own lengths for the two only
     when that explains the reads `options.two_lengths_db` better than one length for both, else that one length in
-    both (a run is far more often the same on the two haplotypes than not). Two clusters always, the
-    second's consensus the first's when no read is on haplotype 1."""
+    both (a run is far more often the same on the two haplotypes than not). Two clusters always: a haplotype no read
+    is labelled with has the other's consensus, and with no labelled read at all both are the unlabelled reads'. With
+    every read inside, all of them build as if spanning (as `clustered_consensus` has it)."""
     var n = len(seqs)
     if len(haplotypes) != n:
         raise Error(t"{len(haplotypes)} haplotypes for {n} sequences")
@@ -1268,6 +1277,11 @@ def phased_consensus(
         raise Error(t"{len(strands)} strands for {n} sequences")
     var anchor_of = anchors.copy() if len(anchors) > 0 else List[Int](length=n, fill=BOTH)
     var strand_of = strands.copy() if len(strands) > 0 else List[Int](length=n, fill=STRAND_UNKNOWN)
+    # The reads that build: all but those inside, or with every read inside all of them as if spanning.
+    var build_anchor = anchor_of.copy()
+    if INSIDE in anchor_of and not _any_builds(anchor_of):
+        for r in range(n):
+            build_anchor[r] = BOTH
     var groups = List[List[Int]](length=2, fill=List[Int]())
     var cluster_of = List[Int](length=n, fill=-1)
     for r in range(n):
@@ -1276,17 +1290,27 @@ def phased_consensus(
             raise Error(t"read {r}: haplotype {h} is not 0, 1 or -1")
         if h >= 0:
             cluster_of[r] = h
-            if anchor_of[r] != INSIDE:
+            if build_anchor[r] != INSIDE:
                 groups[h].append(r)
+    var labelled = [len(groups[0]) > 0, len(groups[1]) > 0]
+    var unlabelled = List[Int]()
+    for r in range(n):
+        if haplotypes[r] < 0 and build_anchor[r] != INSIDE:
+            unlabelled.append(r)
+    if not labelled[0] and not labelled[1] and len(unlabelled) > 0:
+        # No labelled read builds: both haplotypes the unlabelled reads' one consensus.
+        groups[0] = unlabelled.copy()
+        groups[1] = unlabelled.copy()
+        unlabelled.clear()
     var made = List[List[UInt8]]()
     for k in range(2):
         made.append(
-            _consensus_of(seqs, groups[k], anchor_of, strand_of, options, homopolymers) if len(groups[k])
+            _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers) if len(groups[k])
             > 0 else (List[UInt8]())
         )
-    if len(made[1]) == 0 and len(groups[1]) == 0:
+    if len(groups[1]) == 0:
         made[1] = made[0].copy()
-    if len(made[0]) == 0 and len(groups[0]) == 0:
+    if len(groups[0]) == 0:
         made[0] = made[1].copy()
     var aligner = Aligner(warm=False)
     # Reads of neither haplotype build too: each joins the haplotype whose letters it carries where the two differ,
@@ -1295,11 +1319,7 @@ def phased_consensus(
     # HLA-DPA1 thinned to 15x, its 14 reads of the window's left end all unlabelled, had haplotype 2's left half from
     # its one spanning read, 36 edits from the truth; at 10x, with no labelled read reaching that end, both
     # haplotypes stopped short, at 3,915 and 8,058 letters of 18,180. With them: 0 and 1 edits, then 0 and 0.
-    var unlabelled = List[Int]()
-    for r in range(n):
-        if haplotypes[r] < 0 and anchor_of[r] != INSIDE:
-            unlabelled.append(r)
-    if len(unlabelled) > 0 and len(groups[0]) + len(groups[1]) > 0:
+    if len(unlabelled) > 0:
         var costs = alignment_costs(options.poa.scoring)
         var builders = groups[0].copy()
         builders.extend(groups[1].copy())
@@ -1312,8 +1332,13 @@ def phased_consensus(
                     groups[k].append(unlabelled[i])
                     grew[k] = True
         for k in range(2):
-            if grew[k]:
-                made[k] = _consensus_of(seqs, groups[k], anchor_of, strand_of, options, homopolymers)
+            if grew[k] and labelled[k]:
+                made[k] = _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers)
+        # A haplotype no read is labelled with stays the other's: unlabelled reads alone (each one there because it
+        # covers no place the two differ, which they do not) would make one noisy read a second haplotype.
+        for k in range(2):
+            if not labelled[k] and labelled[1 - k]:
+                made[k] = made[1 - k].copy()
     # Each run the two differ by is decided on both haplotypes' reads together, whatever else the two differ by.
     var runs0 = List[Int]()
     var runs1 = List[Int]()

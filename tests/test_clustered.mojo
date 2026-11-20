@@ -703,5 +703,48 @@ def test_a_read_run_is_its_own_between_the_flank_letters() raises:
     assert_equal(_measured("GATTTTCTTTTTTGA", "GATTTTTTTTTTGA", 7, 13), -1)
 
 
+def test_phased_with_no_labelled_read_builds_from_the_unlabelled() raises:
+    """Reads of neither haplotype alone make both haplotypes their one consensus, never two empty ones."""
+    seed(211)
+    var truth = _random(300)
+    var reads = List[List[UInt8]]()
+    for _ in range(6):
+        reads.append(_mutated(truth, 0.01))
+    var got = phased_consensus(reads.copy(), List[Int](length=6, fill=-1))
+    assert_equal(len(got.consensus), 2)
+    assert_true(distance(_text(got.consensus[0]), _text(truth)) <= 1)
+    assert_true(got.consensus[0] == got.consensus[1])
+
+
+def test_phased_haplotype_without_reads_is_the_others() raises:
+    """With every labelled read on haplotype 0, an unlabelled read with errors of its own does not become
+    haplotype 1: that one is haplotype 0's consensus."""
+    seed(223)
+    var truth = _random(300)
+    var reads = List[List[UInt8]]()
+    var labels = List[Int]()
+    for _ in range(6):
+        reads.append(truth.copy())
+        labels.append(0)
+    reads.append(_mutated(truth, 0.03))
+    labels.append(-1)
+    var got = phased_consensus(reads^, labels)
+    assert_true(got.consensus[0] == truth)
+    assert_true(got.consensus[1] == truth)
+
+
+def test_phased_reads_all_inside_build_as_spanning() raises:
+    """As `clustered_consensus` has it: with every read inside, all of them build as if spanning."""
+    seed(227)
+    var truth = _random(150)
+    var reads = List[List[UInt8]]()
+    for _ in range(6):
+        reads.append(truth.copy())
+    var labels: List[Int] = [0, 0, 0, 1, 1, 1]
+    var got = phased_consensus(reads^, labels, List[Int](length=6, fill=INSIDE))
+    assert_true(got.consensus[0] == truth)
+    assert_true(got.consensus[1] == truth)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
