@@ -207,13 +207,18 @@ struct Graph(Movable, Sized):
         return rank^
 
     @staticmethod
-    def from_msa(names: List[String], rows: List[String], skip: Int = -1) -> Graph:
+    def from_msa(names: List[String], rows: List[String], skip: Int = -1) raises -> Graph:
         """The graph of an MSA's rows (all but row `skip`): in each column, one node per letter there, the rows'
-        paths through them."""
+        paths through them. Raises on rows of different lengths, or fewer names than rows."""
         var graph = Graph()
         if len(rows) == 0:
             return graph^
+        if len(names) < len(rows):
+            raise Error(t"an MSA of {len(rows)} rows and {len(names)} names")
         var width = rows[0].byte_length()
+        for r in range(len(rows)):
+            if rows[r].byte_length() != width:
+                raise Error(t"MSA row {names[r]} has {rows[r].byte_length()} columns, the first {width}")
         var at = List[Int](length=256, fill=-1)
         for c in range(width):
             var column = graph.column_count()
@@ -285,9 +290,10 @@ struct Graph(Movable, Sized):
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
         var scale = len(self.paths) + 1
-        var weight = List[Int32](capacity=len(self.edge_weight))
+        # 64 bits: the paths squared pass 32 bits at some 46,000 paths.
+        var weight = List[Int64](capacity=len(self.edge_weight))
         for w in self.edge_weight:
-            weight.append(w * Int32(scale))
+            weight.append(Int64(w) * Int64(scale))
         for p in spanning:
             ref path = self.paths[p]
             if len(path) > 0:
@@ -344,8 +350,10 @@ struct Graph(Movable, Sized):
         path.reverse()
         return path^
 
-    def _bundle(
-        self, order: List[Int], starts: List[Int], ends: List[Int], weight: List[Int32], bounded: Bool = False
+    def _bundle[
+        dt: DType
+    ](
+        self, order: List[Int], starts: List[Int], ends: List[Int], weight: List[Scalar[dt]], bounded: Bool = False
     ) -> List[Int]:
         var count = len(self.bases)
         var score = List[Int](length=count, fill=0)

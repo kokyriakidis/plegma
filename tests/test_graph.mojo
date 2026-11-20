@@ -107,5 +107,33 @@ def test_heaviest_path_follows_the_majority() raises:
     assert_true(String(unsafe_from_utf8=letters) == "ACTTA")
 
 
+def test_from_msa_refuses_rows_of_different_lengths() raises:
+    """A shorter row would be read past its end, a longer one cut short: both raise."""
+    var names: List[String] = ["a", "b"]
+    for rows in [List[String](["ACGTAC", "ACG"]), List[String](["ACG", "ACGTAC"])]:
+        var raised = False
+        try:
+            _ = Graph.from_msa(names, rows)
+        except:
+            raised = True
+        assert_true(raised)
+
+
+def test_heaviest_path_spanning_counts_past_32_bits() raises:
+    """Edge weights scaled by the paths' count pass 32 bits at some 46,000 paths: the heaviest path stays the
+    spanning reads' all the same."""
+    var graph = Graph()
+    var spanning = List[Int]()
+    for _ in range(47000):
+        spanning.append(graph.add("r", "ACGTACGTAC".as_bytes()))
+    var left: List[Int] = [0, 1, 2, 3, 4]
+    _ = graph.fuse_nodes("l", "ACGTA".as_bytes(), left)
+    var rank = graph.node_order()
+    var order = List[Int](length=len(rank), fill=0)
+    for node in range(len(rank)):
+        order[rank[node]] = node
+    assert_equal(len(graph.heaviest_path_spanning(order, spanning)), 10)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
