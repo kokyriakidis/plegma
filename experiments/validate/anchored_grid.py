@@ -6,6 +6,7 @@ overlapping 200 letters or more are joined, without a duplication or a deletion 
 longer than the min_cover-th longest read; the consensus's edit distance to the truth.
 
 usage: python3 -I experiments/validate/anchored_grid.py <work dir> <plegma> <karan CLI> [--jobs n] [--only regex]
+           [--seed-offset k]
 
 Prints one line per case (OK, or FAIL and why). Each case's reads are seeded by its name, so two binaries run into
 different work directories see the same inputs: diff their outputs to compare them. It found the joins refused when
@@ -30,7 +31,7 @@ def make(path, sc):
     L, rate = sc["L"], sc["rate"]
     if sc.get("tr"):
         unit, copies = sc["tr"]
-        u = rnd(unit); arr = "".join(mutated(rng, u, 0.01) for _ in range(copies))
+        u = rnd(unit); arr = "".join(mutated(rng, u, sc.get("trdiv", 0.01)) for _ in range(copies))
         mid = sc.get("tr_at", L // 2) - len(arr) // 2
         truth = rnd(mid) + arr + rnd(L - len(arr) - mid)
     else:
@@ -169,6 +170,10 @@ def grid():
                 if L >= 5000:
                     for ov in (500, 2100):
                         cases.append(("tr_ov%d" % ov, dict(L=L, rate=rate, nl=8, nr=8, ov=ov, deep=2, tr=(40, 25), true_ov=ov)))
+                    # other units and copies as alike as 0.5% or 2% apart, the overlap inside the array
+                    for unit, copies in ((12, 80), (25, 40), (60, 17)):
+                        for div in (0.005, 0.02):
+                            cases.append(("tr%dd%d_ov500" % (unit, int(div * 1000)), dict(L=L, rate=rate, nl=8, nr=8, ov=500, deep=2, tr=(unit, copies), trdiv=div, true_ov=500)))
                 # telomere-like
                 for n in (3, 8, 15):
                     cases.append(("lonly%d" % n, dict(L=L, rate=rate, nl=n, lend=(0.3, 0.95))))
@@ -188,13 +193,15 @@ def main():
     a = sys.argv[1:]
     jobs = int(a[a.index("--jobs") + 1]) if "--jobs" in a else 8
     only = a[a.index("--only") + 1] if "--only" in a else ""
+    # Held-out cases: the same grid, its seeds numbered from here on (each case's reads are seeded by its name).
+    offset = int(a[a.index("--seed-offset") + 1]) if "--seed-offset" in a else 0
     work, pl, ka = a[:3]
     os.makedirs(work, exist_ok=True)
     tasks = []
     seen = {}
     for name, sc in grid():
         k = seen.get(name, 0); seen[name] = k + 1
-        name2 = name[:-1] + str(k + 1)
+        name2 = name[:-1] + str(k + 1 + offset)
         if only and not re.search(only, name2): continue
         tasks.append((os.path.join(work, name2), sc))
     with Pool(jobs, initializer=init, initargs=(pl, ka)) as pool:

@@ -748,6 +748,8 @@ def _placing(
     its letters in left, and the right letter each of them lands on (`path`, from the overlap's start)."""
     var lo = max(0, cut_left - cut_right)
     var out = _Placing(cut_left - cut_right, cut_left, cut_right, 0, len(left) - lo, how^, List[Int]())
+    # An alignment past karan's memory (a stray pin's, between unrelated stretches) raises, and the caller leaves that
+    # placement out.
     if cut_left > lo:
         # Back from the meeting point: left's letters before it against a suffix of right's before it.
         var back = aligner.align(Span(right)[0:cut_right], Span(left)[lo:cut_left], Costs.edit(), Mode.SUFFIX)
@@ -817,26 +819,29 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
                 best = m
                 best_support = support
                 best_off = off
-        placings.append(
-            _placing(
-                aligner,
-                left,
-                right,
-                found.r[best],
-                found.q[best],
-                String(
-                    "the pin left ",
+        try:
+            placings.append(
+                _placing(
+                    aligner,
+                    left,
+                    right,
                     found.r[best],
-                    " / right ",
                     found.q[best],
-                    " (",
-                    len(group),
-                    " pins; ",
-                    best_support,
-                    " reads either side)",
-                ),
+                    String(
+                        "the pin left ",
+                        found.r[best],
+                        " / right ",
+                        found.q[best],
+                        " (",
+                        len(group),
+                        " pins; ",
+                        best_support,
+                        " reads either side)",
+                    ),
+                )
             )
-        )
+        except:
+            pass
     # The overlaps of the ends.
     var a_start = max(0, len(left) - JOIN_ENDS)
     var a = List[UInt8](capacity=len(left) - a_start)
@@ -850,16 +855,19 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
         var got = aligner.align(Span(a), Span(b), Costs.linear(edit, edit), mode)
         if got.reference_end != len(a) or got.query_start != 0 or got.query_end - got.query_start < JOIN_LEAST:
             continue
-        placings.append(
-            _placing(
-                aligner,
-                left,
-                right,
-                len(left),
-                got.query_end,
-                String("an overlap of the ends, ", got.query_end, " letters (edits ", edit, ")"),
+        try:
+            placings.append(
+                _placing(
+                    aligner,
+                    left,
+                    right,
+                    len(left),
+                    got.query_end,
+                    String("an overlap of the ends, ", got.query_end, " letters (edits ", edit, ")"),
+                )
             )
-        )
+        except:
+            pass
     var best = -1
     for c in range(len(placings)):
         ref p = placings[c]
