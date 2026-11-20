@@ -4,7 +4,9 @@ from std.testing import assert_equal, assert_true, TestSuite
 
 from karan import Aligner, Costs
 
-from plegma.pins import pinned_pairing, pins_in_context
+from sporos import read_fasta
+
+from plegma.pins import _left_aligned, pinned_pairing, pins_in_context
 from plegma.reference import on_reference
 
 
@@ -90,6 +92,10 @@ def _long_change_places(rows: List[List[UInt8]], least: Int) -> Int:
                 starts.add(c * 2 + Int(inserting))
             c = end
     return len(starts)
+
+
+def _b(text: StringSlice) -> List[UInt8]:
+    return List[UInt8](text.as_bytes())
 
 
 def test_on_reference_keeps_each_deletion_whole_against_the_reference() raises:
@@ -199,6 +205,78 @@ def test_on_reference_rows_do_not_depend_on_the_threads() raises:
     for threads in [2, 4]:
         assert_true(on_reference(seqs, asm5, threads=threads) == exact)
         assert_true(on_reference(seqs, asm5, threads=threads, flanks=flanks) == pinned)
+
+
+def test_pinned_past_the_pins_reach_raises() raises:
+    """Past 2^25 letters with the flanks the seeds' positions do not fit: pinning raises rather than leaving one
+    exact alignment of the whole (some 2 GiB of DP)."""
+    var long = List[UInt8](length=1 << 25, fill=UInt8(ord("A")))
+    var flank = List[UInt8](length=100, fill=UInt8(ord("C")))
+    var aligner = Aligner(warm=False)
+    var costs = Costs.two_piece(40, 78, 7, 162, 3)
+    var raised = False
+    try:
+        _ = pinned_pairing(aligner, long, long, flank, flank, costs)
+    except e:
+        raised = "2^25" in String(e)
+    assert_true(raised)
+
+
+def _cigar(reference_row: String, row: String) -> String:
+    """The pair's alignment as M/I/D runs, from two MSA rows (columns gapped in both dropped)."""
+    var ops = List[UInt8]()
+    var a = reference_row.as_bytes()
+    var b = row.as_bytes()
+    for c in range(len(a)):
+        var gap_a = a[c] == UInt8(ord("-"))
+        var gap_b = b[c] == UInt8(ord("-"))
+        if gap_a and gap_b:
+            continue
+        ops.append(UInt8(ord("I")) if gap_a else (UInt8(ord("D")) if gap_b else UInt8(ord("M"))))
+    var out = String()
+    var k = 0
+    while k < len(ops):
+        var e = k
+        while e < len(ops) and ops[e] == ops[k]:
+            e += 1
+        out.write(e - k, chr(Int(ops[k])))
+        k = e
+    return out^
+
+
+def test_pinned_gaps_shift_left_as_minimap2_writes_them() raises:
+    """chr20:60,425,968's two alleles pinned between their flanks: minimap2 2.31 (-x asm5, dipcall's settings)
+    writes the 78-letter deletion at the reference's letter 517 (2017M78D1965M over flank + sequence + flank, flanks
+    1,500), shifted left through the matched run before it past the pin at 586 (mm_fix_cigar); aligned between the
+    pins alone it sat at 586."""
+    var given = read_fasta("tests/data/chr20_left_shift/alleles.fa")
+    var flanking = read_fasta("tests/data/chr20_left_shift/flanks.fa")
+    var seqs = List[List[UInt8]]()
+    for r in range(len(given)):
+        seqs.append(List[UInt8](given.seq(r)))
+    var flanks = List[List[UInt8]]()
+    for r in range(len(flanking)):
+        flanks.append(List[UInt8](flanking.seq(r)))
+    var rows = on_reference(seqs, Costs.two_piece(40, 78, 7, 162, 3), 1, None, flanks)
+    assert_equal(_cigar(String(unsafe_from_utf8=rows[0]), String(unsafe_from_utf8=rows[1])), "517M78D465M")
+
+
+def test_left_aligned_shifts_each_gap_through_the_run_before_it() raises:
+    """mm_fix_cigar's first loop on a pairing: a deletion or an insertion between two matched runs moves left while
+    the letters allow; one at the sequence's end only with a right flank after it; none before the first match."""
+    var reference = _b("GATTTTC")
+    # GATTT_C against GATTTTC: the deletion of the last T moves to the first.
+    var deleted: List[Int] = [0, 1, 2, 3, 4, 6]
+    assert_true(_left_aligned(deleted, reference, _b("GATTTC"), True) == [0, 1, 3, 4, 5, 6])
+    # An inserted T after the run moves to the run's start.
+    var query = _b("GATTTTTC")
+    var inserted: List[Int] = [0, 1, 2, 3, 4, 5, -1, 6]
+    assert_true(_left_aligned(inserted, reference, query, True) == [0, 1, -1, 2, 3, 4, 5, 6])
+    # A deletion at the end: shifted only when the right flank follows.
+    var tail: List[Int] = [0, 1, 2, 3, 4, 5]
+    assert_true(_left_aligned(tail, reference, _b("GATTTT"), False) == [0, 1, 2, 3, 4, 5])
+    var shifted: List[Int] = [0, 1, 2, 3, 4]
+    assert_true(_left_aligned(shifted, _b("GATTTT"), _b("GATTT"), True) == [0, 1, 3, 4, 5])
 
 
 def main() raises:

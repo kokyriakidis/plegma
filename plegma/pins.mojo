@@ -950,10 +950,11 @@ def pins(reference: List[UInt8], query: List[UInt8]) -> Pins:
     """mm_align1's pins for `query` against `reference`: the middles of the primary chain's kept seeds where both
     sequences advanced MIN_KSW_LEN letters or more since the last pin (or a long join), the last seed's always."""
     var out = Pins()
+    var trace = Trace()
     if len(reference) >= 1 << POSITION_BITS or len(query) >= 1 << POSITION_BITS:
+        trace.line(PINS, String("no pins: ", len(reference), " x ", len(query), " letters, past 2^", POSITION_BITS))
         return out^
     var chain = _chain(reference, query)
-    var trace = Trace()
     if trace.on(PINS):
         trace.line(PINS, String("chain of ", len(chain), " seeds, ", len(reference), " x ", len(query), " letters"))
     if len(chain) == 0:
@@ -1020,7 +1021,12 @@ def pinned_pairing(
     costs: Costs,
 ) raises -> List[Int]:
     """For each letter of `query`, the letter of `reference` its pinned alignment pairs it with (-1: inserted): the
-    stretches between the pins (`pins_in_context`) each aligned exactly at `costs`, gaps left."""
+    stretches between the pins (`pins_in_context`) each aligned exactly at `costs`, gaps left. Raises past 2^25
+    letters (flanks and sequence), where the seeds' positions no longer fit: no pins would leave one exact alignment
+    of the whole, far past any memory."""
+    var longest = len(left) + max(len(reference), len(query)) + len(right)
+    if longest >= 1 << POSITION_BITS:
+        raise Error(t"pinned alignment: {longest} letters with the flanks, past the 2^{POSITION_BITS} pins reach")
     var found = pins_in_context(reference, query, left, right)
     var trace = Trace()
     if trace.on(PINS):
@@ -1067,4 +1073,86 @@ def pinned_pairing(
                 else:
                     out.append(i)
                     i += 1
+    return _left_aligned(out, reference, query, len(right) > 0)
+
+
+comptime _M = 0
+comptime _I = 1
+comptime _D = 2
+
+
+def _left_aligned(pairing: List[Int], reference: List[UInt8], query: List[UInt8], right_flank: Bool) -> List[Int]:
+    """`pairing` with every insertion and deletion shifted left through the matched run before it while the letters
+    allow, as minimap2's mm_fix_cigar does to an alignment last (its first loop, one pass, each indel between two
+    match runs; the windows' own alignments leave a gap left only within the window, so a gap minimap2 writes left
+    of a pin was written right of it). The right flank (`right_flank`) stands for a matched run after the sequence,
+    so an indel at its end may shift too; none shifts into the left flank, which no row holds (a gap minimap2 shifts
+    into it is the same letters gapped at the sequence's start)."""
+    # The alignment as runs of matched (M), inserted (I) and deleted (D) letters.
+    var ops = List[Int]()
+    var counts = List[Int]()
+
+    def push(op: Int, n: Int) {mut ops, mut counts}:
+        if n <= 0:
+            return
+        if len(ops) > 0 and ops[len(ops) - 1] == op:
+            counts[len(counts) - 1] += n
+        else:
+            ops.append(op)
+            counts.append(n)
+
+    var next_ref = 0
+    for j in range(len(pairing)):
+        var p = pairing[j]
+        if p < 0:
+            push(_I, 1)
+            continue
+        push(_D, p - next_ref)
+        push(_M, 1)
+        next_ref = p + 1
+    push(_D, len(reference) - next_ref)
+    var toff = 0
+    var qoff = 0
+    for k in range(len(ops)):
+        var op = ops[k]
+        var n = counts[k]
+        if op == _M:
+            toff += n
+            qoff += n
+            continue
+        var after = (k + 1 < len(ops) and ops[k + 1] == _M) or (k + 1 == len(ops) and right_flank)
+        if k > 0 and ops[k - 1] == _M and after:
+            var before = counts[k - 1]
+            var l = 0
+            while l < before:
+                if op == _I and query[qoff - 1 - l] != query[qoff + n - 1 - l]:
+                    break
+                if op == _D and reference[toff - 1 - l] != reference[toff + n - 1 - l]:
+                    break
+                l += 1
+            if l > 0:
+                counts[k - 1] -= l
+                if k + 1 < len(ops):
+                    counts[k + 1] += l
+                else:
+                    # Into the right flank's matched run: those letters matched now, after the gap.
+                    ops.append(_M)
+                    counts.append(l)
+                qoff -= l
+                toff -= l
+        if op == _I:
+            qoff += n
+        else:
+            toff += n
+    var out = List[Int](capacity=len(pairing))
+    var i = 0
+    for k in range(len(ops)):
+        for _ in range(counts[k]):
+            if ops[k] == _M:
+                out.append(i)
+                i += 1
+            elif ops[k] == _I:
+                out.append(-1)
+            else:
+                i += 1
     return out^
