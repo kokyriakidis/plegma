@@ -31,8 +31,11 @@ comptime OUTLIER = 0.3
 polishing."""
 comptime TIE_RUN = 4
 """Runs of one letter at least this long take the longer length of a tie (`_lengthen_ties`)."""
-comptime MAX_PERIOD = 24
-"""Repeat units up to this long are deleted or copied whole (the two bands a unit apart overlap: 2 `BAND` > it)."""
+comptime MAX_PERIOD = BAND
+"""Repeat units up to this long are deleted or copied whole. A read whose own copy of the unit sits at another
+rotation needs the cell a unit away from its path, inside its band only while the period is at most `BAND`: at 24
+(the two bands overlapping) units of 17 to 24 letters were scored wrongly and never taken with noisy reads. On the
+180 VNTR and 54 simulated read sets 16 and 24 gave the same consensus sequences (and `BAND` 32 too, 39% slower)."""
 
 
 def _code(letter: UInt8) -> Int:
