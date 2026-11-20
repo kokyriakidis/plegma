@@ -368,5 +368,26 @@ def test_a_read_ending_on_another_letter_still_reaches_there() raises:
     assert_equal(len(made.consensus[0]), 1)
 
 
+def test_the_consensus_does_not_depend_on_read_order() raises:
+    """The guide order goes by the reads, not their input places: a read set and the same reads reversed or rotated
+    give one consensus (abPOA's order, the earlier read of the most similar pair first, did not: 3 of 150 sets of 3 to
+    6 reads at 8% errors)."""
+    seed(151)
+    for _ in range(40):
+        var truth = _random(400)
+        var n = 3 + Int(random_ui64(0, 3))
+        var reads = List[List[UInt8]]()
+        for _ in range(n):
+            reads.append(_mutated(truth, 0.08))
+        var reversed = List[List[UInt8]]()
+        var rotated = List[List[UInt8]]()
+        for k in range(n):
+            reversed.append(reads[n - 1 - k].copy())
+            rotated.append(reads[(k + 1) % n].copy())
+        var want = consensus(reads^)
+        assert_true(consensus(reversed^) == want)
+        assert_true(consensus(rotated^) == want)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -62,10 +62,10 @@ def _before(a: List[UInt8], b: List[UInt8]) -> Bool:
 
 def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10) raises -> List[Int]:
     """abPOA's progressive order of `seqs`: the most similar pair by minimizer multiset Jaccard first, then repeatedly
-    the sequence with the highest summed similarity to those placed. Ties go by the sequences, not their places in
-    `seqs` (`_before`), and of the first pair the one more similar to all the others goes first (it becomes the
-    graph's backbone), so the order is the same however the reads come: abPOA's (the earlier first, ties to the
-    earlier) made a read set's consensus depend on its input order."""
+    the sequence with the highest summed similarity to those placed. Of the first pair, and in ties, the sequences
+    decide, not their places in `seqs` (`_before`: the longer, then the first in letter order), so the order is the
+    same however the reads come: abPOA's (the earlier first, ties to the earlier) made a read set's consensus
+    depend on its input order. (The pair's more central read first instead cost a simulated set a letter.)"""
     var n = len(seqs)
     var order = List[Int]()
     if n <= 2:
@@ -85,21 +85,9 @@ def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10) raises -> Lis
             var value = Float64(both) / Float64(either) if either > 0 else 0.0
             similar[i * n + j] = value
             similar[j * n + i] = value
-    # Each sequence's summed similarity to all the others, summed in sorted order (an order of the sum's terms by
-    # their places would round it differently for another input order).
-    var central = List[Float64](length=n, fill=0.0)
-    for i in range(n):
-        var row = List[Float64](capacity=n)
-        for j in range(n):
-            row.append(similar[i * n + j])
-        sort(row)
-        for value in row:
-            central[i] += value
 
     def ahead(i: Int, j: Int) capturing -> Bool:
-        """Whether `i` goes before `j` of a pair: more central, then by content."""
-        if central[i] != central[j]:
-            return central[i] > central[j]
+        """Whether `i` goes before `j` of a pair."""
         return _before(seqs[i], seqs[j])
 
     var best = -1.0
