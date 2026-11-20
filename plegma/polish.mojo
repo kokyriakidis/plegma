@@ -39,6 +39,8 @@ from .homopolymer import HomopolymerModel
 from .likelihood import _likely, _sites
 from .run_lengths import _groups, _lengthen_ties, _runs
 
+from .trace import POLISH, Trace
+
 # Re-exported for callers that import it from here.
 from .bands import past_the_end
 
@@ -103,6 +105,24 @@ def polish(
         else:
             kept.append(unique[k])
             kept_weight.append(weight[k])
+    var trace = Trace()
+    if trace.on(POLISH):
+        trace.line(
+            POLISH,
+            String(
+                len(current),
+                " letters, ",
+                len(members),
+                " reads (",
+                count,
+                " distinct), ",
+                count - len(kept),
+                " distinct outliers past ",
+                OUTLIER,
+                " edits a letter",
+                "" if len(kept) > 0 else " (all: none left out)",
+            ),
+        )
     if len(kept) > 0 and len(kept) < count:
         unique = kept^
         weight = kept_weight^
@@ -131,10 +151,23 @@ def polish(
     var one_each = False
     comptime LETTERS = "ACGT"
     var unchecked = False
-    for _ in range(rounds):
+    for round in range(rounds):
         paths.fill(realigned, current, sequences, unique, anchors, weight)
         unchecked = False
         if paths.total >= previous_total:
+            trace.line(
+                POLISH,
+                String(
+                    "round ",
+                    round,
+                    ": edit distance ",
+                    paths.total,
+                    ", not under ",
+                    previous_total,
+                    "; the round reverted, ",
+                    "done" if one_each else "next one edit a segment",
+                ),
+            )
             # The last round's edits together cost more than they saved: back to before them. Once, then taken one
             # a segment; when those cost more too, done (taking them again would only go back and forth).
             current = previous^
@@ -384,6 +417,10 @@ def polish(
                 edit_text.append(text^)
                 if alone:
                     break
+        trace.line(
+            POLISH,
+            String("round ", round, ": edit distance ", paths.total, ", ", len(edit_start), " edits taken"),
+        )
         if len(edit_start) == 0:
             break
         # The new consensus, the edits in place left to right; the segments near them are revisited next round.
@@ -418,7 +455,10 @@ def polish(
             current = previous^
     if rounds > 0:
         current = _lengthen_ties(current^, sequences, unique, anchors, weight, realigned, paths)
+    trace.line(POLISH, String("edit distance stage: ", len(current), " letters"))
     var out = _likely(current^, sequences, voters, likely_rounds, support, share, anchors, realigned)
+    trace.line(POLISH, String("likelihood stage: ", len(out), " letters"))
     if homopolymers.loaded():
         out = _runs(out^, sequences, voters, anchors, homopolymers, strands, realigned)
+        trace.line(POLISH, String("homopolymer stage: ", len(out), " letters"))
     return out^

@@ -11,6 +11,7 @@ from .homopolymer import HomopolymerModel, STRAND_UNKNOWN, reads_say_one
 from .kernel import BOTH, INSIDE, LEFT
 from .placement import Clustered, alignment_costs, _consensus_of, _placed
 from .poa import poa
+from .trace import PHASED, Trace
 from .runs import _best_length, _best_shared_length, _flanks, _read_lengths, _run_pairs, _set_runs
 
 
@@ -372,6 +373,30 @@ def phased_consensus(
         builders.extend(groups[1].copy())
         builders.extend(unlabelled.copy())
         var sides = _sides(aligner, made, seqs, builders, unlabelled, costs, haplotypes)
+        var trace = Trace()
+        if trace.on(PHASED):
+            var count = [0, 0, 0, 0]
+            for side in sides:
+                count[min(max(side, 0), TO_BOTH) if side >= 0 else 3] += 1
+            trace.line(
+                PHASED,
+                String(
+                    len(groups[0]),
+                    " and ",
+                    len(groups[1]),
+                    " labelled reads build; of ",
+                    len(unlabelled),
+                    " unlabelled: ",
+                    count[0],
+                    " to haplotype 0, ",
+                    count[1],
+                    " to 1, ",
+                    count[2],
+                    " to both, ",
+                    count[3],
+                    " to neither",
+                ),
+            )
         var grew = [False, False]
         for i in range(len(unlabelled)):
             for k in range(2):

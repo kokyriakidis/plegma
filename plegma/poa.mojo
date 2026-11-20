@@ -46,6 +46,7 @@ from .order import guide_order
 from .pinned import WindowScratch, align_pinned, unique_pins
 from .pins import pins
 from .bands import past_the_end
+from .trace import POA, Trace
 
 
 comptime INPUT_ORDER = 0
@@ -254,6 +255,29 @@ def poa(
             right.append(r)
         else:
             spanning.append(r)
+    var trace = Trace()
+    if trace.on(POA):
+        var order_name = "guide" if options.order == GUIDE_ORDER else (
+            "longest first" if options.order == LONGEST_FIRST else "input"
+        )
+        trace.line(
+            POA,
+            String(
+                len(seqs),
+                " reads: ",
+                len(spanning),
+                " spanning, ",
+                len(left),
+                " left, ",
+                len(right),
+                " right; ",
+                len(start.paths),
+                " starting rows; ",
+                order_name,
+                " order, ",
+                "pinned" if options.seeded else "unpinned",
+            ),
+        )
     var shown = List[Int]()
     var starting = len(start.paths)
     for p in range(starting):
@@ -275,6 +299,8 @@ def poa(
         if len(spanning) >= FOREIGN_SPANNING and len(left) + len(right) > 0:
             var core = _letters(graph, graph.heaviest_path_spanning(Topology(graph).order, members))
             foreign = _foreign(core, seqs, spanning, left, right)
+            if trace.on(POA) and len(foreign) > 0:
+                trace.line(POA, String("another copy's (no vote): reads ", _listed(foreign)))
         var kept_left = _without(left, foreign)
         var kept_right = _without(right, foreign)
         _add_anchored(graph, names, seqs, _longest_first(seqs, kept_left), options, PREFIX, path_of, aligner, members)
@@ -311,6 +337,8 @@ def poa(
         out.consensus = consensus^
         out.foreign = foreign^
         sort(reversed)
+        if trace.on(POA) and len(reversed) > 0:
+            trace.line(POA, String("reverse-complemented: reads ", _listed(reversed)))
         out.reversed = reversed^
         return out^
     # No read spans both anchors: each side on its own, then joined.
@@ -329,13 +357,34 @@ def poa(
         for r in right:
             right_reach.append(len(seqs[r]))
         var joined = _join(parts[0], parts[1], left_reach, right_reach)
+        trace.line(
+            POA,
+            String(
+                "no spanning read: left side ",
+                len(parts[0]),
+                " letters, right ",
+                len(parts[1]),
+                "; ",
+                String("joined, ", len(joined), " letters") if len(joined) > 0 else String("not joined"),
+            ),
+        )
         if len(joined) > 0:
             parts.clear()
             parts.append(joined^)
     elif len(left) > 0:
         _trim(parts[0], seqs, left, options.min_cover, True)
+        trace.line(
+            POA,
+            String("left side alone: ", len(parts[0]), " letters, cut where under ", options.min_cover, " reads go on"),
+        )
     else:
         _trim(parts[0], seqs, right, options.min_cover, False)
+        trace.line(
+            POA,
+            String(
+                "right side alone: ", len(parts[0]), " letters, cut where under ", options.min_cover, " reads go on"
+            ),
+        )
     # The graph every read is aligned into: on the joined sequence, or on the one side's.
     _ = graph.add("plegma_backbone", Span(parts[0]))
     if len(parts) == 1:
@@ -632,6 +681,22 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
                 best_off = off
         var r = found.r[best]
         var q = found.q[best]
+        Trace().line(
+            POA,
+            String(
+                "join at the pin left ",
+                r,
+                " / right ",
+                q,
+                " (",
+                len(kept),
+                " pins kept of ",
+                len(found.r),
+                "; ",
+                best_support,
+                " reads either side)",
+            ),
+        )
         var out = List[UInt8](capacity=r + len(right) - q)
         for i in range(r):
             out.append(left[i])
@@ -651,10 +716,16 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
     # a few percent apart, loses to the true one, its letters as alike as the two consensus sequences.
     var got = aligner.align(Span(a), Span(b), Costs.linear(JOIN_EDIT, JOIN_EDIT), mode)
     var spans = got.query_end - got.query_start
+    var trace = Trace()
     if got.reference_end != len(a) or got.query_start != 0 or spans < JOIN_LEAST:
+        trace.line(POA, String("no pin to join at, and no overlap of ", JOIN_LEAST, " letters or more at the ends"))
         return List[UInt8]()
     if Float64(got.cost) > Float64(JOIN_EDIT) * (1.0 - JOIN_IDENTITY) * Float64(spans):
+        trace.line(
+            POA, String("no pin to join at; the ends' overlap of ", spans, " letters under ", JOIN_IDENTITY, " alike")
+        )
         return List[UInt8]()
+    trace.line(POA, String("join at an overlap of the ends: ", spans, " letters, cost ", got.cost))
     var out = List[UInt8](capacity=len(left) + len(right) - got.query_end)
     for i in range(len(left)):
         out.append(left[i])
@@ -687,6 +758,14 @@ def _longest_first(seqs: List[List[UInt8]], reads: List[Int]) -> List[Int]:
     var out = List[Int](capacity=len(keys))
     for key in keys:
         out.append(Int(key & 0xFFFFFFFF))
+    return out^
+
+
+def _listed(reads: List[Int]) -> String:
+    """`reads` as a comma-separated list, for a trace line."""
+    var out = String()
+    for k in range(len(reads)):
+        out.write("," if k > 0 else "", reads[k])
     return out^
 
 

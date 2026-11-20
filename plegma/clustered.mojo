@@ -21,6 +21,7 @@ from .homopolymer import HomopolymerModel, STRAND_UNKNOWN, reads_say_one
 from .kernel import BOTH, INSIDE
 from .placement import Clustered, _aligned, alignment_costs, _consensus_of, _placed
 from .poa import poa
+from .trace import CLUSTERED, Trace
 from .runs import _apart_by_runs_alone, _run_at, _run_pairs, _set_runs, _two_lengths
 
 # Re-exported for callers that import them from here.
@@ -146,6 +147,9 @@ def clustered_consensus(
             groups = _first_split(seqs, spanning, max_clusters, min_freq, options)
     if len(groups) <= 1:
         groups = [builders.copy()]
+    var trace = Trace()
+    if trace.on(CLUSTERED):
+        trace.line(CLUSTERED, String(n, " reads, ", len(builders), " build; first split: ", _sizes(groups)))
     var costs = alignment_costs(options.poa.scoring)
     # A read moves to the consensus it differs from least, a substitution weighing more than a letter slipped in a run
     # (reads slip in runs far more often than they misread a letter), as the first split weighs them. At the
@@ -163,8 +167,9 @@ def clustered_consensus(
         for k in range(len(groups)):
             for r in groups[k]:
                 label[r] = k
-        for _ in range(MAX_REFINEMENTS):
+        for refinement in range(MAX_REFINEMENTS):
             var moved = False
+            var moves = 0
             var next = List[List[Int]](length=len(made), fill=List[Int]())
             for r in builders:
                 var best = label[r] if label[r] >= 0 else 0
@@ -178,8 +183,16 @@ def clustered_consensus(
                         best_cost = cost
                 if best != label[r]:
                     moved = True
+                    moves += 1
                     label[r] = best
                 next[best].append(r)
+            if trace.on(CLUSTERED):
+                trace.line(
+                    CLUSTERED,
+                    String(
+                        "refinement ", refinement, ": ", moves, " reads moved, ", _sizes(next), " (floor ", floor, ")"
+                    ),
+                )
             var kept = List[List[Int]]()
             for g in next:
                 if len(g) >= floor:
@@ -236,15 +249,41 @@ def clustered_consensus(
             for b in range(a + 1, len(groups)):
                 if made[a] == made[b]:
                     _join(root, a, b)
+                    trace.line(CLUSTERED, String("clusters ", a, " and ", b, " one: the same consensus"))
                 elif _one_unit_apart(made[a], made[b]) and Float64(
                     min(len(groups[a]), len(groups[b]))
                 ) < MIN_UNIT_SPLIT_FREQ * Float64(len(builders)):
                     _join(root, a, b)
+                    trace.line(
+                        CLUSTERED,
+                        String(
+                            "clusters ",
+                            a,
+                            " and ",
+                            b,
+                            " one: a repeat unit apart, the smaller under ",
+                            MIN_UNIT_SPLIT_FREQ,
+                        ),
+                    )
                 else:
                     if not homopolymers.loaded():
                         # Without a model: apart unless every difference is a single letter of a run.
                         if _apart_by_runs_alone(aligner, made[a], made[b], options.noise_run, runs, single) and single:
                             _join(root, a, b)
+                            trace.line(
+                                CLUSTERED,
+                                String(
+                                    "clusters ",
+                                    a,
+                                    " and ",
+                                    b,
+                                    " one: apart by single letters in runs of ",
+                                    options.noise_run,
+                                    " or more",
+                                ),
+                            )
+                        else:
+                            trace.line(CLUSTERED, String("clusters ", a, " and ", b, " apart"))
                         continue
                     # With a model, each run the two differ by, whatever else they differ by: two lengths where all
                     # the reads fit two better than one (`_two_lengths`), the cluster with the shorter run the
@@ -307,6 +346,21 @@ def clustered_consensus(
                     made[b] = _set_runs(made[b].copy(), runs_b, set_b)
                     if (only_runs and not two) or made[a] == made[b]:
                         _join(root, a, b)
+                    if trace.on(CLUSTERED):
+                        trace.line(
+                            CLUSTERED,
+                            String(
+                                "clusters ",
+                                a,
+                                " and ",
+                                b,
+                                ": ",
+                                len(runs_a),
+                                " runs apart, ",
+                                "two lengths at one" if two else "one length at each",
+                                "; one" if _root(root, a) == _root(root, b) else "; apart",
+                            ),
+                        )
         # The clusters joined made one again from their reads; with every cluster one, the consensus of every read.
         # One flag for all pairs made three clusters one wherever two of them were (a third haplotype's lost).
         var merged = List[List[Int]]()
@@ -335,7 +389,21 @@ def clustered_consensus(
     for k in range(len(groups)):
         for r in groups[k]:
             cluster_of[r] = k
+    if trace.on(CLUSTERED):
+        var lengths = String()
+        for k in range(len(made)):
+            lengths.write(", " if k > 0 else "", len(made[k]))
+        trace.line(CLUSTERED, String(len(groups), " clusters of ", _sizes(groups), " reads, ", lengths, " letters"))
     return _placed(aligner, made^, seqs, cluster_of, anchor_of, costs)
+
+
+def _sizes(groups: List[List[Int]]) -> String:
+    """Clusters' sizes, for a trace line: `[12, 9]`."""
+    var out = String("[")
+    for k in range(len(groups)):
+        out.write(", " if k > 0 else "", len(groups[k]))
+    out.write("]")
+    return out^
 
 
 def _root(root: List[Int], k: Int) -> Int:

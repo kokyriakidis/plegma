@@ -17,12 +17,11 @@ are kept and the stretches between them aligned exactly (karan), so the rows spe
 """
 
 from std.memory import bitcast
-from std.os import getenv
-from std.sys import stderr
 
 from karan import Aligner, Costs, Mode, Ties
 
 from .graph import DELETION, INSERTION, cigar_runs
+from .trace import PINS, Trace
 
 comptime K = 19
 comptime W = 19
@@ -954,8 +953,9 @@ def pins(reference: List[UInt8], query: List[UInt8]) -> Pins:
     if len(reference) >= 1 << POSITION_BITS or len(query) >= 1 << POSITION_BITS:
         return out^
     var chain = _chain(reference, query)
-    if getenv("PLEGMA_PINS_TRACE") == "1":
-        print("pins chain", len(chain), file=stderr)
+    var trace = Trace()
+    if trace.on(PINS):
+        trace.line(PINS, String("chain of ", len(chain), " seeds, ", len(reference), " x ", len(query), " letters"))
     if len(chain) == 0:
         return out^
     var kept = _fix_bad_ends(chain, BW, MIN_CHAIN_SCORE * 2)
@@ -1022,11 +1022,12 @@ def pinned_pairing(
     """For each letter of `query`, the letter of `reference` its pinned alignment pairs it with (-1: inserted): the
     stretches between the pins (`pins_in_context`) each aligned exactly at `costs`, gaps left."""
     var found = pins_in_context(reference, query, left, right)
-    if getenv("PLEGMA_PINS_TRACE") == "1":
-        var text = String("pins")
+    var trace = Trace()
+    if trace.on(PINS):
+        var text = String(len(found.r), " pins (reference,query):")
         for m in range(len(found.r)):
-            text += " " + String(found.r[m]) + "," + String(found.q[m])
-        print(text, file=stderr)
+            text.write(" ", found.r[m], ",", found.q[m])
+        trace.line(PINS, text)
     var points_r: List[Int] = [0]
     var points_q: List[Int] = [0]
     points_r.extend(found.r.copy())

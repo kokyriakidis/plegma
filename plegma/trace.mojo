@@ -61,10 +61,6 @@ struct Trace(ImplicitlyCopyable):
                 if name == _name(topic):
                     self.topics |= topic
 
-    def __init__(out self, topics: Int):
-        """Tracing exactly `topics` (a test's, say), whatever the environment says."""
-        self.topics = topics
-
     @always_inline
     def on(self, topic: Int) -> Bool:
         return self.topics & topic != 0

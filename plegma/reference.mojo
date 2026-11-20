@@ -10,6 +10,7 @@ from karan.common import spread, thread_count
 
 from .graph import DELETION, INSERTION, cigar_runs
 from .pins import pinned_pairing
+from .trace import REFERENCE, Trace
 
 comptime GAP = UInt8(ord("-"))
 
@@ -52,6 +53,25 @@ def on_reference(
         return List[List[UInt8]]()
     var distinct = _distinct(seqs)
     var pinned = len(flanks) == 2
+    var trace = Trace()
+    if trace.on(REFERENCE):
+        trace.line(
+            REFERENCE,
+            String(
+                n,
+                " sequences (",
+                len(distinct),
+                " distinct), reference ",
+                len(seqs[0]),
+                " letters; ",
+                String(
+                    "pinned between flanks of ", len(flanks[0]), " and ", len(flanks[1]), " letters"
+                ) if pinned else String("exact"),
+                ", ",
+                threads,
+                " threads",
+            ),
+        )
     var partner = _pairings(seqs, distinct, costs, threads, flanks)
     # Pinned alignments keep minimap2's writing, a stretch deleted and inserted again included: no fallback.
     if fallback and not pinned:
@@ -134,8 +154,38 @@ def _fall_back(seqs: List[List[UInt8]], distinct: List[Int], mut partner: List[L
             replaced.append(d)
             inserted += _long_inserted(partner[d])
     var most = Float64(len(replaced)) >= REPLACED_SEQUENCES * Float64(len(distinct) - 1)
+    var trace = Trace()
     if not most or Float64(inserted) < REPLACED_LETTERS * Float64(letters):
+        if trace.on(REFERENCE) and len(replaced) > 0:
+            trace.line(
+                REFERENCE,
+                String(
+                    "no fallback: ",
+                    len(replaced),
+                    " of ",
+                    len(distinct) - 1,
+                    " replace a stretch, inserting ",
+                    inserted,
+                    " of ",
+                    letters,
+                    " letters",
+                ),
+            )
         return
+    trace.line(
+        REFERENCE,
+        String(
+            "fallback costs for ",
+            len(replaced),
+            " of ",
+            len(distinct) - 1,
+            " (stretches replaced, ",
+            inserted,
+            " of ",
+            letters,
+            " letters inserted)",
+        ),
+    )
     var aligner = Aligner(warm=False)
     for d in replaced:
         partner[d] = _onto(aligner, seqs[distinct[0]], seqs[distinct[d]], fallback)

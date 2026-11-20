@@ -7,6 +7,7 @@ from .alphabet import encode_base
 from .graph import Graph
 from .kernel import GLOBAL, PREFIX, SINK, SOURCE, SUFFIX, GraphAlignment, Scoring, Topology, Workspace
 from .pins import Pins, pins
+from .trace import PINS, Trace
 
 
 struct WindowScratch(Movable):
@@ -182,6 +183,24 @@ def align_pinned(
             continue
         anchor_r.append(r)
         anchor_q.append(q)
+    var trace = Trace()
+    if trace.on(PINS):
+        trace.line(
+            PINS,
+            String(
+                "pinned alignment: ",
+                len(query),
+                " letters to a path of ",
+                len(path),
+                "; ",
+                len(found.r),
+                " pins, ",
+                len(anchor_r),
+                " kept (19-mer unique in both, letters agreeing), ",
+                len(anchor_r) + 1,
+                " windows",
+            ),
+        )
     # Every window gets the band the whole sequence would (b + f * its length, not the window's): a window of a few
     # hundred letters would otherwise get a dozen either side, too few for a copy-number change inside it.
     var window_b = band_b + Int(band_f * Float64(len(query))) if band_b >= 0 else band_b
