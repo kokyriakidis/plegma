@@ -9,7 +9,8 @@ through `ConsensusOptions.check`), `records.mojo` (the input read once, gzip or 
 `anchor=` and `strand=` header words), `gfa.mojo` (`-r 3`, `-r 4`) and `plegma_cli.mojo` (each command, the outputs;
 an error is one `plegma: ...` line and exit status 1).
 
-`plegma.poa` (`plegma/poa.mojo`) adds the sequences one at a time, in abPOA's guide order (`-p`, the default,
+`plegma.poa` (`plegma/poa.mojo`) adds the sequences one at a time, in abPOA's guide order with ties (and the first
+pair's order) by the sequences, so any input order gives one consensus (`-p`, the default,
 `plegma/order.mojo`), input order (`-n`) or longest first (`-L`).
 
 - **Alignment to the graph** (`plegma/kernel.mojo`): banded DP over the nodes in topological order, abPOA's scoring
@@ -50,9 +51,12 @@ once a read has grown the graph past the far anchor, as the pins' windows end at
 
 With no spanning read each side is assembled alone, the longest read first: the left consensus followed forward
 while most reads go on (`Graph.heaviest_path`), the right one backward (`Graph.heaviest_path_backward`). Both sides:
-joined at a pin of minimap2's chain between them (`pins.pins`, the 19-mer unique in both) placing the right side
-over the left's end by 200 letters or more, where both sides have the most reads; or at a short karan overlap of
-their ends; the graph is rebuilt on the joined sequence. One side: its consensus cut where fewer than `-c` reads (5) reach (a
+joined where they agree (`_join`): each way to place the right side over the left's end by 200 letters or more
+(minimap2's pins between them on a 19-mer unique in both, grouped by diagonal; karan overlaps of their ends) is
+aligned from its meeting point over the whole overlap, the fewest edits a letter wins, at its best-supported pin;
+where another placement off its path agrees nearly as well (a tandem array whose copies are as alike as the
+consensus is noisy) the sides stay apart. The graph is rebuilt on the joined sequence. One side: its consensus cut
+where fewer than `-c` reads (5) reach, each read's reach the consensus columns its letters are in (`_reach`; a
 one-directional assembly). Polishing aligns each read as it is anchored (`polish`'s `anchors`: karan's `PREFIX` or
 `SUFFIX`, or the consensus inside a longer read's prefix or suffix), counts disagreement against the reads covering
 each position, and lets a read with a free end vote on the letters it covers: in its forward and backward matrices

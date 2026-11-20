@@ -66,7 +66,7 @@ The flags, defaults and alignment modes (`-m` 0 global, 1 local, 2 extension) ar
 |---|---|---|
 | `-M -X -O -E` | `2 4 4,24 2,1` | match, mismatch, gap open and extend (two pieces: a gap of g costs min(O1 + g E1, O2 + g E2)) |
 | `-b -f -B` | `10 0.01 64` | adaptive band: b + f L letters either side of the best cells, capped at B (`-B -1`: no cap, as abPOA) |
-| `-p` / `-L` / `-n` | `-p` | order: abPOA's guide order (minimizer similarity), longest first, or input order |
+| `-p` / `-L` / `-n` | `-p` | order: abPOA's guide order (minimizer similarity; ties by the reads, so input order does not matter), longest first, or input order |
 | `-S` / `-N` | `-S` | each sequence pinned to the consensus so far at minimap2's chained seeds (DP only between pins), or aligned to the whole graph |
 | `-P` | `50,20` | polishing rounds: by edit distance, then by pair-HMM likelihood (`0,0` off) |
 | `-H FILE` | | homopolymer model (shasta2's csv): every run takes its most likely length given the reads' |

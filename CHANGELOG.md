@@ -50,6 +50,25 @@
 - `phased_consensus`: with the two haplotypes' first consensus sequences of one length, swapping the labels 0 and 1
   changed the result, not only its order.
 - `plegma poa -d` and `-a` were ignored when any read was anchored at one end; they now fail with a message.
+- Joins inside tandem arrays: one 19-mer pin, unique in each side, could be another copy's, and the join dropped or
+  doubled copies. Each way to place the two sides is now scored by how well they agree over the whole overlap; where
+  two placements on different diagonals agree nearly as well, the sides are left apart. Simulated assemblies
+  (held-out seeds): wrong joins 38 to 23, every one left inside an array whose copies are as alike as the
+  consensus is noisy; none of the joins right before lost but one, now refused.
+- A one-sided assembly's cut (`-c`) and the join's read support took a read's length for its reach along the
+  consensus; they now take the consensus columns its letters are in. `-c 1` skipped the cut.
+- A one-sided read whose alignment lost its path in the band (at 10% errors) was never aligned again, as an end is
+  always reached; under a third of a perfect score it is now aligned once more with the band doubled.
+- `clustered_consensus`: a partial read that tells the clusters nothing went to the first input row's cluster and
+  counted there for `min_freq` and the 30% one-unit rule, so input order decided whether two haplotypes stayed
+  apart. Such reads now count for no cluster.
+- The consensus depended on input order (abPOA's guide order breaks ties by position, and takes the earlier read
+  of the first pair first): ties now go by the sequences, and the same reads in any order give one consensus.
+- The likelihood stage judged its run-slip gate on as little as one inserted letter, and on clean reads never ran.
+- `align_pinned`'s score left out inserted letters between anchors and path nodes skipped between them (`-s`
+  compares these scores).
+- `ref -F`: the runs inserted at one place were aligned to each other with the fallback costs the pinned mode
+  otherwise refuses.
 
 ### Changed
 

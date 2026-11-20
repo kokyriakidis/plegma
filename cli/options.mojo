@@ -25,7 +25,8 @@ poa options:
     -b INT      adaptive band: extra band b [10]; < 0 disables the band
     -f FLOAT    adaptive band: extra band f [0.01]: b+f*L letters either side, L the sequence's length
     -B INT      adaptive band: at most INT letters either side [64]; < 0 no cap (abPOA's band)
-    -p          progressive: abPOA's guide order, most similar minimizer multisets first [the default]
+    -p          progressive: abPOA's guide order, most similar minimizer multisets first, ties by the sequences
+                (the consensus is the same in any input order) [the default]
     -L          the sequences longest first instead
     -n          the sequences in input order instead
     -S          seeded (global mode): each sequence pinned to the consensus path as minimap2 pins an alignment
