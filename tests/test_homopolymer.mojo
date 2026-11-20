@@ -19,6 +19,13 @@ def _rows(mut text: String, base: String, strand: Int, left: String, right: Stri
 def _model() raises -> HomopolymerModel:
     """shasta2's own test model: true lengths 2 and 3, observed 0 to 4, every base alike; in the * rows strand 0 reads
     a run right 90% of the time, strand 1 one letter short 90%; for A between C and G strand 0 reads it short too."""
+    var text = _model_text()
+    with open(PATH, "w") as f:
+        f.write(text)
+    return HomopolymerModel.load(PATH)
+
+
+def _model_text() -> String:
     var text = String("base,strand,left,right,n,m,count,probability,logProbabilityDb\n")
     for base in [String("A"), String("C"), String("G"), String("T")]:
         for strand in range(2):
@@ -26,9 +33,7 @@ def _model() raises -> HomopolymerModel:
                 _rows(text, base, strand, "*", "*", n, n if strand == 0 else n - 1, 100)
     for n in range(2, 4):
         _rows(text, "A", 0, "C", "G", n, n - 1, 0)
-    with open(PATH, "w") as f:
-        f.write(text)
-    return HomopolymerModel.load(PATH)
+    return text^
 
 
 def test_strands_and_flanks_as_shasta2_tests_them() raises:
@@ -92,6 +97,27 @@ def _lengths(text: String) raises -> List[Int]:
     for word in text.split(","):
         out.append(Int(word))
     return out^
+
+
+def test_malformed_model_lines_raise() raises:
+    """A line the table cannot hold, or one whose numbers or fields are malformed, raises for that reason; none is
+    read into some other row or written past the table."""
+    var text = _model_text()
+    _ = HomopolymerModel.parse(text)
+    var lines: List[String] = [
+        "A,1,*,*,65538,1,10,0.9,-3.0",  # n past 16 bits once wrapped into another row
+        "A,0,*,*,2,9223372036854775809,10,0.9,-0.45",  # m wraps negative
+        "A,0,*,*,2,1,10,0.9,-0.45,",  # a trailing comma
+        "A,0,*,*,2,1,10,0.9,-3.0e",  # an exponent without digits
+    ]
+    var reasons: List[String] = ["a run past", "a number out of range", "9 fields expected", "an exponent without"]
+    for k in range(len(lines)):
+        var message = String()
+        try:
+            _ = HomopolymerModel.parse(text + lines[k] + "\n")
+        except e:
+            message = String(e)
+        assert_true(reasons[k] in message, message)
 
 
 def main() raises:

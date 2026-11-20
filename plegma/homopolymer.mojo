@@ -26,6 +26,10 @@ comptime FLANK_UNKNOWN = 4
 """A run's flank at the consensus's end, or not a letter of ACGT."""
 comptime _STRANDS = 2
 comptime _FLANKS = 5
+comptime MAX_RUN = 1000
+"""The longest run length (n or m) a model's line may give: shasta2's models stop near 100; the table is n times m."""
+comptime _MAX_INTEGER = 1 << 40
+"""Integers past this in the csv are malformed (and would wrap)."""
 comptime ONE_LETTER_READS = 3
 """The reads `reads_say_one` needs before their lengths say a run is one letter."""
 
@@ -98,6 +102,8 @@ struct _Fields:
             got = got * 10 + Int(bytes[unsafe_offset=self.at] - UInt8(ord("0")))
             self.at += 1
             digits += 1
+            if got > _MAX_INTEGER:
+                raise Error("homopolymer model: a number out of range")
         if digits == 0:
             raise Error("homopolymer model: a number expected")
         self._done(bytes)
@@ -150,15 +156,19 @@ struct _Fields:
             ):
                 self.at += 1
             var power = 0
+            var power_digits = 0
             while (
                 self.at < self.end
                 and bytes[unsafe_offset=self.at] >= UInt8(ord("0"))
                 and bytes[unsafe_offset=self.at] <= UInt8(ord("9"))
             ):
-                power = power * 10 + Int(bytes[unsafe_offset=self.at] - UInt8(ord("0")))
+                power = min(power * 10 + Int(bytes[unsafe_offset=self.at] - UInt8(ord("0"))), 10000)
                 self.at += 1
+                power_digits += 1
+            if power_digits == 0:
+                raise Error("homopolymer model: an exponent without digits")
             value *= 10.0 ** Float64(-power if minus else power)
-        self._done(bytes)
+        # The line's last field: what follows it (a comma, say) is the caller's to refuse.
         return -value if negative else value
 
 
@@ -247,6 +257,8 @@ struct HomopolymerModel(Copyable, Movable):
                 raise Error(t"homopolymer model {path}: line {line_number}: 9 fields expected")
             if base == FLANK_UNKNOWN or strand > 1 or n < 2 or not (value <= 0.0):
                 raise Error(t"homopolymer model {path}: line {line_number}: out of range")
+            if n > MAX_RUN or m > MAX_RUN:
+                raise Error(t"homopolymer model {path}: line {line_number}: a run past {MAX_RUN} letters")
             n_count = max(n_count, n + 1)
             m_count = max(m_count, m + 1)
             keys.append((((base * _STRANDS + strand) * _FLANKS + left) * _FLANKS + right) << 16 | n)
@@ -379,7 +391,7 @@ struct HomopolymerModel(Copyable, Movable):
         """The run length n most likely given the reads' lengths `lengths` (each on `strands`' strand: 0, 1 or
         `STRAND_UNKNOWN`), `base` between `left` and `right` (0..3, or `FLANK_UNKNOWN`): the n that maximizes
         log P(n) plus the sum of log P(m | n, ...), the shorter on ties; -1 when no n is in the model."""
-        var known = True
+        var known = len(strands) == len(lengths)
         for strand in strands:
             known = known and (strand == 0 or strand == 1)
         if known:
@@ -420,9 +432,11 @@ struct HomopolymerModel(Copyable, Movable):
                 continue
             for k in range(len(lengths)):
                 var m = min(max(lengths[k], 0), self.m_count - 1)
-                if strands[k] == 0:
+                # A read without a strand (`strands` shorter than `lengths`) is on either.
+                var strand = strands[k] if k < len(strands) else STRAND_UNKNOWN
+                if strand == 0:
                     score += self.table[at0 + m]
-                elif strands[k] == 1:
+                elif strand == 1:
                     score += self.table[at1 + m]
                 else:
                     # Either strand, half each.
