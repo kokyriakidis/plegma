@@ -217,8 +217,12 @@ def align_pinned(
             var left = path[r0] if r0 >= 0 else SOURCE
             var right = path[r1] if r1 < len(path) else SINK
             var nodes = window_nodes(graph, topology.rank, topology.order, left, right, scratch)
-            # No nodes between the anchors: the query's letters there are inserted.
-            if len(nodes) > 0:
+            # No nodes between the anchors: the query's letters there are inserted, at a gap's cost (free before the
+            # graph's start in SUFFIX mode, past its end in PREFIX).
+            if len(nodes) == 0:
+                if not ((mode == SUFFIX and r0 < 0) or (mode == PREFIX and r1 >= len(path))):
+                    score -= Int(scoring.gap(q1 - q0 - 1))
+            else:
                 var window = Span(query)[q0 + 1 : q1]
                 var window_mode = GLOBAL
                 if mode == SUFFIX and r0 < 0:
@@ -233,6 +237,14 @@ def align_pinned(
                 score += got.score
                 cells += got.cells
                 peak = max(peak, got.peak_bytes)
+        elif q1 == q0 + 1 and r1 > r0 + 1:
+            # Anchors on consecutive query letters (or the query's first or last letter anchored): the path's nodes
+            # between them are deleted, at a gap's cost, unless an edge joins the two already or the mode lets the
+            # alignment start (SUFFIX) or end (PREFIX) there.
+            var free = (r0 < 0 and mode == SUFFIX) or (r1 >= len(path) and mode == PREFIX)
+            var joined = r0 >= 0 and r1 < len(path) and graph.edge(path[r0], path[r1]) >= 0
+            if not free and not joined:
+                score -= Int(scoring.gap(r1 - r0 - 1))
         if m < len(anchor_r):
             aligned[q1] = path[r1]
             score += Int(scoring.match_score)
