@@ -111,6 +111,9 @@ PLEGMA_TRACE=poa,polish plegma poa -N reads.fa > /dev/null
 - `pixi run test`: unit tests per module (`tests/`); `pixi run fuzz`: random inputs through both commands, every
   output's invariants checked, and the command line's own behaviour (gzip and CRLF input, bad options) first
   (`experiments/validate/fuzz.py`); `pixi run test-all`: those, the C API (shared and static) and Python.
+- Stage oracles kept as scripts: `experiments/validate/anchored_grid.py` (simulated local assemblies against their
+  truth: joins, cuts, distance) and `experiments/validate/minimap2_cigars.py` (`ref -F`'s pair CIGARs against
+  minimap2's own).
 - Refactors: `experiments/validate/golden.py` writes every command's and library call's outputs over fixed inputs;
   run it before and after a change meant to keep behaviour and `diff -r` the two directories.
 - Consensus accuracy: `experiments/msa/accuracy.py` (simulated reads and real VNTR read sets against abPOA and
