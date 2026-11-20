@@ -181,6 +181,14 @@ def _spelling(seq: List[UInt8], start: Int, end: Int, at: List[Int], lo: Int, hi
     return -1
 
 
+def _first(a: List[UInt8], b: List[UInt8]) -> Bool:
+    """Whether `a` comes first in letter order, or equals `b`."""
+    for i in range(min(len(a), len(b))):
+        if a[i] != b[i]:
+            return a[i] < b[i]
+    return len(a) <= len(b)
+
+
 def _sides(
     mut aligner: Aligner,
     made: List[List[UInt8]],
@@ -199,7 +207,11 @@ def _sides(
     decides only where each spelling is carried by `MIN_CARRIERS` of them and `MIN_CARRIER_SHARE` of those spelling
     it either way, or where `labels` (a haplotype per read of `seqs`, -1 none) back it (`PHASED_CARRIERS`)."""
     var out = List[Int](length=len(reads), fill=TO_BOTH)
-    var long_index = 0 if len(made[0]) >= len(made[1]) else 1
+    # The longer haplotype's consensus; of two as long, the one first in letter order, so the roles go by the
+    # sequences and not by which label each has (by the label, swapping the labels moved the places and the reads).
+    var long_index = (
+        0 if len(made[0]) > len(made[1]) or (len(made[0]) == len(made[1]) and _first(made[0], made[1])) else 1
+    )
     var short_index = 1 - long_index
     ref longer = made[long_index]
     var sites = _differences(aligner, longer, made[short_index], costs)

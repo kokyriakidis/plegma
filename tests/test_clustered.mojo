@@ -39,6 +39,10 @@ def _mutated(seq: List[UInt8], rate: Float64) -> List[UInt8]:
     return out^
 
 
+def _b(text: StringSlice) -> List[UInt8]:
+    return List[UInt8](text.as_bytes())
+
+
 def _text(seq: List[UInt8]) -> String:
     return String(unsafe_from_utf8=seq)
 
@@ -751,6 +755,47 @@ def test_phased_reads_all_inside_build_as_spanning() raises:
     var got = phased_consensus(reads^, labels, List[Int](length=6, fill=INSIDE))
     assert_true(got.consensus[0] == truth)
     assert_true(got.consensus[1] == truth)
+
+
+def test_phased_swapping_the_labels_swaps_the_haplotypes() raises:
+    """Labels 0 and 1 swapped give the two haplotypes swapped: with labelled-only consensus sequences of one length,
+    the longer's role (where `_differences` puts the places, which haplotype an unlabelled read is placed on) went
+    to haplotype 0 by its label, and a LEFT read built the other haplotype once swapped."""
+    var reads: List[List[UInt8]] = [
+        _b(
+            "TACTGTGGATTGGTACAGGATAATAATAATAATAAAAAAAAAAAATCATGGCAGTCAATCCTGTCCCGGGACTTACTTACTTACTTACTTACTTACTTACTTGGGGCTAACATCCTCACGAAGTTATTTATAATGACGC"
+        ),
+        _b(
+            "GATAATAATAACAATAAAAAAAAAAAAAAATCATGGCAGTCAATCCTGTCCCGGGACTTACTTACTTACTCACTTACTTACTTGGGGCTAACATCCTCACGAAGTTATTTA"
+        ),
+        _b(
+            "TGGTAAACAATCACTCCTATACGAAGAAGCTACTGTGGATTGGTACAGGATAATAATAATAATAAAAAAAAAAAAAAATCATGGCAGTCAATCCTGTCCCGGGACTTACTTACTTACTCACTTACTTACTTGGGGCTAACATCCTTCACGAAGTTATTTATAATGACGC"
+        ),
+        _b(
+            "GGTACAGGATAATAATAATAATAAAAAAAAAAAATCCTGGCAGTCAATCCCTGTCCCGGGACTTACTTACTTACTTACTTACTTACTTACTTGGGGCTAACATCCTCACGAAGTTATTTATAATGACGC"
+        ),
+        _b("TGTAAACAATCACTCCTATACGAAGAAGCTACTGTGGATTGGTACAGGATAATAATAATAATAAAAAAAAAAAATCA"),
+        _b(
+            "TAATAATAAAAAAAAAAAAAAATCATGGCAGTCAATCCTGGCCCGGGACTTACTTACTTACTCACTTACTTACTTGGGGCTAACATCCTCACGAAGTTATTTATAATGACGC"
+        ),
+        _b("TACTAATAATAAAAAAAAAAAAAAATCATGGCAGTCAATCCTGTCCCGGGACTTACTTACTTACTCACTT"),
+        _b(
+            "TGTAAACAATCACTCCTATACGAAGAAGCTACTGTGGATTGGTACAGGATAATAATAATAATAAAAAAAAAAAATCATGGCAGTCAATCCTGTCCCGGGACTTACTTACTTACTTACTTACTTACTTACTTGGGGCTAACATCCTCACGAAGTTATTTATAATGACGC"
+        ),
+        _b(
+            "TGTAAACAATCACTCCTATACGAAGAAGTACTGTGGATTGGTACAGGATAATAATAATAATAAAAAAAAAAAAAAATCATGGCAGTCAGATCCTGTCCCGGGACTTACTTACTTACTCACTTACTTACTTGGGGCTAACATCCTCACGAAGTTATTTATAAATGACGC"
+        ),
+        _b("AAAATCATGGCAGTCAATCCTGTCCCGGGACTTACTTACTTACTTACTTACTTACTTACTTGGGGCTAACATCCTCACGAAGGTTATTTATAATGACGC"),
+    ]
+    var labels: List[Int] = [0, 1, 1, 0, -1, 1, -1, 0, 1, 0]
+    var swapped = List[Int]()
+    for h in labels:
+        swapped.append(1 - h if h >= 0 else -1)
+    var anchors: List[Int] = [2, 3, 0, 2, 1, 2, 3, 0, 0, 2]
+    var a = phased_consensus(reads.copy(), labels, anchors)
+    var b = phased_consensus(reads.copy(), swapped, anchors)
+    assert_true(a.consensus[0] == b.consensus[1])
+    assert_true(a.consensus[1] == b.consensus[0])
 
 
 def main() raises:
