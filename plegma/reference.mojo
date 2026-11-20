@@ -76,7 +76,9 @@ def on_reference(
     # Pinned alignments keep minimap2's writing, a stretch deleted and inserted again included: no fallback.
     if fallback and not pinned:
         _fall_back(seqs, distinct, partner, fallback.value())
-    var rows_of = _on_reference_columns(seqs, distinct, partner, costs, fallback)
+    # The runs inserted at one place are aligned to each other as the sequences were to the reference: pinned, with no
+    # fallback there either.
+    var rows_of = _on_reference_columns(seqs, distinct, partner, costs, None if pinned else fallback)
     var out = List[List[UInt8]]()
     for k in range(n):
         out.append(rows_of[_index_of(seqs, distinct, k)].copy())
@@ -153,6 +155,8 @@ def _fall_back(seqs: List[List[UInt8]], distinct: List[Int], mut partner: List[L
         if _replaces(partner[d], len(seqs[distinct[0]])):
             replaced.append(d)
             inserted += _long_inserted(partner[d])
+    if len(distinct) <= 1:
+        return
     var most = Float64(len(replaced)) >= REPLACED_SEQUENCES * Float64(len(distinct) - 1)
     var trace = Trace()
     if not most or Float64(inserted) < REPLACED_LETTERS * Float64(letters):
