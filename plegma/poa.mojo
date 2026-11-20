@@ -650,16 +650,17 @@ def _one_side(
 
 def _reach(graph: Graph, consensus: List[Int], paths: List[Int], from_left: Bool) -> List[Int]:
     """How far along `consensus` (its nodes) each of `paths` reaches from the anchor it starts at (`from_left`: from
-    the consensus's start, else back from its end): letters to the furthest consensus node it passes. A read's own
-    length would stand for it only where the consensus has the read's letters one for one."""
-    var index = List[Int](length=len(graph), fill=-1)
+    the consensus's start, else back from its end): letters to the furthest consensus column it passes (a letter
+    unlike the consensus's there is in its column; an inserted one in none). A read's own length would stand for it
+    only where the consensus has the read's letters one for one."""
+    var at_column = List[Int](length=graph.column_count(), fill=-1)
     for k in range(len(consensus)):
-        index[consensus[k]] = k
+        at_column[Int(graph.columns[consensus[k]])] = k
     var out = List[Int](capacity=len(paths))
     for p in paths:
         var furthest = 0
         for node in graph.paths[p]:
-            var k = index[Int(node)]
+            var k = at_column[Int(graph.columns[Int(node)])]
             if k >= 0:
                 furthest = max(furthest, k + 1 if from_left else len(consensus) - k)
         out.append(furthest)

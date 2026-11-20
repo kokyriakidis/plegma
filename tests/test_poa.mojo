@@ -356,5 +356,17 @@ def test_a_join_inside_a_tandem_array_is_where_the_two_sides_agree() raises:
     assert_true(distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth)) <= 10)
 
 
+def test_a_read_ending_on_another_letter_still_reaches_there() raises:
+    """Three one-letter left reads, C, A and C: A is in C's column, not on the consensus path, and counting only the
+    path's nodes it reached nothing, so the one-sided cut (where the last of fewer than -c reads stops) emptied the
+    consensus."""
+    var names: List[String] = ["a", "b", "c"]
+    var seqs: List[List[UInt8]] = [_b("C"), _b("A"), _b("C")]
+    var anchors: List[Int] = [LEFT, LEFT, LEFT]
+    var made = poa(names, seqs, anchors, PoaOptions(), Graph())
+    assert_equal(len(made.consensus), 1)
+    assert_equal(len(made.consensus[0]), 1)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
