@@ -250,7 +250,8 @@ keeps its reads together.
   edit distance to it, then while they raise the reads' likelihood under a pair HMM.
 - **Homopolymer model**: with shasta2's empirical run-length model, every run of two or more letters takes its most
   likely length given the reads' lengths there, each read on its own strand, as shasta2's msa1 repair does. A read
-  votes on a run only when it has the letters on both sides of it.
+  votes on a run only when it has the letters on both sides of it (at the consensus's first or last letter, on
+  its one side). On error-free reads the ONT model lengthens long runs (a read's T22 is more likely a T23 misread).
 - **Reference MSA**: `on_reference` aligns each allele exactly to the reference (or between minimap2's pins, from a
   port of its asm5 seeding and chaining, `plegma/pins.mojo`).
 
