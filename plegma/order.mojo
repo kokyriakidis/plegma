@@ -49,22 +49,35 @@ def _shared(a: List[UInt64], b: List[UInt64]) -> Int:
     return count
 
 
+def _before(a: List[UInt8], b: List[UInt8]) -> Bool:
+    """A content order on sequences, for ties: the longer first, then the first in letter order (identical ones are
+    interchangeable)."""
+    if len(a) != len(b):
+        return len(a) > len(b)
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return a[i] < b[i]
+    return False
+
+
 def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10) raises -> List[Int]:
-    """abPOA's progressive order of `seqs`: the most similar pair by minimizer multiset Jaccard first (the
-    earlier first within it), then repeatedly the sequence with the highest summed similarity to those placed."""
+    """abPOA's progressive order of `seqs`: the most similar pair by minimizer multiset Jaccard first, then repeatedly
+    the sequence with the highest summed similarity to those placed. Ties go by the sequences, not their places in
+    `seqs` (`_before`), and of the first pair the one more similar to all the others goes first (it becomes the
+    graph's backbone), so the order is the same however the reads come: abPOA's (the earlier first, ties to the
+    earlier) made a read set's consensus depend on its input order."""
     var n = len(seqs)
     var order = List[Int]()
     if n <= 2:
         for i in range(n):
             order.append(i)
+        if n == 2 and _before(seqs[1], seqs[0]):
+            order.reverse()
         return order^
     var keys = List[List[UInt64]]()
     for s in seqs:
         keys.append(_minimizer_keys(Span(s), k, w))
     var similar = List[Float64](length=n * n, fill=0.0)
-    var best = -1.0
-    var first = 0
-    var second = 1
     for i in range(n):
         for j in range(i + 1, n):
             var both = _shared(keys[i], keys[j])
@@ -72,10 +85,38 @@ def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10) raises -> Lis
             var value = Float64(both) / Float64(either) if either > 0 else 0.0
             similar[i * n + j] = value
             similar[j * n + i] = value
-            if value > best:
+    # Each sequence's summed similarity to all the others, summed in sorted order (an order of the sum's terms by
+    # their places would round it differently for another input order).
+    var central = List[Float64](length=n, fill=0.0)
+    for i in range(n):
+        var row = List[Float64](capacity=n)
+        for j in range(n):
+            row.append(similar[i * n + j])
+        sort(row)
+        for value in row:
+            central[i] += value
+
+    def ahead(i: Int, j: Int) capturing -> Bool:
+        """Whether `i` goes before `j` of a pair: more central, then by content."""
+        if central[i] != central[j]:
+            return central[i] > central[j]
+        return _before(seqs[i], seqs[j])
+
+    var best = -1.0
+    var first = 0
+    var second = 1
+    for i in range(n):
+        for j in range(i + 1, n):
+            var value = similar[i * n + j]
+            var a = i if ahead(i, j) else j
+            var b = j if a == i else i
+            # As similar: the pair whose first goes before the other pair's first, then whose second does.
+            if value > best or (
+                value == best and (ahead(a, first) and a != first or (a == first and b != second and ahead(b, second)))
+            ):
                 best = value
-                first = i
-                second = j
+                first = a
+                second = b
     var placed = List[Bool](length=n, fill=False)
     var total = List[Float64](length=n, fill=0.0)
     for x in [first, second]:
@@ -86,7 +127,9 @@ def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10) raises -> Lis
     while len(order) < n:
         var pick = -1
         for i in range(n):
-            if not placed[i] and (pick < 0 or total[i] > total[pick]):
+            if placed[i]:
+                continue
+            if pick < 0 or total[i] > total[pick] or (total[i] == total[pick] and _before(seqs[i], seqs[pick])):
                 pick = i
         order.append(pick)
         placed[pick] = True
