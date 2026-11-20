@@ -181,12 +181,36 @@ struct _Aligner(Movable):
     ) raises -> GraphAlignment:
         """`seq` aligned to `graph` in `mode` (`options.mode` for a spanning read; `PREFIX` or `SUFFIX`). With
         `anchors` (paths), a read anchored at one end is aligned to the part of the graph between their ends alone
-        (`_between`); pinned (`options.seeded`) only while that part is the whole graph, as the pins' windows reach
-        the graph's every source and sink (a right read would end at a left read's letters past the right anchor)."""
+        (`_between`). Pinned (`options.seeded`), the pins' windows reach the graph's every source and sink, so a
+        right read could end on a left read's letters past the right anchor (or a left read's dead-end tip): the
+        pinned alignment stands unless it touches a node outside that part, and only then is the read aligned to the
+        part, unpinned (unpinned, a long noisy read drifts from the band: always so lost a third of a 20 kb
+        assembly's accuracy)."""
         self.row_of.resize(len(graph), -1)
         if len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX):
             var allowed = _between(graph, anchors, mode)
-            if not options.seeded or False in allowed:
+            var outside = False
+            if options.seeded:
+                var topology = Topology(graph)
+                var found = align_pinned(
+                    graph,
+                    topology,
+                    seq,
+                    options.scoring,
+                    options.band_b,
+                    options.band_f,
+                    self.row_of,
+                    self.scratch,
+                    self.workspace,
+                    mode,
+                )
+                for node in found.nodes:
+                    if node >= 0 and not allowed[node]:
+                        outside = True
+                        break
+                if not outside:
+                    return found^
+            if not options.seeded or outside:
                 var part = Topology(graph, allowed)
                 return self.workspace.align(
                     graph,
@@ -646,8 +670,8 @@ def _support(reach: List[Int], at: Int) -> Int:
 def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_reach: List[Int]) raises -> List[UInt8]:
     """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end: at
     a pin of minimap2's chain between them whose 19-mer is unique in both (a tandem array's copies may chain to the
-    wrong copy), when they place `right` starting inside `left` and reaching past its end by an overlap of
-    `JOIN_LEAST` letters or more; else at an overlap karan finds between `left`'s last and `right`'s first `JOIN_ENDS`
+    wrong copy), when they place `right` reaching `left`'s end (wherever it starts) with an overlap of `JOIN_LEAST`
+    letters or more; else at an overlap karan finds between `left`'s last and `right`'s first `JOIN_ENDS`
     letters, as long and `JOIN_IDENTITY` alike; empty when they do not overlap.
 
     Of the pins, the one where the side worse supported there is best supported: left's letters before it come from
@@ -661,10 +685,15 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
     var unique = unique_pins(left, right, found)
     var kept = List[Int]()
     for m in range(len(found.r)):
-        # Right starts inside left (q letters before the pin, r of left's) and ends past it.
+        # In left's letters right runs from r - q (before left's start when a right read reaches past the left
+        # anchor) to r - q + its length, which must reach left's end (or the join would drop left's last letters);
+        # the two overlap by JOIN_LEAST letters or more. (Requiring right to start inside left and end strictly past
+        # it left sides that overlap wholly unjoined, as when one right read reaches past the left anchor.)
         var r = found.r[m]
         var q = found.q[m]
-        if unique[m] and r >= q and len(right) - q > len(left) - r and len(left) - (r - q) >= JOIN_LEAST:
+        var start = r - q
+        var end = start + len(right)
+        if unique[m] and end >= len(left) and min(len(left), end) - max(0, start) >= JOIN_LEAST:
             kept.append(m)
     if len(kept) > 0:
         # As well supported, the pin nearer the middle of the chain, where the join was taken before.

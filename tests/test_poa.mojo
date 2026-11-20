@@ -317,5 +317,28 @@ def test_scores_scaled_up_keep_the_msa() raises:
             assert_true(a[k] == b[k])
 
 
+def test_sides_overlapping_wholly_are_joined() raises:
+    """With no spanning read, left and right reads that all reach the far anchor (the two sides' consensus sequences
+    alike end to end), or a right read reaching a few letters past the left anchor, are one assembly: pins with right
+    starting before left, or ending where left does, were refused and the two sides came out apart."""
+    seed(149)
+    var truth = _random(3000)
+    for overhang in [0, 8]:
+        var names = List[String]()
+        var seqs = List[List[UInt8]]()
+        var anchors = List[Int]()
+        for k in range(12):
+            var left = k < 6
+            var piece = truth.copy()
+            if not left and k == 6 and overhang > 0:
+                piece = _random(overhang) + truth.copy()
+            seqs.append(_mutated(piece, 0.01))
+            names.append(String(t"r{k}"))
+            anchors.append(LEFT if left else RIGHT)
+        var made = poa(names, seqs, anchors, PoaOptions(), Graph())
+        assert_equal(len(made.consensus), 1)
+        assert_true(distance(String(unsafe_from_utf8=made.consensus[0]), String(unsafe_from_utf8=truth)) <= 10)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
