@@ -129,13 +129,15 @@ struct Poa(Movable):
     order); `spanning`, the reads (input indices) a consensus of all of them may be polished against; when any read
     is anchored at one end, `consensus` (one sequence, or the two sides' when they could not be joined), otherwise
     empty: the caller takes the graph's own; and `foreign`, the reads anchored at one end that are another copy's,
-    left out of the consensus (and to be left out of its polishing)."""
+    left out of the consensus (and to be left out of its polishing); `reversed`, the reads `options.strand`
+    reverse-complemented (on the other strand to the consensus now), ascending."""
 
     var graph: Graph
     var shown: List[Int]
     var spanning: List[Int]
     var consensus: List[List[UInt8]]
     var foreign: List[Int]
+    var reversed: List[Int]
 
     def __init__(out self, var graph: Graph, var shown: List[Int], var spanning: List[Int]):
         self.graph = graph^
@@ -143,6 +145,7 @@ struct Poa(Movable):
         self.spanning = spanning^
         self.consensus = List[List[UInt8]]()
         self.foreign = List[Int]()
+        self.reversed = List[Int]()
 
     def parts(
         deinit self,
@@ -259,7 +262,9 @@ def poa(
     var aligner = _Aligner()
     var graph = start^
     if len(spanning) > 0 or len(graph.paths) > 0:
-        _add_spanning(graph, names, seqs, _ordered(seqs, spanning, options.order), options, path_of, aligner)
+        var reversed = _add_spanning(
+            graph, names, seqs, _ordered(seqs, spanning, options.order), options, path_of, aligner
+        )
         # The starting MSA's rows and the spanning reads end the consensus.
         var members = List[Int]()
         for p in range(starting):
@@ -305,6 +310,8 @@ def poa(
         var out = Poa(graph^, shown^, spanning^)
         out.consensus = consensus^
         out.foreign = foreign^
+        sort(reversed)
+        out.reversed = reversed^
         return out^
     # No read spans both anchors: each side on its own, then joined.
     var parts = List[List[UInt8]]()
@@ -431,10 +438,11 @@ def _add_spanning(
     options: PoaOptions,
     mut path_of: List[Int],
     mut aligner: _Aligner,
-) raises:
+) raises -> List[Int]:
     """The spanning reads in `order`, each aligned to the whole graph (or between pins) and fused into it; a read
-    the same as one before it fused along that one's path (`_twin`)."""
+    the same as one before it fused along that one's path (`_twin`). The reads reverse-complemented (`strand`)."""
     var seen = Dict[String, Int]()
+    var reversed = List[Int]()
     for r in order:
         if len(graph) == 0:
             path_of[r] = graph.add(names[r], Span(seqs[r]))
@@ -454,9 +462,11 @@ def _add_spanning(
                     seqs[r] = flipped^
                     found = other^
                     names[r] += "_reverse_complement"
+                    reversed.append(r)
         path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
         if not options.strand:
             seen[String(unsafe_from_utf8=seqs[r])] = r
+    return reversed^
 
 
 def _twin(

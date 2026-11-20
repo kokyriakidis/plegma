@@ -17,7 +17,8 @@ from plegma.clusters import cluster_rows
 from plegma.graph import GAP, Graph
 from plegma.homopolymer import STRAND_UNKNOWN
 from plegma.kernel import BOTH, Topology
-from plegma.poa import Poa, poa
+from plegma.consensus import polished
+from plegma.poa import poa
 from plegma.polish import polish
 from plegma.reference import on_reference
 from plegma.version import VERSION
@@ -30,8 +31,9 @@ from cli.records import Records, upper
 struct Aligned(Movable):
     """What either command made of a file, for the outputs: the graph, its paths in output order (`shown`: a starting
     MSA's rows, then every record in input order), the MSA's rows in that order when the command made them, the
-    records a consensus may be polished against, and the consensus itself when the command made it (reads anchored
-    at one end: one sequence, or the two sides' when they could not be joined)."""
+    records a consensus may be polished against (`polish_with`) on their strands, the assembly's own consensus when
+    reads are anchored at one end (`assembled`: one sequence, or the two sides' when they could not be joined), and
+    the consensus `-r 0` writes when the library made it (`polished`)."""
 
     var graph: Graph
     var shown: List[Int]
@@ -39,9 +41,8 @@ struct Aligned(Movable):
     var polish_with: List[Int]
     var anchors: List[Int]
     var strands: List[Int]
-    var consensus: List[List[UInt8]]
-    var foreign: List[Int]
-    """Reads anchored at one end that are another copy's (`Poa.foreign`): not polished against."""
+    var assembled: List[List[UInt8]]
+    var polished: List[List[UInt8]]
 
     def __init__(out self, var graph: Graph, var shown: List[Int], var rows: List[String]):
         self.graph = graph^
@@ -50,25 +51,13 @@ struct Aligned(Movable):
         self.polish_with = List[Int]()
         self.anchors = List[Int]()
         self.strands = List[Int]()
-        self.consensus = List[List[UInt8]]()
-        self.foreign = List[Int]()
-
-    def __init__(out self, var made: Poa):
-        self.graph = Graph()
-        self.shown = List[Int]()
-        self.rows = List[String]()
-        self.polish_with = List[Int]()
-        self.anchors = List[Int]()
-        self.strands = List[Int]()
-        self.consensus = List[List[UInt8]]()
-        self.foreign = List[Int]()
-        var foreign = List[Int]()
-        made^.parts(self.graph, self.shown, self.polish_with, self.consensus, foreign)
-        self.foreign = foreign^
+        self.assembled = List[List[UInt8]]()
+        self.polished = List[List[UInt8]]()
 
 
 def _poa(mut records: Records, options: Options) raises -> Aligned:
-    """`plegma poa`: `plegma.poa` with the command's options, each record anchored as its header says."""
+    """`plegma poa`: `plegma.poa` with the command's options, each record anchored as its header says; the consensus
+    `-r 0` writes as `plegma.consensus` makes it (`polished`), unless `-d` or `-a` asks for another."""
     var start = Graph()
     if options.start_msa.byte_length() > 0:
         var msa = read_fasta(options.start_msa)
@@ -76,25 +65,35 @@ def _poa(mut records: Records, options: Options) raises -> Aligned:
         for r in range(len(msa)):
             rows.append(String(unsafe_from_utf8=upper(msa.seq(r))))
         start = Graph.from_msa(msa.names, rows)
-    var before = records.names.copy()
-    var out = Aligned(poa(records.names, records.seqs, records.anchors, options.consensus.poa, start^))
-    if options.homopolymers.loaded():
-        out.strands = records.strands.copy()
-        # A read `-s` reverse-complemented (its name changed) is on the other strand to the consensus now.
-        for r in range(len(records)):
-            if records.names[r] != before[r] and out.strands[r] != STRAND_UNKNOWN:
-                out.strands[r] = 1 - out.strands[r]
-    if len(out.consensus) > 0:
-        # Reads anchored at one end: the consensus polished against every read, each aligned as it is anchored, but
-        # another copy's.
-        out.polish_with.clear()
+    var made = poa(records.names, records.seqs, records.anchors, options.consensus.poa, start^)
+    var strands = records.strands.copy() if options.homopolymers.loaded() else List[Int]()
+    var assembled = len(made.consensus) > 0
+    var polished_parts = List[List[UInt8]]()
+    if (options.result == 0 or options.result == 2) and (
+        assembled or (options.max_consensus == 1 and options.consensus_rule == 0)
+    ):
+        polished_parts = polished(made, records.seqs, records.anchors, strands, options.consensus, options.homopolymers)
+    # A read `-s` reverse-complemented is on the other strand to the consensus now (for -d's consensus sequences).
+    for r in made.reversed:
+        if r < len(strands) and strands[r] != STRAND_UNKNOWN:
+            strands[r] = 1 - strands[r]
+    var foreign = made.foreign.copy()
+    var out = Aligned(Graph(), List[Int](), List[String]())
+    var spanning = List[Int]()
+    made^.parts(out.graph, out.shown, spanning, out.assembled, foreign)
+    out.strands = strands^
+    out.polished = polished_parts^
+    if assembled:
+        # Reads anchored at one end: every read but another copy's, each as it is anchored.
         var f = 0
         for r in range(len(records)):
-            if f < len(out.foreign) and out.foreign[f] == r:
+            if f < len(foreign) and foreign[f] == r:
                 f += 1
                 continue
             out.polish_with.append(r)
         out.anchors = records.anchors.copy()
+    else:
+        out.polish_with = spanning^
     return out^
 
 
@@ -205,26 +204,13 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
         everyone.append(m)
     # A starting MSA's rows come first in `shown`; past them, record r is at first + r.
     var first = len(aligned.shown) - len(seqs)
-    if (result == 0 or result == 2) and len(aligned.consensus) > 0:
-        # Reads anchored at one end: the assembly's own consensus, polished against every read as it is anchored
-        # (when one sequence); two sides that could not be joined, each apart.
-        if len(aligned.consensus) == 1:
-            var letters = aligned.consensus[0].copy()
-            if options.polishing() and len(aligned.polish_with) > 0:
-                letters = polish(
-                    letters,
-                    seqs,
-                    aligned.polish_with,
-                    options.consensus.polish_rounds,
-                    likely_rounds=options.consensus.likely_rounds,
-                    anchors=aligned.anchors,
-                    homopolymers=options.homopolymers,
-                    strands=aligned.strands,
-                )
-            text.write(">Consensus_sequence\n", StringSlice(unsafe_from_utf8=Span(letters)), "\n")
+    if (result == 0 or result == 2) and len(aligned.polished) > 0:
+        # The library's consensus: one sequence, or the two sides of an assembly that could not be joined.
+        if len(aligned.polished) == 1:
+            text.write(">Consensus_sequence\n", StringSlice(unsafe_from_utf8=Span(aligned.polished[0])), "\n")
         else:
-            text.write(">Consensus_sequence_left\n", StringSlice(unsafe_from_utf8=Span(aligned.consensus[0])), "\n")
-            text.write(">Consensus_sequence_right\n", StringSlice(unsafe_from_utf8=Span(aligned.consensus[1])), "\n")
+            text.write(">Consensus_sequence_left\n", StringSlice(unsafe_from_utf8=Span(aligned.polished[0])), "\n")
+            text.write(">Consensus_sequence_right\n", StringSlice(unsafe_from_utf8=Span(aligned.polished[1])), "\n")
     elif result == 0 or result == 2:
         var clusters = cluster_rows(rows, options.max_consensus, options.min_freq) if options.max_consensus > 1 else (
             List[List[Int]]()
@@ -252,7 +238,7 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
             text.write(">", aligned.graph.names[aligned.shown[k]], "\n", rows[k], "\n")
     if result == 3 or result == 4:
         var consensus_path = List[Int]()
-        if result == 4 and len(aligned.consensus) == 0:
+        if result == 4 and len(aligned.assembled) == 0:
             # The graph's consensus path is the heaviest bundle, whichever consensus the FASTA output used.
             consensus_path = aligned.graph.heaviest_path(Topology(aligned.graph).order, aligned.shown)
         elif result == 4:

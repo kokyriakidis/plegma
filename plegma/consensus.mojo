@@ -12,7 +12,7 @@ from std.math import isfinite
 from .graph import Graph
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import BOTH, GLOBAL, INSIDE, LEFT, RIGHT, Topology
-from .poa import PoaOptions, poa
+from .poa import Poa, PoaOptions, poa
 from .polish import polish
 
 
@@ -102,11 +102,30 @@ def consensus(
     for k in range(len(seqs)):
         names.append(String(t"r{k}"))
     var made = poa(names, seqs, anchors, options.poa, Graph())
+    return polished(made, seqs, anchors, strands, options, homopolymers)
+
+
+def polished(
+    made: Poa,
+    seqs: List[List[UInt8]],
+    anchors: List[Int],
+    strands: List[Int],
+    options: ConsensusOptions,
+    homopolymers: HomopolymerModel,
+) raises -> List[List[UInt8]]:
+    """The consensus of what `poa` made of `seqs` (each anchored as `anchors` says, on `strands`' strand), polished
+    (when `options` has rounds or `homopolymers` is loaded, and the alignment is global): with reads anchored at one
+    end, the assembly's own consensus against every read but another copy's (`Poa.foreign`), each aligned as it is
+    anchored, or two sides not joined, each as it is; with every read spanning, the heaviest bundle over every path
+    (a starting MSA's rows too) against every read. What `consensus` and `plegma poa -r 0` give. A read `poa`
+    reverse-complemented (`Poa.reversed`) is on the other strand of `strands` to the consensus."""
+    var strand_of = strands.copy()
+    for r in made.reversed:
+        if r < len(strand_of) and strand_of[r] != STRAND_UNKNOWN:
+            strand_of[r] = 1 - strand_of[r]
     var polishing = options.polish_rounds > 0 or options.likely_rounds > 0 or homopolymers.loaded()
     polishing = polishing and options.poa.mode == GLOBAL
     if len(made.consensus) > 0:
-        # Reads anchored at one end: the assembly's own consensus, polished against every read but another copy's,
-        # each aligned as it is anchored; two sides not joined, each as it is.
         if len(made.consensus) > 1 or not polishing:
             return made.consensus.copy()
         var members = List[Int]()
@@ -124,14 +143,13 @@ def consensus(
             likely_rounds=options.likely_rounds,
             anchors=anchors,
             homopolymers=homopolymers,
-            strands=strands,
+            strands=strand_of,
         )
         return [polished^]
-    # Every read spanning: the heaviest bundle over every path, polished against every read.
     var letters = List[UInt8]()
     for node in made.graph.heaviest_path(Topology(made.graph).order, made.shown):
         letters.append(made.graph.bases[node])
-    if not polishing:
+    if not polishing or len(seqs) == 0:
         return [letters^]
     var members = List[Int]()
     for r in range(len(seqs)):
@@ -143,6 +161,6 @@ def consensus(
         options.polish_rounds,
         likely_rounds=options.likely_rounds,
         homopolymers=homopolymers,
-        strands=strands,
+        strands=strand_of,
     )
     return [polished^]
