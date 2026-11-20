@@ -2,7 +2,7 @@
 
 from plegma.consensus import ConsensusOptions
 from plegma.homopolymer import HomopolymerModel
-from plegma.kernel import EXTENSION, GLOBAL, LOCAL
+from plegma.kernel import GLOBAL
 from plegma.poa import GUIDE_ORDER, INPUT_ORDER, LONGEST_FIRST
 
 
@@ -149,18 +149,8 @@ def _pair(args: List[String], i: Int) raises -> Tuple[Int, Int]:
 
 def _check(options: Options) raises:
     """Values the commands cannot run with."""
-    ref poa = options.consensus.poa
-    if poa.mode != GLOBAL and poa.mode != LOCAL and poa.mode != EXTENSION:
-        raise Error(t"-m {poa.mode}: the modes are 0 (global), 1 (local) and 2 (extension)")
-    var s = poa.scoring
-    if s.match_score < 0 or s.mismatch < 0 or s.open1 < 0 or s.open2 < 0 or s.extend1 < 0 or s.extend2 < 0:
-        raise Error("-M, -X, -O and -E take values of 0 or more")
-    if poa.band_f < 0:
-        raise Error(t"-f {poa.band_f}: the band grows by a share of 0 or more")
-    if poa.min_cover < 0:
-        raise Error(t"-c {poa.min_cover}: a read count of 0 or more")
-    if options.consensus.polish_rounds < 0 or options.consensus.likely_rounds < 0:
-        raise Error("-P takes rounds of 0 or more")
+    # The library's own checks (-m, -M -X -O -E, -f, -c, -P), its words naming the value.
+    options.consensus.check()
     if options.result < 0 or options.result > 4:
         raise Error(t"-r {options.result}: the outputs are 0 to 4")
     if options.consensus_rule != 0 and options.consensus_rule != 1:

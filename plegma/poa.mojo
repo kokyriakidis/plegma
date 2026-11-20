@@ -21,12 +21,16 @@ assembly, one-directional. Memory follows the adaptive band in every mode: the r
 times each other.
 """
 
+from std.math import isfinite
+
 from karan import Aligner, Alignment, Costs, Mode
 
 from .graph import Graph
 from .kernel import (
     BOTH,
+    EXTENSION,
     GLOBAL,
+    LOCAL,
     LEFT,
     PREFIX,
     RIGHT,
@@ -104,6 +108,20 @@ struct PoaOptions(Copyable, Movable):
         # Where five reads at 10% error agree a one-directional consensus errs about 0.2 times a kb; past it, with
         # three, about 1 (simulated telomeres, experiments/msa/anchored.py).
         self.min_cover = 5
+
+    def check(self) raises:
+        """Raises on options `poa` cannot run with, naming the value."""
+        if self.mode != GLOBAL and self.mode != LOCAL and self.mode != EXTENSION:
+            raise Error(t"mode {self.mode}: 0 (global), 1 (local) or 2 (extension)")
+        var s = self.scoring
+        if s.match_score < 0 or s.mismatch < 0 or s.open1 < 0 or s.open2 < 0 or s.extend1 <= 0 or s.extend2 < 0:
+            raise Error("scoring: match, mismatch and gap opens must be 0 or more, the first gap extension more than 0")
+        if not isfinite(self.band_f) or self.band_f < 0:
+            raise Error(t"band_f {self.band_f}: must be 0 or more")
+        if self.order != INPUT_ORDER and self.order != GUIDE_ORDER and self.order != LONGEST_FIRST:
+            raise Error(t"order {self.order}: INPUT_ORDER, GUIDE_ORDER or LONGEST_FIRST")
+        if self.min_cover < 1:
+            raise Error(t"min_cover {self.min_cover}: must be 1 or more")
 
 
 struct Poa(Movable):

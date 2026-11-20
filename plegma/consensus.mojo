@@ -7,6 +7,8 @@ command for each.
 spans both anchors and the two sides could not be joined, the left side's and the right side's, unpolished.
 """
 
+from std.math import isfinite
+
 from .graph import Graph
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import BOTH, GLOBAL, INSIDE, LEFT, RIGHT, Topology
@@ -53,6 +55,16 @@ struct ConsensusOptions(Copyable, Movable):
         self.noise_run = 3
         self.two_lengths_db = 15.0
 
+    def check(self) raises:
+        """Raises on options the consensus calls cannot run with (`PoaOptions.check` too), naming the value."""
+        self.poa.check()
+        if self.polish_rounds < 0 or self.likely_rounds < 0:
+            raise Error(t"polishing rounds {self.polish_rounds},{self.likely_rounds}: each must be 0 or more")
+        if self.noise_run < 0:
+            raise Error(t"noise_run {self.noise_run}: must be 0 or more")
+        if not isfinite(self.two_lengths_db):
+            raise Error(t"two_lengths_db {self.two_lengths_db}: must be a number")
+
 
 def consensus(
     var seqs: List[List[UInt8]],
@@ -65,7 +77,9 @@ def consensus(
     says (`BOTH`, `LEFT` or `RIGHT`, or `INSIDE`, a read covering neither anchor, which makes no consensus; empty:
     all `BOTH`) and on `strands`' strand (0, 1 or `STRAND_UNKNOWN`, for
     `homopolymers`; empty: all unknown), as `plegma poa -r 0` writes it (with `-H` when `homopolymers` is loaded).
-    Raises on anchors or strands of another length than `seqs`, or values outside those."""
+    Raises on anchors or strands of another length than `seqs`, or values outside those, or on `options` it cannot
+    run with (`ConsensusOptions.check`)."""
+    options.check()
     _check(len(seqs), anchors, strands)
     if len(seqs) == 0:
         return [List[UInt8]()]

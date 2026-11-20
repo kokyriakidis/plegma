@@ -7,7 +7,6 @@ null model with the message written into the caller's buffer. A model is read-on
 one; every call is re-entrant.
 """
 
-from std.math import isfinite
 from std.memory import Layout, alloc
 
 from plegma.clustered import Clustered, clustered_consensus, phased_consensus
@@ -159,21 +158,7 @@ def _settings(at: Bytes) raises -> ConsensusOptions:
     options.poa.band_max = given.int(_BAND_MAX, options.poa.band_max)
     options.noise_run = given.int(_NOISE_RUN, options.noise_run)
     options.two_lengths_db = given.float(_TWO_LENGTHS_DB, options.two_lengths_db)
-    if options.polish_rounds < 0 or options.likely_rounds < 0:
-        raise Error(t"polishing rounds {options.polish_rounds},{options.likely_rounds}: each must be 0 or more")
-    if options.poa.min_cover < 1:
-        raise Error(t"min_cover {options.poa.min_cover}: must be 1 or more")
-    if (
-        scoring.match_score < 0
-        or scoring.mismatch < 0
-        or scoring.open1 < 0
-        or scoring.open2 < 0
-        or scoring.extend1 <= 0
-        or scoring.extend2 < 0
-    ):
-        raise Error("scoring: match, mismatch and gap opens must be 0 or more, gap_extend1 more than 0")
-    if not isfinite(options.poa.band_f) or options.poa.band_f < 0:
-        raise Error(t"band_f {options.poa.band_f}: must be 0 or more")
+    options.check()
     return options^
 
 

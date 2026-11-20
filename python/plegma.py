@@ -187,6 +187,17 @@ def _anchor(value):
     return int(value)
 
 
+def _int32(value, what):
+    """`value` if a C int32_t holds it; ctypes would wrap it silently (2**32 read as 0)."""
+    if not -(2**31) <= value < 2**31:
+        raise ValueError(f"{what} {value}: out of a 32-bit integer's range")
+    return value
+
+
+def _int32s(values, what):
+    return (ctypes.c_int32 * len(values))(*[_int32(int(v), what) for v in values])
+
+
 class _Reads:
     """The arguments every consensus call takes, as the C API takes them (kept alive while the call runs)."""
 
@@ -202,15 +213,14 @@ class _Reads:
         for name, value in options.items():
             if name not in _OPTION_NAMES:
                 raise TypeError(f"{caller}() got an unexpected option {name!r}")
-            setattr(self.settings, name, int(value) if name == "pinned" else value)
+            value = int(value) if name == "pinned" else value
+            if isinstance(value, int):
+                _int32(value, name)
+            setattr(self.settings, name, value)
         self.sequences = (ctypes.c_char_p * self.count)(*letters)
         self.lengths = (ctypes.c_size_t * self.count)(*[len(s) for s in letters])
-        self.anchors = None if anchors is None else (ctypes.c_int32 * self.count)(*[_anchor(a) for a in anchors])
-        self.strands = (
-            None
-            if strands is None
-            else (ctypes.c_int32 * self.count)(*[UNKNOWN if s is None else int(s) for s in strands])
-        )
+        self.anchors = None if anchors is None else _int32s([_anchor(a) for a in anchors], "anchor")
+        self.strands = None if strands is None else _int32s([UNKNOWN if s is None else int(s) for s in strands], "strand")
         self.model = model._handle if model is not None else None
 
     def head(self):
@@ -315,7 +325,7 @@ def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, 
     given = _Reads(reads, anchors, strands, model, options, "phased_consensus")
     if len(haplotypes) != given.count:
         raise ValueError(f"{len(haplotypes)} haplotypes for {given.count} reads")
-    haps = (ctypes.c_int32 * given.count)(*[-1 if h is None else int(h) for h in haplotypes])
+    haps = _int32s([-1 if h is None else int(h) for h in haplotypes], "haplotype")
     result = _lib.plegma_phased_consensus(*given.head(), haps, given.model, ctypes.byref(given.settings))
     try:
         return Clustered(result, given.count)

@@ -78,6 +78,13 @@ class ConsensusTest(unittest.TestCase):
             plegma.consensus(self.reads[:1], anchors=["sideways"])
         with self.assertRaises(plegma.Error):
             plegma.Model.load("/nonexistent/model.csv")
+        # Integers a C int32_t cannot hold fail here, not wrapped into another value.
+        with self.assertRaises(ValueError):
+            plegma.consensus(self.reads[:1], anchors=[2**32])
+        with self.assertRaises(ValueError):
+            plegma.consensus(self.reads, polish_rounds=2**32 + 1)
+        with self.assertRaises(plegma.Error):
+            plegma.consensus(self.reads, two_lengths_db=float("nan"))
 
     def test_threads_agree(self):
         alone = plegma.consensus(self.reads, pinned=False)
