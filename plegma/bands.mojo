@@ -12,10 +12,11 @@ from .graph import DELETION, INSERTION, MATCH, cigar_runs
 from .kernel import LEFT, RIGHT
 
 
-comptime BAND = 16
-"""Read letters either side of a sequence's alignment path that its forward and backward matrices span. 16 and 32
-gave shasta2's chr21 assembly byte for byte the same (8 one error more), the matrices half as wide: polishing is most
-of a short local assembly's time."""
+comptime BAND = 24
+"""Read letters either side of a sequence's alignment path that its forward and backward matrices span, and so the
+longest repeat unit polishing edits whole (`MAX_PERIOD`). 16 and 32 gave shasta2's chr21 assembly byte for byte the
+same (8 one error more); polishing is most of a short local assembly's time. At 16, units of 17 to 24 letters were
+scored wrongly (see `MAX_PERIOD`); 24 scores them, at 0 to 14% more time on the read sets."""
 comptime SEGMENT = 64
 """Consensus letters a segment spans at least."""
 comptime APART = 64
@@ -33,9 +34,11 @@ comptime TIE_RUN = 4
 """Runs of one letter at least this long take the longer length of a tie (`_lengthen_ties`)."""
 comptime MAX_PERIOD = BAND
 """Repeat units up to this long are deleted or copied whole. A read whose own copy of the unit sits at another
-rotation needs the cell a unit away from its path, inside its band only while the period is at most `BAND`: at 24
-(the two bands overlapping) units of 17 to 24 letters were scored wrongly and never taken with noisy reads. On the
-180 VNTR and 54 simulated read sets 16 and 24 gave the same consensus sequences (and `BAND` 32 too, 39% slower)."""
+rotation needs the cell a unit away from its path, inside its band only while the period is at most `BAND`: with
+`BAND` 16 and units to 24 (the two bands overlapping, it was reasoned), units of 17 to 24 letters were scored wrongly
+and, with noisy reads, rarely taken. Simulated consensus sequences a unit or three off in a 20-unit array of period 17
+to 24, 20 reads at 0, 0.2 and 1% errors: 142 of 192 exact before, 191 with `BAND` 24; the 180 VNTR and 54 simulated
+read sets the same either way."""
 
 
 def _code(letter: UInt8) -> Int:

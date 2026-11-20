@@ -245,7 +245,7 @@ def _cigar(reference_row: String, row: String) -> String:
 
 
 def test_pinned_gaps_shift_left_as_minimap2_writes_them() raises:
-    """chr20:60,425,968's two alleles pinned between their flanks: minimap2 2.31 (-x asm5, dipcall's settings)
+    """The two alleles of chr20:60,425,968 pinned between their flanks: minimap2 2.31 (-x asm5, dipcall's settings)
     writes the 78-letter deletion at the reference's letter 517 (2017M78D1965M over flank + sequence + flank, flanks
     1,500), shifted left through the matched run before it past the pin at 586 (mm_fix_cigar); aligned between the
     pins alone it sat at 586."""

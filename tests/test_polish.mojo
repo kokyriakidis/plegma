@@ -150,12 +150,12 @@ def test_consensus_checks_its_arguments() raises:
 
 def test_unit_deletion_out_of_a_reads_band_does_not_wrap() raises:
     """Reads whose band cannot reach both ends of a repeat unit gain nothing by deleting it: ten of them (an
-    insertion of 40 letters inside the repeat) wrapped the unit deletion's gain to the top of 32 bits, the round was
-    reverted, and the flank's error was never mended."""
+    insertion of 60 letters, past both bands, inside the repeat) wrapped the unit deletion's gain to the top of 32
+    bits, the round was reverted, and the flank's error was never mended."""
     seed(1)
     var f1 = _random(150)
     var f2 = _random(150)
-    var x = _random(40)
+    var x = _random(60)
     var unit = "TGGTGA".as_bytes()
     var short = f1.copy()
     for _ in range(20):

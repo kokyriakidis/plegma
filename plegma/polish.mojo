@@ -9,7 +9,7 @@ repeats. In a segment holding a disagreement, each sequence's edit distance matr
 a band around its alignment, which gives the sequence's distance after any one-letter substitution, deletion or
 insertion exactly: the least sum of a forward cell, the edit and a backward cell. A sequence whose extra copy of a
 repeat unit sits anywhere in the band counts for the edit that restores it. Where the consensus repeats with a
-period of up to 16 letters, a unit deleted or copied whole is tried too: one letter of a missing unit alone may
+period of up to 24 letters, a unit deleted or copied whole is tried too: one letter of a missing unit alone may
 cost the sequences more than it saves. Edits in different segments are taken together, since their gains add up
 (the old alignment's path through each boundary stays open); within a segment, the best ones far apart, or the
 best alone inside a tandem repeat, where one edit gains alike at every copy. Rounds go on, revisiting only the

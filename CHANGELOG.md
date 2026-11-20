@@ -42,10 +42,11 @@
   each gap left through the matched run before it last (mm_fix_cigar), across pins. 132 of 141 real chr20 allele
   pairs now have minimap2's CIGAR exactly (102 before); the other 9 are equal-cost ties. Past 2^25 letters `-F`
   silently left the pins out; it now fails.
-- Polishing tried whole repeat units of up to 24 letters, but a read's band reaches a unit away only up to 16:
-  units of 17 to 24 letters were scored wrongly and never taken. Units go to 16 letters now (the read sets'
-  consensus sequences are the same, polishing some 10% faster). The likelihood stage let one read whose band could
-  not reach both ends of a unit veto deleting it (log 0); such a read now counts the unit's letters as edits.
+- Polishing tried whole repeat units of up to 24 letters, but a read's band (16 letters either side) reaches a unit
+  away only up to 16: units of 17 to 24 letters were scored wrongly and, with noisy reads, rarely taken. The band is
+  24 now (simulated arrays of such units a unit or three off: 142 of 192 exact before, 191 now; 0 to 14% more time).
+  The likelihood stage let one read whose band could not reach both ends of a unit veto deleting it (log 0); such a
+  read now counts the unit's letters as edits.
 - `phased_consensus`: with the two haplotypes' first consensus sequences of one length, swapping the labels 0 and 1
   changed the result, not only its order.
 - `plegma poa -d` and `-a` were ignored when any read was anchored at one end; they now fail with a message.
