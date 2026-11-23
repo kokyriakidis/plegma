@@ -493,11 +493,13 @@ def poa(
 
 
 def _ends_checked(seqs: List[List[UInt8]], anchors: List[Int]) raises -> List[Int]:
-    """`anchors`, each spanning read's ends checked against the reads anchored at that end: where most of those (the
-    one-sided reads anchored there and the other spanning reads, at least `END_LETTERS` long) disagree with its end
-    (`_ends_agree`), it is anchored at its other end alone (`LEFT` or `RIGHT`), or at neither (`_STRAY`: another
+    """`anchors`, each spanning read's ends checked against the reads anchored at that end: an end no other spanning
+    read shares, where most of the one-sided reads anchored there (at least `END_LETTERS` long) disagree with it
+    (`_ends_agree`), and it is anchored at its other end alone (`LEFT` or `RIGHT`), or at neither (`_STRAY`: another
     copy's, or another place's). Only at an end that one-sided reads are anchored at, so reads all spanning are as
-    given. A read anchored by counting letters to an anchor ends where the haplotype's length is not the
+    given; an end two spanning reads share stands however many one-sided reads disagree (a haplotype without a
+    gene the other has: HG00512's second DRB slot, its 12 spanning reads' 2.2 kb outvoted by 20 unlabelled right
+    reads of the other haplotype's 15 kb, and the gene spelled on both). A read anchored by counting letters to an anchor ends where the haplotype's length is not the
     reference's: HG03009's HLA-DQA1 haplotype 1 had one read given as spanning, ending 5.3 kb before the end its 22
     right reads reach, and the consensus ended there, 4.3 kb of the right reads' letters inserted before its end."""
     var out = anchors.copy()
@@ -521,9 +523,18 @@ def _ends_checked(seqs: List[List[UInt8]], anchors: List[Int]) raises -> List[In
             if len(ones) == 0:
                 held += 1 if at_start else 2
                 continue
+            # An end another spanning read shares is the anchor's: two reads given as spanning agree on it.
+            var shared = False
+            for r in spanning:
+                if r != s and _ends_agree(aligner, seqs[s], seqs[r], at_start):
+                    shared = True
+                    break
+            if shared:
+                held += 1 if at_start else 2
+                continue
             var agree = 0
             var disagree = 0
-            for r in ones + spanning.copy():
+            for r in ones:
                 if r == s or len(seqs[r]) < END_LETTERS:
                     continue
                 if _ends_agree(aligner, seqs[s], seqs[r], at_start):

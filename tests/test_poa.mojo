@@ -491,5 +491,28 @@ def test_a_side_starts_where_most_of_its_reads_do_give_or_take_a_few_letters() r
     assert_true(edits <= 5, String(t"the consensus's first {len(start)} letters {edits} edits from the haplotype's"))
 
 
+def test_an_end_spanning_reads_share_stands_against_more_one_sided_reads() raises:
+    """5 spanning reads of a 2 kb haplotype and 12 right reads ending otherwise (another haplotype's, a phased
+    consensus giving it the reads it could not place): the right reads outnumber the spanning reads at the right end,
+    but the spanning reads share it, so they stay spanning and the consensus is their haplotype's. Counted by majority
+    alone, all 5 were made left reads and the consensus took the other haplotype's sequence (HG00512's second DRB
+    slot, a gene absent spelled present)."""
+    seed(512)
+    var truth = _random(2000)
+    var other = _random(3000)
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    for _ in range(5):
+        seqs.append(_mutated(truth, 0.005))
+        anchors.append(BOTH)
+    for k in range(12):
+        seqs.append(_mutated(_slice(other, 200 * k, 3000), 0.005))
+        anchors.append(RIGHT)
+    var made = consensus(seqs^, anchors)
+    assert_equal(len(made), 1)
+    var edits = distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth))
+    assert_true(edits <= 5, String(t"{edits} edits from the spanning reads' haplotype"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

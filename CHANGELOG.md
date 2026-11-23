@@ -73,8 +73,10 @@
   the anchor where the haplotype's length is not the reference's) set where the consensus ended: HG03009's
   HLA-DQA1 haplotype 1 ended 5.3 kb before its right reads' anchor, HG00512's and NA19003's HLA-DRB1 began 2 kb
   before their left reads'. Each spanning read's first and last 100 letters are now checked against those of the
-  reads anchored there; where most disagree it is anchored at its other end alone, or, disagreeing at both, builds
-  nothing (another copy's). Only at an end one-sided reads are anchored at: reads all spanning are as given.
+  reads anchored there; at an end no other spanning read shares, where most disagree, it is anchored at its other
+  end alone, or, disagreeing at both, builds nothing (another copy's). Only at an end one-sided reads are anchored
+  at: reads all spanning are as given. (Counted by majority alone, a haplotype without a gene the other has lost its
+  12 spanning reads to 20 right reads of the other: HG00512's and NA20509's second DRB slot read the gene present.)
 - A one-sided assembly began where the most reads began node by node: reads whose anchored ends differ by a few
   letters spread their votes, and 8 short reads sharing another start outvoted 11 (HG002's HLA-DRB1 under GRCh38,
   151 edits in the first 300 letters). The start, and a right side's end, are now voted over 16 nodes.
