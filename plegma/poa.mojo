@@ -201,14 +201,13 @@ struct _Aligner(Movable):
         """`seq` aligned to `graph` in `mode` (`options.mode` for a spanning read; `PREFIX` or `SUFFIX`). With
         `anchors` (paths), a read anchored at one end is aligned to the part of the graph between their ends alone
         (`_between`). Pinned (`options.seeded`), the pins' windows reach the graph's every source and sink, so a
-        right read could end on a left read's letters past the right anchor (or a left read's dead-end tip): the
-        pinned alignment stands unless it touches a node outside that part, and only then is the read aligned to the
-        part, unpinned (unpinned, a long noisy read drifts from the band: always so lost a third of a 20 kb
-        assembly's accuracy)."""
+        right read could end on a left read's letters past the right anchor (or a left read's dead-end tip), or on
+        another right read's letters past the right anchor itself (a read anchored by an estimate of where the
+        anchor is, not by its alignment): its letters on nodes outside the part are the read's letters past its
+        anchor, and are inserted there (`_past_anchor`). Unpinned, the read is aligned to the part alone."""
         self.row_of.resize(len(graph), -1)
         if len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX):
             var allowed = _between(graph, anchors, mode)
-            var outside = False
             if options.seeded:
                 var topology = Topology(graph)
                 var found = align_pinned(
@@ -223,13 +222,9 @@ struct _Aligner(Movable):
                     self.workspace,
                     mode,
                 )
-                for node in found.nodes:
-                    if node >= 0 and not allowed[node]:
-                        outside = True
-                        break
-                if not outside:
-                    return found^
-            if not options.seeded or outside:
+                _past_anchor(found, allowed)
+                return found^
+            else:
                 var part = Topology(graph, allowed)
                 return self.workspace.align(
                     graph,
@@ -636,6 +631,19 @@ def _between(graph: Graph, anchors: List[Int], mode: Int) -> List[Bool]:
                 work.append(other)
             e = Int(graph.next_in[e]) if mode == SUFFIX else Int(graph.next_out[e])
     return allowed^
+
+
+def _past_anchor(mut found: GraphAlignment, allowed: List[Bool]):
+    """A one-sided read's letters `found` aligns to nodes outside `allowed` (`_between`) made inserted letters: those
+    past the read's own anchor. They are one run at the read's anchored end, as no node outside the part leads into
+    it (a right read's after the anchor, a left read's before it), and the letters before them keep their pinned
+    places. The part's alignment of such a read alone, unpinned, lost the read's path in the band whenever its
+    letters past the anchor outran the band (kilobases where a read was anchored by counting letters to the anchor):
+    on HG03009's HLA-DQA1 every right read after the first that ran past it, and the consensus 4.6 kb short."""
+    for i in range(len(found.nodes)):
+        var node = found.nodes[i]
+        if node >= 0 and not allowed[node]:
+            found.nodes[i] = -1
 
 
 def _one_side(

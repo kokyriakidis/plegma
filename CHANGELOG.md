@@ -69,6 +69,13 @@
   one cost against both lies between them and counts for its own: counted for none, an A21 haplotype whose
   consensus a homopolymer model made A22 fell under `min_freq` against an A20 one (pgphaseMojo, HG002 chr20: 13 het
   run-length indels read homozygous or lost).
+- One-sided reads running past their own anchor (anchored by counting letters to it, not by alignment): a later
+  read's pinned alignment onto the first such read's letters there was thrown away for an unpinned one, whose band
+  lost the read's path, and the consensus collapsed (panStar, NA19007's HLA-DRB1 haplotype 2: 2,152 edits from
+  its allele; HG03009's HLA-DQA1 haplotype 1 4.6 kb short). Its letters past the anchor are now inserted there and
+  the rest keep their pinned places: NA19007's consensus is the reads' sequence between the anchors, edit for edit;
+  HG03009's is again what 0.4.0 made, right for 14 kb and then off where its one read anchored at both ends stops
+  5.3 kb short of the right anchor the right reads reach.
 - The consensus depended on input order (abPOA's guide order breaks ties by position, and takes the earlier read
   of the first pair first): ties now go by the sequences, and the same reads in any order give one consensus.
 - The likelihood stage judged its run-slip gate on as little as one inserted letter, and on clean reads never ran.

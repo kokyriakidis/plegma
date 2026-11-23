@@ -45,8 +45,9 @@ a source and its first letter, every letter, ending at any node; letters past a 
 and grow the graph), a right read in `SUFFIX` (from any node, letters before a source free, ending at a sink). Both
 modes run in the adaptive band (`PREFIX` without the diagonal toward an end it does not have), and under `-S` only
 the first or last pinned window takes the read's mode. A one-sided read is aligned only to the part of the graph
-between the anchors (`_between`: what reaches the spanning reads' ends, or is reached from their starts): pinned, then
-again unpinned on that part when the pinned alignment touches a node outside it (the pins' windows end at any sink).
+between the anchors (`_between`: what reaches the spanning reads' ends, or is reached from their starts): pinned,
+the pins' windows ending at any sink, and its letters on nodes outside that part inserted (`_past_anchor`: the read's
+letters past its own anchor, one run at its anchored end); unpinned, aligned to that part alone.
 The consensus runs between the spanning reads' ends (`Graph.heaviest_path_spanning`), every read weighing the
 edges.
 

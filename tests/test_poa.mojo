@@ -424,5 +424,31 @@ def test_a_long_overlap_around_a_tandem_array_joins_at_its_copy_number() raises:
     assert_true(distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth)) <= 10)
 
 
+def test_one_sided_reads_past_their_own_anchor_keep_their_pinned_places() raises:
+    """No read spanning; 4 left reads from the truth's start and 8 shorter ones, also anchored left, starting 1.5 kb
+    into it (reads anchored by counting letters to the anchor, as NA19007's HLA-DRB1 came): the left side starts where
+    most of its reads do, and the 4 reads' first 1.5 kb run past that anchor. Every later left read's pinned alignment
+    touched the first one's letters there, outside the part between the anchors, and was aligned again unpinned, its
+    path lost in the band: the consensus came out 1,108 edits from the truth. Those letters are now inserted past the
+    anchor and the rest keep their pinned places."""
+    seed(19007)
+    var truth = _random(6000)
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    for k in range(4):
+        seqs.append(_mutated(_slice(truth, 0, 4000 + 300 * k), 0.005))
+        anchors.append(LEFT)
+    for k in range(8):
+        seqs.append(_mutated(_slice(truth, 1500, 3500 + 150 * k), 0.005))
+        anchors.append(LEFT)
+    for k in range(10):
+        seqs.append(_mutated(_slice(truth, 200 + 300 * k, 6000), 0.005))
+        anchors.append(RIGHT)
+    var made = consensus(seqs^, anchors)
+    assert_equal(len(made), 1)
+    var edits = distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=_slice(truth, 1500, 6000)))
+    assert_true(edits <= 10, String(t"{edits} edits from the truth after the left side's start"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
