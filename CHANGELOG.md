@@ -69,6 +69,15 @@
   one cost against both lies between them and counts for its own: counted for none, an A21 haplotype whose
   consensus a homopolymer model made A22 fell under `min_freq` against an A20 one (pgphaseMojo, HG002 chr20: 13 het
   run-length indels read homozygous or lost).
+- A read given as spanning whose end disagrees with the reads anchored at that end (anchored by counting letters to
+  the anchor where the haplotype's length is not the reference's) set where the consensus ended: HG03009's
+  HLA-DQA1 haplotype 1 ended 5.3 kb before its right reads' anchor, HG00512's and NA19003's HLA-DRB1 began 2 kb
+  before their left reads'. Each spanning read's first and last 100 letters are now checked against those of the
+  reads anchored there; where most disagree it is anchored at its other end alone, or, disagreeing at both, builds
+  nothing (another copy's). Only at an end one-sided reads are anchored at: reads all spanning are as given.
+- A one-sided assembly began where the most reads began node by node: reads whose anchored ends differ by a few
+  letters spread their votes, and 8 short reads sharing another start outvoted 11 (HG002's HLA-DRB1 under GRCh38,
+  151 edits in the first 300 letters). The start, and a right side's end, are now voted over 16 nodes.
 - One-sided reads running past their own anchor (anchored by counting letters to it, not by alignment): a later
   read's pinned alignment onto the first such read's letters there was thrown away for an unpinned one, whose band
   lost the read's path, and the consensus collapsed (panStar, NA19007's HLA-DRB1 haplotype 2: 2,152 edits from

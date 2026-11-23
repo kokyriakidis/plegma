@@ -141,7 +141,7 @@ def polished(
             members,
             options.polish_rounds,
             likely_rounds=options.likely_rounds,
-            anchors=anchors,
+            anchors=made.anchors if len(made.anchors) == len(seqs) else anchors,
             homopolymers=homopolymers,
             strands=strand_of,
         )

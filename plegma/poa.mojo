@@ -91,6 +91,18 @@ comptime FOREIGN_SLACK = 3
 `FOREIGN_RATIO` times the worst spanning read's rate over the letters it covers, plus `FOREIGN_SLACK`."""
 
 
+comptime ANCHOR_SPREAD = 16
+"""A one-sided assembly's anchored end is voted on over this many nodes (`Graph._spread_vote`): HG002's HLA-DRB1
+under GRCh38, 12 left reads starting over 14 nodes (no more than 2 at one) and 8 short reads at one other place,
+whose start the side took, its first 250 letters not the haplotype's."""
+comptime END_LETTERS = 100
+"""A spanning read's end checked against the reads anchored at that end (`_ends_checked`): its first or last this
+many letters."""
+comptime END_EDITS = 35
+"""Two reads' ends agree within this many edits over `END_LETTERS`: two reads at 10% errors differ by some 20 there,
+two unrelated sequences by some 52."""
+comptime _STRAY = -1
+"""A read given as spanning whose ends both disagree with the reads anchored there (`_ends_checked`)."""
 comptime BAND_MAX = 64
 """The adaptive band's reach at most, either side. abPOA's b + f L grows with the read (310 letters at 30 kb), but
 the band also follows the best cells and the diagonal of the graph's remaining path, which carry a long read's
@@ -149,7 +161,8 @@ struct Poa(Movable):
     order); `spanning`, the reads (input indices) a consensus of all of them may be polished against; when any read
     is anchored at one end, `consensus` (one sequence, or the two sides' when they could not be joined), otherwise
     empty: the caller takes the graph's own; and `foreign`, the reads anchored at one end that are another copy's,
-    left out of the consensus (and to be left out of its polishing); `reversed`, the reads `options.strand`
+    left out of the consensus (and to be left out of its polishing), and the reads given as spanning whose ends agree
+    with neither anchor's reads; `reversed`, the reads `options.strand`
     reverse-complemented (on the other strand to the consensus now), ascending."""
 
     var graph: Graph
@@ -158,6 +171,8 @@ struct Poa(Movable):
     var consensus: List[List[UInt8]]
     var foreign: List[Int]
     var reversed: List[Int]
+    var anchors: List[Int]
+    """Each read's anchor as built with (`_ends_checked`), when any read is anchored at one end; otherwise empty."""
 
     def __init__(out self, var graph: Graph, var shown: List[Int], var spanning: List[Int]):
         self.graph = graph^
@@ -166,6 +181,7 @@ struct Poa(Movable):
         self.consensus = List[List[UInt8]]()
         self.foreign = List[Int]()
         self.reversed = List[Int]()
+        self.anchors = List[Int]()
 
     def parts(
         deinit self,
@@ -283,17 +299,26 @@ def poa(
     an empty graph and no consensus."""
     if len(seqs) == 0 and len(start.paths) == 0:
         return Poa(start^, List[Int](), List[Int]())
+    var anchor_of = _ends_checked(seqs, anchors)
     var spanning = List[Int]()
     var left = List[Int]()
     var right = List[Int]()
+    var strays = List[Int]()
     for r in range(len(seqs)):
-        if anchors[r] == LEFT:
+        if anchor_of[r] == LEFT:
             left.append(r)
-        elif anchors[r] == RIGHT:
+        elif anchor_of[r] == RIGHT:
             right.append(r)
+        elif anchor_of[r] == _STRAY:
+            strays.append(r)
         else:
             spanning.append(r)
     var trace = Trace()
+    if trace.on(POA):
+        for r in range(len(seqs)):
+            if anchor_of[r] != anchors[r]:
+                var now = "left" if anchor_of[r] == LEFT else ("right" if anchor_of[r] == RIGHT else "neither")
+                trace.line(POA, String("read ", r, " given as spanning: its ends agree with the ", now, " reads'"))
     if trace.on(POA):
         var order_name = "guide" if options.order == GUIDE_ORDER else (
             "longest first" if options.order == LONGEST_FIRST else "input"
@@ -369,11 +394,15 @@ def poa(
             aligner,
             members,
         )
+        _add_strays(graph, names, seqs, strays, options, path_of, aligner)
         for r in range(len(seqs)):
             shown.append(path_of[r])
         var out = Poa(graph^, shown^, spanning^)
         out.consensus = consensus^
+        foreign.extend(strays.copy())
+        sort(foreign)
         out.foreign = foreign^
+        out.anchors = _as_built(anchor_of)
         sort(reversed)
         if trace.on(POA) and len(reversed) > 0:
             trace.line(POA, String("reverse-complemented: reads ", _listed(reversed)))
@@ -386,12 +415,12 @@ def poa(
     var right_reach = List[Int]()
     if len(left) > 0:
         var side = _one_side(names, seqs, left, options, PREFIX)
-        var path = side[0].heaviest_path(Topology(side[0]).order, side[1])
+        var path = side[0].heaviest_path(Topology(side[0]).order, side[1], ANCHOR_SPREAD)
         parts.append(_letters(side[0], path))
         left_reach = _reach(side[0], path, side[1], True)
     if len(right) > 0:
         var side = _one_side(names, seqs, right, options, SUFFIX)
-        var path = side[0].heaviest_path_backward(Topology(side[0]).order, side[1])
+        var path = side[0].heaviest_path_backward(Topology(side[0]).order, side[1], ANCHOR_SPREAD)
         parts.append(_letters(side[0], path))
         right_reach = _reach(side[0], path, side[1], False)
     if len(parts) == 2:
@@ -453,11 +482,96 @@ def poa(
                 var r = order[k]
                 var found = aligner.align(graph, seqs[r], options, SUFFIX, right_side)
                 path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+    _add_strays(graph, names, seqs, strays, options, path_of, aligner)
     for r in range(len(seqs)):
         shown.append(path_of[r])
     var out = Poa(graph^, shown^, spanning^)
     out.consensus = parts^
+    out.foreign = strays^
+    out.anchors = _as_built(anchor_of)
     return out^
+
+
+def _ends_checked(seqs: List[List[UInt8]], anchors: List[Int]) raises -> List[Int]:
+    """`anchors`, each spanning read's ends checked against the reads anchored at that end: where most of those (the
+    one-sided reads anchored there and the other spanning reads, at least `END_LETTERS` long) disagree with its end
+    (`_ends_agree`), it is anchored at its other end alone (`LEFT` or `RIGHT`), or at neither (`_STRAY`: another
+    copy's, or another place's). Only at an end that one-sided reads are anchored at, so reads all spanning are as
+    given. A read anchored by counting letters to an anchor ends where the haplotype's length is not the
+    reference's: HG03009's HLA-DQA1 haplotype 1 had one read given as spanning, ending 5.3 kb before the end its 22
+    right reads reach, and the consensus ended there, 4.3 kb of the right reads' letters inserted before its end."""
+    var out = anchors.copy()
+    var left = List[Int]()
+    var right = List[Int]()
+    var spanning = List[Int]()
+    for r in range(len(seqs)):
+        if anchors[r] == LEFT:
+            left.append(r)
+        elif anchors[r] == RIGHT:
+            right.append(r)
+        elif len(seqs[r]) >= END_LETTERS:
+            spanning.append(r)
+    if len(spanning) == 0 or len(left) + len(right) == 0:
+        return out^
+    var aligner = Aligner(warm=False)
+    for s in spanning:
+        var held = 0
+        for at_start in [True, False]:
+            var ones = left.copy() if at_start else right.copy()
+            if len(ones) == 0:
+                held += 1 if at_start else 2
+                continue
+            var agree = 0
+            var disagree = 0
+            for r in ones + spanning.copy():
+                if r == s or len(seqs[r]) < END_LETTERS:
+                    continue
+                if _ends_agree(aligner, seqs[s], seqs[r], at_start):
+                    agree += 1
+                else:
+                    disagree += 1
+            if disagree <= agree:
+                held += 1 if at_start else 2
+        # held: 1 the start, 2 the end, 3 both (an end with no one-sided read holds).
+        if held == 0:
+            out[s] = _STRAY
+        elif held == 1:
+            out[s] = LEFT
+        elif held == 2:
+            out[s] = RIGHT
+    return out^
+
+
+def _ends_agree(mut aligner: Aligner, a: List[UInt8], b: List[UInt8], at_start: Bool) raises -> Bool:
+    """Whether `a`'s and `b`'s first (`at_start`) or last `END_LETTERS` letters are within `END_EDITS` edits."""
+    var x = Span(a)[0:END_LETTERS] if at_start else Span(a)[len(a) - END_LETTERS :]
+    var y = Span(b)[0:END_LETTERS] if at_start else Span(b)[len(b) - END_LETTERS :]
+    return aligner.align(x, y, Costs.edit(), Mode.GLOBAL).cost <= END_EDITS
+
+
+def _as_built(anchor_of: List[Int]) -> List[Int]:
+    """Each read's anchor as `poa` built with it, a stray as `BOTH` (it is in `Poa.foreign`, and polishes nothing)."""
+    var out = anchor_of.copy()
+    for r in range(len(out)):
+        if out[r] == _STRAY:
+            out[r] = BOTH
+    return out^
+
+
+def _add_strays(
+    mut graph: Graph,
+    names: List[String],
+    seqs: List[List[UInt8]],
+    strays: List[Int],
+    options: PoaOptions,
+    mut path_of: List[Int],
+    mut aligner: _Aligner,
+) raises:
+    """The reads `_ends_checked` found anchored at neither end, into the graph once the consensus is taken (the MSA
+    shows every read), aligned as spanning reads are."""
+    for r in strays:
+        var found = aligner.align(graph, seqs[r], options, options.mode)
+        path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
 
 
 def _foreign(

@@ -450,5 +450,46 @@ def test_one_sided_reads_past_their_own_anchor_keep_their_pinned_places() raises
     assert_true(edits <= 10, String(t"{edits} edits from the truth after the left side's start"))
 
 
+def test_a_read_given_as_spanning_that_ends_short_is_a_left_read() raises:
+    """One read given as spanning but ending 3 kb before the right anchor its 10 right reads end at (anchored by
+    counting letters to the anchor, as HG03009's HLA-DQA1 came): its end disagrees with theirs, so it is a left read,
+    and the consensus runs to the right reads' end. Taken as spanning, the consensus ended where it does, the right
+    reads' 3 kb inserted before its last letters."""
+    seed(3009)
+    var truth = _random(8000)
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    seqs.append(_mutated(_slice(truth, 0, 5000), 0.005))
+    anchors.append(BOTH)
+    for k in range(6):
+        seqs.append(_mutated(_slice(truth, 0, 3000 + 400 * k), 0.005))
+        anchors.append(LEFT)
+    for k in range(10):
+        seqs.append(_mutated(_slice(truth, 1000 + 400 * k, 8000), 0.005))
+        anchors.append(RIGHT)
+    var made = consensus(seqs^, anchors)
+    assert_equal(len(made), 1)
+    var edits = distance(String(unsafe_from_utf8=made[0]), String(unsafe_from_utf8=truth))
+    assert_true(edits <= 10, String(t"{edits} edits from the truth"))
+
+
+def test_a_side_starts_where_most_of_its_reads_do_give_or_take_a_few_letters() raises:
+    """Real reads: HG002's HLA-DRB1 haplotype 1 (DR4) under GRCh38's DR15 window, its 19 left reads as panStar gives
+    them: 11 start at the anchor give or take a few letters, 8 short ones share a start of another place. Node by node
+    the 8 outvoted the 11, spread over the nodes there, and the side began on their letters (151 edits in its first
+    300). Voted over 16 nodes, it starts where the 11 do."""
+    var seqs = List[List[UInt8]]()
+    var anchors = List[Int]()
+    for record in _fasta("tests/data/hg002_grch38_drb1_left/reads.fa"):
+        anchors.append(LEFT)
+        seqs.append(record[1].copy())
+    assert_equal(len(seqs), 19)
+    var start = _fasta("tests/data/hg002_grch38_drb1_left/start.fa")[0][1].copy()
+    var made = consensus(seqs^, anchors)
+    assert_equal(len(made), 1)
+    var edits = distance(String(unsafe_from_utf8=_slice(made[0], 0, len(start))), String(unsafe_from_utf8=start))
+    assert_true(edits <= 5, String(t"the consensus's first {len(start)} letters {edits} edits from the haplotype's"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

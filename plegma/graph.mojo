@@ -261,8 +261,9 @@ struct Graph(Movable, Sized):
                 ends[Int(path[len(path) - 1])] += 1
         return self._bundle(order, starts, ends, self.edge_weight)
 
-    def heaviest_path(self, order: List[Int], members: List[Int]) -> List[Int]:
-        """`heaviest_path` with only the paths `members` weighing the edges, starts and ends."""
+    def heaviest_path(self, order: List[Int], members: List[Int], spread: Int = 0) -> List[Int]:
+        """`heaviest_path` with only the paths `members` weighing the edges, starts and ends; with `spread`, the start
+        voted on over that many nodes along the walk (`_spread_vote`)."""
         var count = len(self.bases)
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
@@ -275,7 +276,7 @@ struct Graph(Movable, Sized):
             ends[Int(path[len(path) - 1])] += 1
             for k in range(len(path) - 1):
                 weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
-        return self._bundle(order, starts, ends, weight)
+        return self._bundle(order, starts, ends, weight, spread=spread)
 
     def heaviest_path_spanning(self, order: List[Int], spanning: List[Int], bounded: Bool = True) -> List[Int]:
         """`heaviest_path` from where the paths `spanning` start to where they end, every path weighing the edges:
@@ -303,10 +304,11 @@ struct Graph(Movable, Sized):
                 weight[self.edge(Int(path[k]), Int(path[k + 1]))] += 1
         return self._bundle(order, starts, ends, weight, bounded)
 
-    def heaviest_path_backward(self, order: List[Int], members: List[Int]) -> List[Int]:
+    def heaviest_path_backward(self, order: List[Int], members: List[Int], spread: Int = 0) -> List[Int]:
         """`heaviest_path` over the paths `members` walked from the end: from a virtual sink to a virtual source,
         each node preceded by its heaviest in-edge, the source's edge weighing the members that start there (so the
-        consensus starts where most of them do). For reads anchored at the graph's end alone."""
+        consensus starts where most of them do). For reads anchored at the graph's end alone; with `spread`, the end
+        voted on over that many nodes along the walk (`_spread_vote`)."""
         var count = len(self.bases)
         var starts = List[Int](length=count, fill=0)
         var ends = List[Int](length=count, fill=0)
@@ -337,12 +339,15 @@ struct Graph(Movable, Sized):
             before[node] = choice
             score[node] = max(best_weight, 0) + (score[choice] if choice >= 0 else 0)
         var at = -1
-        for k in reversed(range(len(order))):
-            var node = order[k]
-            if ends[node] > 0 and (
-                at < 0 or ends[node] > ends[at] or (ends[node] == ends[at] and score[node] > score[at])
-            ):
-                at = node
+        if spread > 0:
+            at = _spread_vote(order, ends, score, before, spread, True)
+        else:
+            for k in reversed(range(len(order))):
+                var node = order[k]
+                if ends[node] > 0 and (
+                    at < 0 or ends[node] > ends[at] or (ends[node] == ends[at] and score[node] > score[at])
+                ):
+                    at = node
         var path = List[Int]()
         while at >= 0:
             path.append(at)
@@ -353,7 +358,13 @@ struct Graph(Movable, Sized):
     def _bundle[
         dt: DType
     ](
-        self, order: List[Int], starts: List[Int], ends: List[Int], weight: List[Scalar[dt]], bounded: Bool = False
+        self,
+        order: List[Int],
+        starts: List[Int],
+        ends: List[Int],
+        weight: List[Scalar[dt]],
+        bounded: Bool = False,
+        spread: Int = 0,
     ) -> List[Int]:
         var count = len(self.bases)
         var score = List[Int](length=count, fill=0)
@@ -383,11 +394,14 @@ struct Graph(Movable, Sized):
             next[node] = choice
             score[node] = max(best_weight, 0) + (score[choice] if choice >= 0 else 0)
         var at = -1
-        for node in order:
-            if starts[node] > 0 and (
-                at < 0 or starts[node] > starts[at] or (starts[node] == starts[at] and score[node] > score[at])
-            ):
-                at = node
+        if spread > 0:
+            at = _spread_vote(order, starts, score, next, spread, False)
+        else:
+            for node in order:
+                if starts[node] > 0 and (
+                    at < 0 or starts[node] > starts[at] or (starts[node] == starts[at] and score[node] > score[at])
+                ):
+                    at = node
         var path = List[Int]()
         while at >= 0:
             path.append(at)
@@ -463,3 +477,41 @@ def cigar_runs(cigar: StringSlice) raises -> Runs:
         runs.counts.append(length)
         length = 0
     return runs^
+
+
+def _spread_vote(
+    order: List[Int], votes: List[Int], score: List[Int], step: List[Int], spread: Int, backward: Bool
+) -> Int:
+    """Where a heaviest walk starts (or, `backward`, ends) when the reads' own starts (`votes`, per node) spread over
+    a few nodes: each node a read starts at heads a run of `spread` nodes along the walk (`step`: each node's next,
+    or its previous `backward`), the run holding the most starts wins (of two as many, the heavier walk, `score`),
+    and the walk starts at its median start. Node by node, a few reads sharing one start outvoted many whose
+    anchored ends differ by a letter or a few (where they were cut, or their errors there)."""
+    var best = -1
+    var best_votes = 0
+    var candidates = order.copy()
+    if backward:
+        candidates.reverse()
+    for node in candidates:
+        if votes[node] == 0:
+            continue
+        var total = 0
+        var at = node
+        var k = 0
+        while at >= 0 and k < spread:
+            total += votes[at]
+            at = step[at]
+            k += 1
+        if best < 0 or total > best_votes or (total == best_votes and score[node] > score[best]):
+            best = node
+            best_votes = total
+    if best < 0:
+        return -1
+    var seen = 0
+    var at = best
+    while at >= 0:
+        seen += votes[at]
+        if 2 * seen >= best_votes:
+            return at
+        at = step[at]
+    return best

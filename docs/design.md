@@ -49,7 +49,10 @@ between the anchors (`_between`: what reaches the spanning reads' ends, or is re
 the pins' windows ending at any sink, and its letters on nodes outside that part inserted (`_past_anchor`: the read's
 letters past its own anchor, one run at its anchored end); unpinned, aligned to that part alone.
 The consensus runs between the spanning reads' ends (`Graph.heaviest_path_spanning`), every read weighing the
-edges.
+edges. Before any of it, each spanning read's first and last `END_LETTERS` are checked against the reads anchored at
+that end (`_ends_checked`), where one-sided reads are: one whose end most of them disagree with is anchored at its
+other end alone, or, at neither, builds nothing and joins the MSA after. A one-sided side's anchored end is voted on
+over `ANCHOR_SPREAD` nodes (`Graph._spread_vote`), as reads' anchored ends differ by a few letters.
 
 With no spanning read each side is assembled alone, the longest read first: the left consensus followed forward
 while most reads go on (`Graph.heaviest_path`), the right one backward (`Graph.heaviest_path_backward`). Both sides:

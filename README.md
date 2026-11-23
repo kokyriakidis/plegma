@@ -90,7 +90,9 @@ costs time, so local assembly uses `-N`.
 Reads fixed at one anchor are aligned from that end to anywhere and may grow the graph past the other end. When no
 read spans both anchors, each side is assembled and the two joined where they overlap; a side alone stops where
 fewer than `-c` reads go on (a telomere). A one-sided read much further from the spanning reads' consensus than they
-are (another repeat copy sharing the anchor) gets no vote. The strand matters only with `-H`.
+are (another repeat copy sharing the anchor) gets no vote. A read given as spanning whose first or last 100 letters
+most reads anchored at that end disagree with (anchored by counting letters to the anchor, say) is taken as anchored
+at its other end alone, or, at neither, gets no vote. The strand matters only with `-H`.
 
 ### `plegma ref`
 
