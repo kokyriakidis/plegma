@@ -65,7 +65,10 @@
   always reached; under a third of a perfect score it is now aligned once more with the band doubled.
 - `clustered_consensus`: a partial read that tells the clusters nothing went to the first input row's cluster and
   counted there for `min_freq` and the 30% one-unit rule, so input order decided whether two haplotypes stayed
-  apart. Such reads now count for no cluster.
+  apart. Such reads now count for no cluster. A read over the letters where the two consensus sequences differ at
+  one cost against both lies between them and counts for its own: counted for none, an A21 haplotype whose
+  consensus a homopolymer model made A22 fell under `min_freq` against an A20 one (pgphaseMojo, HG002 chr20: 13 het
+  run-length indels read homozygous or lost).
 - The consensus depended on input order (abPOA's guide order breaks ties by position, and takes the earlier read
   of the first pair first): ties now go by the sequences, and the same reads in any order give one consensus.
 - The likelihood stage judged its run-slip gate on as little as one inserted letter, and on clean reads never ran.

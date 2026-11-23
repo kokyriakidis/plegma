@@ -622,6 +622,54 @@ def test_a_snp_in_a_run_keeps_its_reads() raises:
     assert_true(len(got.members[g]) >= 26, String(t"{len(got.members[g])} reads with the G"))
 
 
+def _hifi_like_model() raises -> HomopolymerModel:
+    """Every base, strand and true length n 2 to 40 read m long, short far likelier than long (as HiFi reads long
+    runs): n with 0.53, one short 0.33, one long 0.09, two short 0.035, two long 0.008, any other m 1e-6."""
+    var text = String("base,strand,left,right,n,m,count,probability,logProbabilityDb\n")
+    for base in [String("A"), String("C"), String("G"), String("T")]:
+        for strand in range(2):
+            for n in range(2, 41):
+                for m in range(46):
+                    var d = m - n
+                    var p = 0.53 if d == 0 else (
+                        0.33 if d == -1 else (0.09 if d == 1 else (0.035 if d == -2 else (0.008 if d == 2 else 1e-6)))
+                    )
+                    text.write(base, ",", strand, ",*,*,", n, ",", m, ",", 100, ",", p, ",", 10.0 * log10(p), "\n")
+    comptime path = "build/test_clustered_hifi_like_model.csv"
+    with open(path, "w") as f:
+        f.write(text)
+    return HomopolymerModel.load(path)
+
+
+def test_reads_between_two_clusters_run_lengths_count_for_their_own() raises:
+    """HG002 chr20:14,181,385, a het A20/A21 (pgphase, no phase set): 65 reads, the first split 24 and 41. The
+    homopolymer model (HiFi's, reading long runs short) lengthens the 24's consensus to A22, so the A21 reads among
+    them cost the same against it and the other's A20: counted as telling the clusters nothing (as partial reads short
+    of the difference are), 5 of the 24 counted under HG002's HiFi model, under `min_freq`'s floor of 6, and one
+    consensus was left, the call homozygous. A read over the difference at one cost against both lies between them
+    and counts for its own cluster."""
+    var reads = List[List[UInt8]]()
+    var anchors = List[Int]()
+    var strands = List[Int]()
+    with open("tests/data/run_between_clusters/reads.txt", "r") as f:
+        for line in f.read().split("\n"):
+            if line.byte_length() == 0:
+                continue
+            var parts = line.split(":")
+            var seq = List[UInt8]()
+            for b in parts[0].as_bytes():
+                seq.append(b)
+            reads.append(seq^)
+            anchors.append(Int(parts[1]))
+            strands.append(Int(parts[2]))
+    assert_equal(len(reads), 65)
+    var model = _hifi_like_model()
+    var got = clustered_consensus(reads^, anchors, strands, 2, Float64(Float32(0.12)), _pgphase_options(), model)
+    assert_equal(len(got.consensus), 2)
+    assert_equal(len(got.members[0]) + len(got.members[1]), 65)
+    assert_true(min(len(got.members[0]), len(got.members[1])) >= 20)
+
+
 def _pairs(a: String, b: String) raises -> List[Tuple[Int, Int]]:
     var aligner = Aligner()
     var runs_a = List[Int]()

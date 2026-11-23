@@ -12,7 +12,7 @@ set so, whatever else they differ by: one length in both where the reads fit one
 (`INSIDE`) builds no consensus; it is aligned inside the one it fits best.
 """
 
-from karan import Aligner, Costs
+from karan import Aligner, Alignment, Costs
 
 from .clusters import cluster_rows
 from .consensus import ConsensusOptions, consensus
@@ -162,10 +162,11 @@ def clustered_consensus(
     for g in groups:
         made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
     if len(groups) >= 2:
-        # A read costing the same against every consensus tells the clusters nothing (a partial read short of every
-        # place they differ): where their sizes decide (`min_freq`, `MIN_UNIT_SPLIT_FREQ`) it counts for none of
-        # them, nor in the reads they are shares of. Kept in the first input row's cluster, which takes it, it let
-        # input order alone decide; counted evenly for each, it kept a cluster no read told apart.
+        # A read costing the same against every consensus and short of the letters where they differ tells the
+        # clusters nothing (a partial read): where their sizes decide (`min_freq`, `MIN_UNIT_SPLIT_FREQ`) it counts
+        # for none of them, nor in the reads they are shares of. Kept in the first input row's cluster, which takes
+        # it, it let input order alone decide; counted evenly for each, it kept a cluster no read told apart. A read
+        # over those letters at the same cost lies between the two (`_short_of`): it stays in its cluster and counts.
         var telling = List[Bool](length=n, fill=True)
         var floor = max(1, Int(min_freq * Float64(len(builders)) + 0.999999))
         var label = List[Int](length=n, fill=-1)
@@ -183,8 +184,9 @@ def clustered_consensus(
                 for k in range(len(made)):
                     if k == best:
                         continue
-                    var cost = _aligned(aligner, made[k], seqs[r], build_anchor[r], moving).cost
-                    if cost != best_cost:
+                    var found = _aligned(aligner, made[k], seqs[r], build_anchor[r], moving)
+                    var cost = found.cost
+                    if cost != best_cost or not _short_of(found, made[k], made[best]):
                         telling[r] = True
                     if cost < best_cost:
                         best = k
@@ -404,6 +406,25 @@ def clustered_consensus(
             lengths.write(", " if k > 0 else "", len(made[k]))
         trace.line(CLUSTERED, String(len(groups), " clusters of ", _sizes(groups), " reads, ", lengths, " letters"))
     return _placed(aligner, made^, seqs, cluster_of, anchor_of, costs)
+
+
+def _short_of(found: Alignment, consensus: List[UInt8], other: List[UInt8]) -> Bool:
+    """Whether a read aligned to `consensus` (`found`) stops short of the letters where `other` differs from it: those
+    between the first letter the two do not share at their start and the last at their end (inside a repeat the two
+    overlap, a unit's insertion placeable anywhere in it, and the whole repeat counts). A read over them at the cost
+    it has against `other` lies between the two, as a run length halfway between two clusters' does once a
+    homopolymer model has moved one consensus's run: HG002 chr20:14,181,385, 19 of 24 reads of an A21 cluster
+    between its consensus's A22 and the other's A20, counted for neither, and the A21 haplotype dropped under
+    `min_freq`."""
+    var shortest = min(len(consensus), len(other))
+    var prefix = 0
+    while prefix < shortest and consensus[prefix] == other[prefix]:
+        prefix += 1
+    var suffix = 0
+    while suffix < shortest and consensus[len(consensus) - 1 - suffix] == other[len(other) - 1 - suffix]:
+        suffix += 1
+    var after_suffix = len(consensus) - suffix
+    return found.reference_start > min(prefix, after_suffix) or found.reference_end < max(prefix, after_suffix)
 
 
 def _telling(reads: List[Int], telling: List[Bool]) -> Int:
