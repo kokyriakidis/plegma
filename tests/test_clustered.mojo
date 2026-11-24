@@ -887,12 +887,14 @@ def test_phased_with_no_labelled_read_builds_from_the_unlabelled() raises:
     assert_equal(len(got.consensus), 2)
     assert_true(distance(_text(got.consensus[0]), _text(truth)) <= 1)
     assert_true(got.consensus[0] == got.consensus[1])
+    for placed in got.placements:
+        assert_equal(placed.margin, 0)  # the two consensus sequences tie
 
 
 def test_phased_haplotype_without_labels_is_its_unlabelled_reads() raises:
     """A phase set covering one haplotype only: 8 reads labelled 0, the other allele's 5 reads unlabelled. Haplotype 1
     is made from the unlabelled reads, so the heterozygote stays (taking haplotype 0's consensus for it would lose
-    it)."""
+    it). The labelled reads' placements have no margin; the unlabelled ones', placed by cost, have one."""
     seed(223)
     var a = _random(400)
     var b = a.copy()
@@ -909,6 +911,8 @@ def test_phased_haplotype_without_labels_is_its_unlabelled_reads() raises:
     var got = phased_consensus(reads^, labels, options=options)
     assert_true(got.consensus[0] == a)
     assert_true(got.consensus[1] == b)
+    for k in range(13):  # labelled reads are placed by their label, unlabelled ones by cost, 3 letters apart
+        assert_true(got.placements[k].margin == 0 if k < 8 else got.placements[k].margin > 0)
 
 
 def test_phased_reads_all_inside_build_as_spanning() raises:

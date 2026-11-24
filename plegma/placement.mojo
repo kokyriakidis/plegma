@@ -14,7 +14,8 @@ struct Placement(Copyable, Movable):
     """A read's alignment to its cluster's consensus: the `cluster`; the CIGAR (`=`, `X`, `I` a letter the read has
     and the consensus not, `D` one the consensus has and the read not), its `cost` under the scoring's costs, and
     the spans it covers, consensus letters `consensus_start ..< consensus_end` and read letters `read_start ..<
-    read_end` (a read anchored at one end, or inside, covers part of the consensus)."""
+    read_end` (a read anchored at one end, or inside, covers part of the consensus); and its `margin`, how much more
+    the next cheapest cluster costs it: 0 where its cluster placed it, or where two clusters tie."""
 
     var cluster: Int
     var cigar: String
@@ -23,6 +24,7 @@ struct Placement(Copyable, Movable):
     var consensus_end: Int
     var read_start: Int
     var read_end: Int
+    var margin: Int
 
 
 struct Clustered(Movable):
@@ -119,16 +121,23 @@ def _placed(
     for r in range(len(seqs)):
         var best = cluster_of[r]
         var found: Alignment
+        var margin = 0
         if best >= 0:
             found = _aligned(aligner, out.consensus[best], seqs[r], anchors[r], costs)
         else:
             best = 0
             found = _aligned(aligner, out.consensus[0], seqs[r], anchors[r], costs)
+            var second = -1
             for k in range(1, len(out.consensus)):
                 var other = _aligned(aligner, out.consensus[k], seqs[r], anchors[r], costs)
                 if other.cost < found.cost:
+                    second = found.cost
                     best = k
                     found = other^
+                elif second < 0 or other.cost < second:
+                    second = other.cost
+            if second >= 0:
+                margin = second - found.cost
         out.members[best].append(r)
         out.placements.append(
             Placement(
@@ -139,6 +148,7 @@ def _placed(
                 found.reference_end,
                 found.query_start,
                 found.query_end,
+                margin,
             )
         )
     return out^

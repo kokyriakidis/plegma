@@ -110,12 +110,15 @@
   reaches) splits that side's reads into haplotypes by their own MSA; it gave one consensus before. A column past a
   read's far end counts as no letter (`cluster_rows`' `MISSING`), and clusters are weighed over the letters both
   reach. HG002's chr18 q-end, 12 left reads: one consensus 62 and 69 edits from the two assembled haplotypes'
-  ends (hg002v1.1), now 4 and 8 (pgphaseMojo's 11-read call: 0 and 6). Simulated reads (8-30 of one or two haplotypes, letters apart near the anchor): at 1% errors 37 of
-  300 one-haplotype sets split (the spanning path: 50) and 292 of 300 two-haplotype sets split purely (279); at 3%,
-  49 (25) and 264 (190).
+  ends (hg002v1.1), now 4 and 8 (pgphaseMojo's 11-read call: 0 and 6). Simulated reads (8-30 of one or two
+  haplotypes, letters apart near the anchor): at 1% errors 37 of 300 one-haplotype sets split (the spanning path: 50)
+  and 292 of 300 two-haplotype sets split purely (279); at 3%, 49 (25) and 264 (190).
 - `Clustered.joined` (`clustered_consensus`, `phased_consensus`): per cluster, False where its reads made two sides
   that could not be joined (no read spanning). The consensus is still the longer side, as before, but a caller can
   now tell it from one reaching both anchors. Mojo only; the C API and Python do not expose it yet.
+- `Placement.margin`: how much more the next cheapest cluster costs a read placed by cost (a `phased_consensus` read
+  with no haplotype, an inside read of `clustered_consensus`); 0 for reads placed by their cluster, and where
+  two clusters tie (the read then goes to the first). Mojo only, as `joined`.
 - `pixi run test-all`: unit tests, C API (shared and static), Python and fuzzing. `experiments/validate/golden.py`
   checks a refactor byte for byte.
 
