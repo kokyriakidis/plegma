@@ -6,6 +6,7 @@ from karan import distance
 
 from karan import Aligner, Costs, Mode, Ties
 from plegma.clustered import clustered_consensus
+from plegma.clusters import cluster_rows
 from plegma.phased import _haplotype_at, phased_consensus
 from plegma.runs import _length_in, _run_pairs
 from plegma.consensus import ConsensusOptions, consensus
@@ -705,6 +706,87 @@ def test_reads_between_two_clusters_run_lengths_count_for_their_own() raises:
     assert_equal(len(got.consensus), 2)
     assert_equal(len(got.members[0]) + len(got.members[1]), 65)
     assert_true(min(len(got.members[0]), len(got.members[1])) >= 20)
+
+
+def _qter(name: String) raises -> List[UInt8]:
+    var out = List[UInt8]()
+    with open(String("tests/data/hg002_chr18_qter/", name), "r") as f:
+        for line in f.read().split("\n"):
+            if not line.startswith(">"):
+                out.extend(List[UInt8](line.strip().as_bytes()))
+    return out^
+
+
+def _apart(mut aligner: Aligner, a: List[UInt8], b: List[UInt8], left: Bool) raises -> Int:
+    """Edits between `a` and `b` from one end (`left`: their starts) over the shorter's length."""
+    var longer = a.copy() if len(a) >= len(b) else b.copy()
+    var shorter = b.copy() if len(a) >= len(b) else a.copy()
+    return aligner.align(Span(longer), Span(shorter), Costs.edit(), Mode.PREFIX if left else Mode.SUFFIX).cost
+
+
+def test_one_sides_reads_split_into_its_haplotypes() raises:
+    """HG002's chr18 q-end, 12 reads anchored at the window's left end and none at the right (the telomere): one
+    consensus was 62 and 69 edits from the two haplotypes' assembled ends (hg002v1.1), as no read spans to split by.
+    Split by their own MSA, 6 and 6, each is within a few edits of one."""
+    var reads = List[List[UInt8]]()
+    var anchors = List[Int]()
+    var strands = List[Int]()
+    with open("tests/data/hg002_chr18_qter/reads.txt", "r") as f:
+        for line in f.read().split("\n"):
+            if line.byte_length() == 0:
+                continue
+            var parts = line.split(":")
+            reads.append(List[UInt8](parts[0].as_bytes()))
+            anchors.append(Int(parts[1]))
+            strands.append(Int(parts[2]))
+    assert_equal(len(reads), 12)
+    var got = clustered_consensus(reads^, anchors, strands, 2, Float64(Float32(0.12)), _pgphase_options())
+    assert_equal(len(got.consensus), 2)
+    var aligner = Aligner(warm=False)
+    var ends = [_qter("maternal.fa"), _qter("paternal.fa")]
+    var first = (
+        0 if _apart(aligner, got.consensus[0], ends[0], True) < _apart(aligner, got.consensus[0], ends[1], True) else 1
+    )
+    assert_true(_apart(aligner, got.consensus[0], ends[first], True) <= 10)
+    assert_true(_apart(aligner, got.consensus[1], ends[1 - first], True) <= 10)
+
+
+def test_one_sides_reads_of_one_haplotype_or_two() raises:
+    """With no spanning read and one side only, reads of two haplotypes (letters apart near the anchor) split into
+    them, each consensus its own haplotype's; one haplotype's reads stay one, however far each reaches. So at either
+    end."""
+    seed(71)
+    var aligner = Aligner(warm=False)
+    for side in [LEFT, RIGHT]:
+        var one = _random(2500)
+        var two = one.copy()
+        for at in [40, 130, 210] if side == LEFT else [2290, 2370, 2460]:
+            two[at] = UInt8(ord("A")) if two[at] != UInt8(ord("A")) else UInt8(ord("C"))
+        for haplotypes in [1, 2]:
+            var reads = List[List[UInt8]]()
+            var anchors = List[Int]()
+            for r in range(16):
+                var source = two.copy() if haplotypes == 2 and r % 2 == 1 else one.copy()
+                var length = 400 + 120 * r
+                reads.append(
+                    _mutated(_slice(source, 0, length) if side == LEFT else _slice(source, 2500 - length, 2500), 0.02)
+                )
+                anchors.append(side)
+            var got = clustered_consensus(reads^, anchors, max_clusters=2, min_freq=0.25, options=_unpinned())
+            assert_equal(len(got.consensus), haplotypes)
+            for k in range(len(got.consensus)):
+                var mine = got.members[k][0] % 2 if haplotypes == 2 else 0
+                for r in got.members[k]:
+                    assert_equal(r % 2 if haplotypes == 2 else 0, mine)
+                assert_true(_apart(aligner, got.consensus[k], two if mine == 1 else one, side == LEFT) <= 3)
+
+
+def test_missing_letters_set_rows_apart_from_none() raises:
+    """Rows that stop short (`.` past a one-sided read's end) split from none for it: only letters count."""
+    var rows: List[String] = ["ACGTACGT", "ACGTACGT", "ACGTACGT", "ACGT....", "ACGT....", "ACGT...."]
+    assert_equal(len(cluster_rows(rows, 2, 0.25)), 1)
+    rows = ["ACGTACGT", "ACGTACGT", "ACGTACGT", "ACCT....", "ACCT....", "ACCT...."]
+    assert_equal(len(cluster_rows(rows, 2, 0.25)), 2)
 
 
 def _pairs(a: String, b: String) raises -> List[Tuple[Int, Int]]:

@@ -73,7 +73,9 @@ distance.
 
 ## Several consensus sequences of one read set (the library, the C API)
 
-- `plegma/clustered.mojo` `clustered_consensus`: the spanning reads first split as `cluster_rows` splits an MSA's rows,
+- `plegma/clustered.mojo` `clustered_consensus`: the spanning reads first split as `cluster_rows` splits an MSA's rows
+  (with none spanning and one side only, that side's reads, `MISSING` past each one's far end, each cluster then
+  weighed over the letters all reach, `_cut`),
   then k-means-like rounds (each read to the consensus it differs from least, each consensus made again), then
   clusters merged that differ only by run lengths the reads fit as one, by one short tandem unit with too few reads,
   or not at all.

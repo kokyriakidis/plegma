@@ -106,6 +106,13 @@
 
 - `PLEGMA_TRACE=poa,pins,polish,clustered,phased,reference` (or `all`): the decisions behind a result, one line each
   on stderr. It replaces `PLEGMA_PINS_TRACE`.
+- `clustered_consensus` with no spanning read and one side only (a telomere, or a window whose other end no read
+  reaches) splits that side's reads into haplotypes by their own MSA; it gave one consensus before. A column past a
+  read's far end counts as no letter (`cluster_rows`' `MISSING`), and clusters are weighed over the letters both
+  reach. HG002's chr18 q-end, 12 left reads: one consensus 62 and 69 edits from the two assembled haplotypes'
+  ends (hg002v1.1), now 4 and 8 (pgphaseMojo's 11-read call: 0 and 6). Simulated reads (8-30 of one or two haplotypes, letters apart near the anchor): at 1% errors 37 of
+  300 one-haplotype sets split (the spanning path: 50) and 292 of 300 two-haplotype sets split purely (279); at 3%,
+  49 (25) and 264 (190).
 - `Clustered.joined` (`clustered_consensus`, `phased_consensus`): per cluster, False where its reads made two sides
   that could not be joined (no read spanning). The consensus is still the longer side, as before, but a caller can
   now tell it from one reaching both anchors. Mojo only; the C API and Python do not expose it yet.

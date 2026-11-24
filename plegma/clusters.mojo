@@ -6,7 +6,8 @@ two letters counting `SUBSTITUTION_WEIGHT` columns where a gap is one of the two
 letter per column), seeded with the sequence nearest all others and then each time the
 one furthest from the seeds so far, its distance weighted by how many sequences share its letters there (a lone
 read's error is never a seed over an allele many carry); a cluster left smaller than `min_freq` of the sequences
-joins its nearest large neighbour.
+joins its nearest large neighbour. A row's `MISSING` letters, where it has no letter to give (a read anchored at one
+end, past its far end), count for no column and set it apart from none.
 """
 
 
@@ -14,6 +15,9 @@ comptime MAX_ROUNDS = 50
 """k-modes rounds at most (they stop when no row moves)."""
 
 comptime GAP = UInt8(ord("-"))
+
+comptime MISSING = UInt8(ord("."))
+"""A row's letter where it covers no column (`cluster_rows`)."""
 
 comptime SUBSTITUTION_WEIGHT = 3
 """A column where the rows disagree by two letters counts this many times one where some rows have a gap: HiFi reads
@@ -23,7 +27,7 @@ slip in runs (a gap) far more often than they misread a letter, so the letters a
 def _hamming(a: List[UInt8], b: List[UInt8], weights: List[Int]) -> Int:
     var d = 0
     for c in range(len(a)):
-        if a[c] != b[c]:
+        if a[c] != b[c] and a[c] != MISSING and b[c] != MISSING:
             d += weights[c]
     return d
 
@@ -38,6 +42,7 @@ def _commonest(letters: List[List[UInt8]], label: List[Int], k: Int, mode: List[
         for i in range(len(letters)):
             if label[i] == k:
                 counts[Int(letters[i][c])] += 1
+        counts[Int(MISSING)] = 0
         var best = Int(mode[c])
         for b in range(256):
             if counts[b] > counts[best]:
@@ -66,6 +71,7 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
             counts[b] = 0
         for r in rows:
             counts[Int(r.as_bytes()[c])] += 1
+        counts[Int(MISSING)] = 0
         var first = 0
         var second = 0
         var first_letter = 0
