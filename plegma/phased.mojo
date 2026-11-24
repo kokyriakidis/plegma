@@ -364,15 +364,18 @@ def phased_consensus(
         groups[1] = unlabelled.copy()
         unlabelled.clear()
     var made = List[List[UInt8]]()
+    var joined: List[Bool] = [True, True]
     for k in range(2):
         made.append(
-            _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers) if len(groups[k])
+            _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers, joined[k]) if len(groups[k])
             > 0 else (List[UInt8]())
         )
     if len(groups[1]) == 0:
         made[1] = made[0].copy()
+        joined[1] = joined[0]
     if len(groups[0]) == 0:
         made[0] = made[1].copy()
+        joined[0] = joined[1]
     var aligner = Aligner(warm=False)
     # Reads of neither haplotype build too: each joins the haplotype whose letters it carries where the two differ,
     # or both where it covers no such place, and the two are made again. Left out of building, they left a haplotype
@@ -421,7 +424,7 @@ def phased_consensus(
         # and they still make it. One noisy unlabelled read alone makes it as well.
         for k in range(2):
             if grew[k]:
-                made[k] = _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers)
+                made[k] = _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers, joined[k])
     # Each run the two differ by is decided on both haplotypes' reads together, whatever else the two differ by.
     var runs0 = List[Int]()
     var runs1 = List[Int]()
@@ -501,4 +504,4 @@ def phased_consensus(
         var b = made[1].copy()
         made[0] = _set_runs(a, runs0, first)
         made[1] = _set_runs(b, runs1, second)
-    return _placed(aligner, made^, seqs, cluster_of, anchor_of, alignment_costs(options.poa.scoring))
+    return _placed(aligner, made^, joined^, seqs, cluster_of, anchor_of, alignment_costs(options.poa.scoring))

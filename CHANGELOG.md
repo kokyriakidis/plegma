@@ -106,6 +106,9 @@
 
 - `PLEGMA_TRACE=poa,pins,polish,clustered,phased,reference` (or `all`): the decisions behind a result, one line each
   on stderr. It replaces `PLEGMA_PINS_TRACE`.
+- `Clustered.joined` (`clustered_consensus`, `phased_consensus`): per cluster, False where its reads made two sides
+  that could not be joined (no read spanning). The consensus is still the longer side, as before, but a caller can
+  now tell it from one reaching both anchors. Mojo only; the C API and Python do not expose it yet.
 - `pixi run test-all`: unit tests, C API (shared and static), Python and fuzzing. `experiments/validate/golden.py`
   checks a refactor byte for byte.
 

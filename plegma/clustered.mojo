@@ -125,6 +125,7 @@ def clustered_consensus(
     if n == 0:
         out.consensus.append(List[UInt8]())
         out.members.append(List[Int]())
+        out.joined.append(True)
         return out^
     # The reads that make consensus sequences; with every read inside, all of them as if spanning.
     var builders = List[Int]()
@@ -158,9 +159,8 @@ def clustered_consensus(
     # reads instead, its consensus lost the G, and the two merged as apart by a run alone (written G on both).
     var moving = MOVING_COSTS
     var aligner = Aligner(warm=False)
-    var made = List[List[UInt8]]()
-    for g in groups:
-        made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
+    var joined = List[Bool]()
+    var made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
     if len(groups) >= 2:
         # A read costing the same against every consensus and short of the letters where they differ tells the
         # clusters nothing (a partial read): where their sizes decide (`min_freq`, `MIN_UNIT_SPLIT_FREQ`) it counts
@@ -219,16 +219,12 @@ def clustered_consensus(
                 for k in range(len(groups)):
                     for r in groups[k]:
                         label[r] = k
-                made.clear()
-                for g in groups:
-                    made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
+                made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
                 continue
             if not moved:
                 break
             groups = next^
-            made.clear()
-            for g in groups:
-                made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
+            made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
         # A read of a cluster dropped in the last round joins the consensus it differs from least.
         if len(groups) >= 2:
             var placed = List[Bool](length=n, fill=False)
@@ -376,6 +372,7 @@ def clustered_consensus(
         # One flag for all pairs made three clusters one wherever two of them were (a third haplotype's lost).
         var merged = List[List[Int]]()
         var made_merged = List[List[UInt8]]()
+        var joined_merged = List[Bool]()
         for k in range(len(groups)):
             if _root(root, k) != k:
                 continue
@@ -385,17 +382,20 @@ def clustered_consensus(
                 if _root(root, j) == k:
                     members.extend(groups[j].copy())
                     parts += 1
+            var whole = joined[k]
             made_merged.append(
                 made[k].copy() if parts
-                == 1 else _consensus_of(seqs, members, build_anchor, strand_of, options, homopolymers)
+                == 1 else _consensus_of(seqs, members, build_anchor, strand_of, options, homopolymers, whole)
             )
+            joined_merged.append(whole)
             merged.append(members^)
         if len(groups) <= 1 or len(merged) <= 1:
             groups = [builders.copy()]
-            made = [_consensus_of(seqs, builders, build_anchor, strand_of, options, homopolymers)]
+            made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
         else:
             groups = merged^
             made = made_merged^
+            joined = joined_merged^
     var cluster_of = List[Int](length=n, fill=-1)
     for k in range(len(groups)):
         for r in groups[k]:
@@ -405,7 +405,26 @@ def clustered_consensus(
         for k in range(len(made)):
             lengths.write(", " if k > 0 else "", len(made[k]))
         trace.line(CLUSTERED, String(len(groups), " clusters of ", _sizes(groups), " reads, ", lengths, " letters"))
-    return _placed(aligner, made^, seqs, cluster_of, anchor_of, costs)
+    return _placed(aligner, made^, joined^, seqs, cluster_of, anchor_of, costs)
+
+
+def _made(
+    seqs: List[List[UInt8]],
+    groups: List[List[Int]],
+    build_anchor: List[Int],
+    strand_of: List[Int],
+    options: ConsensusOptions,
+    homopolymers: HomopolymerModel,
+    mut joined: List[Bool],
+) raises -> List[List[UInt8]]:
+    """Each group's consensus (`_consensus_of`), and in `joined` whether its sides were joined."""
+    var out = List[List[UInt8]](capacity=len(groups))
+    joined = List[Bool](capacity=len(groups))
+    for g in groups:
+        var whole = True
+        out.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers, whole))
+        joined.append(whole)
+    return out^
 
 
 def _short_of(found: Alignment, consensus: List[UInt8], other: List[UInt8]) -> Bool:

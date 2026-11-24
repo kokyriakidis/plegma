@@ -269,6 +269,43 @@ def test_anchored_and_inside_reads() raises:
     assert_equal(inside.consensus_end - inside.consensus_start, 300)
 
 
+def test_a_cluster_whose_sides_did_not_join_says_so() raises:
+    """With no spanning read, sides apart (no letter in common) stay unjoined: the cluster is the longer side, as
+    `consensus` gives it, and says it is not joined; sides that overlap, or spanning reads, are joined. So for
+    `phased_consensus`."""
+    seed(61)
+    var truth = _random(1200)
+    for shape in range(3):
+        var reads = List[List[UInt8]]()
+        var anchors = List[Int]()
+        var labels = List[Int]()
+        for k in range(12):
+            var anchor = BOTH if shape == 2 else (LEFT if k < 6 else RIGHT)
+            var end = 500 if shape == 0 else 800
+            var start = 650 if shape == 0 else 400
+            var piece = truth.copy() if anchor == BOTH else (
+                _slice(truth, 0, end) if anchor == LEFT else _slice(truth, start, 1200)
+            )
+            reads.append(_mutated(piece, 0.02))
+            anchors.append(anchor)
+            labels.append(k % 2)
+        var got = clustered_consensus(reads.copy(), anchors, max_clusters=2, min_freq=0.25, options=_unpinned())
+        assert_equal(len(got.joined), len(got.consensus))
+        var phased = phased_consensus(reads.copy(), labels, anchors, options=_unpinned())
+        assert_equal(len(phased.joined), 2)
+        if shape == 0:
+            var parts = consensus(reads.copy(), anchors, options=_unpinned())
+            assert_equal(len(parts), 2)
+            assert_equal(len(got.consensus), 1)
+            assert_true(not got.joined[0])
+            assert_true(got.consensus[0] == parts[1 if len(parts[1]) > len(parts[0]) else 0])
+            assert_true(not phased.joined[0] and not phased.joined[1])
+        else:
+            for k in range(len(got.joined)):
+                assert_true(got.joined[k])
+            assert_true(phased.joined[0] and phased.joined[1])
+
+
 def _wide_model() raises -> HomopolymerModel:
     """Every base, strand and true length n 2 to 40 read m long: n with 0.8, one off 0.07 each side, two off 0.02,
     any other m 1e-4."""

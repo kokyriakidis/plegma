@@ -26,16 +26,20 @@ struct Placement(Copyable, Movable):
 
 
 struct Clustered(Movable):
-    """`clustered_consensus`'s outcome: per cluster its `consensus` and its `members` (read indices, in input
-    order); per read its `placements` entry."""
+    """`clustered_consensus`'s outcome: per cluster its `consensus`, its `members` (read indices, in input order)
+    and whether it is `joined`; per read its `placements` entry."""
 
     var consensus: List[List[UInt8]]
     var members: List[List[Int]]
+    var joined: List[Bool]
+    """False where the cluster's reads made two sides that could not be joined (no read spanning, `consensus`'s two
+    parts): its consensus is then the longer side alone, and the other side's reads' placements in it mean nothing."""
     var placements: List[Placement]
 
     def __init__(out self):
         self.consensus = List[List[UInt8]]()
         self.members = List[List[Int]]()
+        self.joined = List[Bool]()
         self.placements = List[Placement]()
 
 
@@ -80,8 +84,9 @@ def _consensus_of(
     strands: List[Int],
     options: ConsensusOptions,
     homopolymers: HomopolymerModel,
+    mut joined: Bool,
 ) raises -> List[UInt8]:
-    """The consensus of `reads` alone; of two sides not joined (no read spanning), the longer."""
+    """The consensus of `reads` alone; of two sides not joined (no read spanning), the longer, and `joined` False."""
     var mine = List[List[UInt8]](capacity=len(reads))
     var mine_anchors = List[Int](capacity=len(reads))
     var mine_strands = List[Int](capacity=len(reads))
@@ -90,6 +95,7 @@ def _consensus_of(
         mine_anchors.append(anchors[r])
         mine_strands.append(strands[r])
     var parts = consensus(mine^, mine_anchors, mine_strands, options, homopolymers)
+    joined = len(parts) == 1
     if len(parts) > 1 and len(parts[1]) > len(parts[0]):
         return parts[1].copy()
     return parts[0].copy()
@@ -98,15 +104,17 @@ def _consensus_of(
 def _placed(
     mut aligner: Aligner,
     var made: List[List[UInt8]],
+    var joined: List[Bool],
     seqs: List[List[UInt8]],
     cluster_of: List[Int],
     anchors: List[Int],
     costs: Costs,
 ) raises -> Clustered:
-    """The clusters' consensus sequences `made` with every read placed: in its cluster (`cluster_of`), or with none
+    """The clusters' consensus sequences `made` (each `joined` or not) with every read placed: in its cluster (`cluster_of`), or with none
     (-1) in the one it aligns to most cheaply."""
     var out = Clustered()
     out.consensus = made^
+    out.joined = joined^
     out.members = List[List[Int]](length=len(out.consensus), fill=List[Int]())
     for r in range(len(seqs)):
         var best = cluster_of[r]

@@ -80,7 +80,8 @@ distance.
 - `plegma/phased.mojo` `phased_consensus`: reads already phased; each haplotype from its labelled reads, then again with
   the unlabelled reads on the haplotype whose letters they carry where the two differ (`_sides`).
 - Shared: `plegma/placement.mojo` (`Clustered`, `Placement`: each cluster's consensus, made as `consensus` makes
-  one, and every read's CIGAR to its cluster's) and `plegma/runs.mojo` (the homopolymer runs two consensus sequences
+  one, the longer side where its two sides could not be joined (`Clustered.joined` False), and every read's CIGAR to
+  its cluster's) and `plegma/runs.mojo` (the homopolymer runs two consensus sequences
   differ by, and the lengths a model finds most likely for their reads). `clustered.mojo` re-exports the shared
   names and `phased_consensus` for callers that import them from it.
 

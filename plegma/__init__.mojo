@@ -33,8 +33,9 @@ is implementation and may change.
   API (`capi/plegma.h`, `capi/plegma.hpp`,
   `build/libplegma.so`) a local assembler calls instead of the command.
 - Several consensus sequences of one read set (haplotypes, as a diploid caller asks abPOA's `-d` for):
-  `clustered_consensus` -> `Clustered` (per cluster its consensus and members; per read its `Placement`, the
-  CIGAR to its cluster's consensus at `alignment_costs` of the scoring), a read covering neither anchor `INSIDE`;
+  `clustered_consensus` -> `Clustered` (per cluster its consensus, members and whether its sides `joined`; per read
+  its `Placement`, the CIGAR to its cluster's consensus at `alignment_costs` of the scoring), a read covering neither
+  anchor `INSIDE`;
   `phased_consensus` the same for reads already phased into two haplotypes.
 - Order and clusters: `guide_order` (abPOA's progressive order by minimizer
   multiset Jaccard), `cluster_rows` (several consensus sequences, by MSA
