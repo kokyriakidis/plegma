@@ -149,6 +149,9 @@ const char* AsyncRT_DeviceContext_enqueueHostFunctionRange(DeviceContext* contex
     for (size_t i = 0; i < count; i++) {
         Task* task = malloc(sizeof(Task));
         if (!task) {
+            for (size_t j = i; j < count; j++) {
+                destroy(handles[j]);
+            }
             pthread_mutex_unlock(&context->mutex);
             return error_string("plegma static runtime: out of memory");
         }

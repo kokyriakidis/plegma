@@ -11,7 +11,7 @@ from .alphabet import encode_base
 from .graph import Graph
 from .kernel import GLOBAL, PREFIX, SINK, SOURCE, SUFFIX, GraphAlignment, Scoring, Topology, Workspace
 from .pins import Pins, pins_with_index
-from .seeds import ReferenceIndex
+from .seeds import POSITION_BITS, ReferenceIndex
 from .trace import PINS, Trace
 
 
@@ -262,11 +262,20 @@ def align_pinned(
     scratch.hp_letters.reserve(len(scratch.hp_path))
     for node in scratch.hp_path:
         scratch.hp_letters.append(graph.bases[node])
-    if not scratch.has_cached_index or scratch.cached_letters != scratch.hp_letters:
-        scratch.cached_letters = scratch.hp_letters.copy()
-        scratch.cached_index = ReferenceIndex(scratch.cached_letters)
-        scratch.has_cached_index = True
-    var found = pins_with_index(scratch.cached_index, query)
+    var found: Pins
+    if len(scratch.hp_letters) >= 1 << POSITION_BITS or len(query) >= 1 << POSITION_BITS:
+        var trace_limit = Trace()
+        trace_limit.line(
+            PINS,
+            String("no pins: ", len(scratch.hp_letters), " x ", len(query), " letters, past 2^", POSITION_BITS),
+        )
+        found = Pins()
+    else:
+        if not scratch.has_cached_index or scratch.cached_letters != scratch.hp_letters:
+            scratch.cached_letters = scratch.hp_letters.copy()
+            scratch.cached_index = ReferenceIndex(scratch.cached_letters)
+            scratch.has_cached_index = True
+        found = pins_with_index(scratch.cached_index, query)
     var unique = unique_pins(scratch.hp_letters, query, found)
     # One-letter anchors, each past the last on both: the windows then meet at path nodes, so the alignment's path
     # runs forward through the graph (two windows meeting between nodes could join nodes into a cycle).

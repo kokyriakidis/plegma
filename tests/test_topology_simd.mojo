@@ -111,5 +111,38 @@ def test_simd_first_last_equal_and_rebase_straddling_lengths() raises:
         assert_true(len(moved) == n)
 
 
+def test_heaviest_path_into_matches_heaviest_path() raises:
+    var starts = List[Int]()
+    var ends = List[Int]()
+    var score = List[Int]()
+    var next = List[Int]()
+    var out = List[Int]()
+
+    # Empty graph.
+    var empty = Graph()
+    empty.heaviest_path_into(Topology(empty).order, starts, ends, score, next, out)
+    assert_equal(out, empty.heaviest_path(Topology(empty).order))
+
+    # Branching graph with ties and majority branch.
+    var g1 = Graph()
+    var s0 = _bytes("ACGTACGTACGT")
+    var s1 = _bytes("ACGTTCGTACGT")
+    var s2 = _bytes("ACGTTCGTTCGT")
+    _ = g1.add("r0", Span(s0))
+    var aligned: List[Int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    _ = g1.fuse_nodes("r1", Span(s1), aligned)
+    _ = g1.fuse_nodes("r2", Span(s2), aligned)
+    var order1 = Topology(g1).order.copy()
+    g1.heaviest_path_into(order1, starts, ends, score, next, out)
+    assert_equal(out, g1.heaviest_path(order1))
+
+    # Reuse the same buffers on a smaller graph.
+    var g2 = Graph()
+    _ = g2.add("a", Span(_bytes("GATTACA")))
+    var order2 = Topology(g2).order.copy()
+    g2.heaviest_path_into(order2, starts, ends, score, next, out)
+    assert_equal(out, g2.heaviest_path(order2))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -101,6 +101,49 @@ def _first_split(
     return out^
 
 
+def _assign_builder_read(
+    mut aligner: Aligner,
+    against: List[List[UInt8]],
+    seq: List[UInt8],
+    anchor: Int,
+    current_label: Int,
+    moving: Costs,
+) raises -> Tuple[Int, Bool]:
+    """Assigns one builder read to its cheapest cluster in `against`, returning `(best_cluster, is_telling)`."""
+    var best = current_label if current_label >= 0 else 0
+    var best_cost = _aligned(aligner, against[best], seq, anchor, moving).cost
+    var is_telling = False
+    for k in range(len(against)):
+        if k == best:
+            continue
+        var found = _aligned(aligner, against[k], seq, anchor, moving)
+        var cost = found.cost
+        if cost != best_cost or not _short_of(found, against[k], against[best]):
+            is_telling = True
+        if cost < best_cost:
+            best = k
+            best_cost = cost
+    return (best, is_telling)
+
+
+def _nearest_cluster_for_read(
+    mut aligner: Aligner,
+    against: List[List[UInt8]],
+    seq: List[UInt8],
+    anchor: Int,
+    moving: Costs,
+) raises -> Int:
+    """Returns the cluster in `against` that aligns cheapest to `seq`."""
+    var best = 0
+    var best_cost = _aligned(aligner, against[0], seq, anchor, moving).cost
+    for k in range(1, len(against)):
+        var cost = _aligned(aligner, against[k], seq, anchor, moving).cost
+        if cost < best_cost:
+            best = k
+            best_cost = cost
+    return best
+
+
 def clustered_consensus(
     var seqs: List[List[UInt8]],
     anchors: List[Int] = List[Int](),
@@ -221,23 +264,11 @@ def clustered_consensus(
                             return
                         var r = builders[idx]
                         try:
-                            var best = label[r] if label[r] >= 0 else 0
-                            var best_cost = _aligned(
-                                local_aligner, against[best], seqs[r], build_anchor[r], moving
-                            ).cost
-                            var is_telling = False
-                            for k in range(len(against)):
-                                if k == best:
-                                    continue
-                                var found = _aligned(local_aligner, against[k], seqs[r], build_anchor[r], moving)
-                                var cost = found.cost
-                                if cost != best_cost or not _short_of(found, against[k], against[best]):
-                                    is_telling = True
-                                if cost < best_cost:
-                                    best = k
-                                    best_cost = cost
-                            bests_p[unsafe_offset=idx] = best
-                            tells_p[unsafe_offset=idx] = is_telling
+                            var assigned = _assign_builder_read(
+                                local_aligner, against, seqs[r], build_anchor[r], label[r], moving
+                            )
+                            bests_p[unsafe_offset=idx] = assigned[0]
+                            tells_p[unsafe_offset=idx] = assigned[1]
                         except:
                             failed_p[unsafe_offset=idx] = True
 
@@ -247,19 +278,11 @@ def clustered_consensus(
                     var best: Int
                     var is_telling: Bool
                     if failed[idx]:
-                        best = label[r] if label[r] >= 0 else 0
-                        var best_cost = _aligned(scratch.aligner, against[best], seqs[r], build_anchor[r], moving).cost
-                        is_telling = False
-                        for k in range(len(made)):
-                            if k == best:
-                                continue
-                            var found = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving)
-                            var cost = found.cost
-                            if cost != best_cost or not _short_of(found, against[k], against[best]):
-                                is_telling = True
-                            if cost < best_cost:
-                                best = k
-                                best_cost = cost
+                        var assigned = _assign_builder_read(
+                            scratch.aligner, against, seqs[r], build_anchor[r], label[r], moving
+                        )
+                        best = assigned[0]
+                        is_telling = assigned[1]
                     else:
                         best = bests[idx]
                         is_telling = tells[idx]
@@ -271,19 +294,11 @@ def clustered_consensus(
                     next[best].append(r)
             else:
                 for r in builders:
-                    var best = label[r] if label[r] >= 0 else 0
-                    var best_cost = _aligned(scratch.aligner, against[best], seqs[r], build_anchor[r], moving).cost
-                    telling[r] = False
-                    for k in range(len(made)):
-                        if k == best:
-                            continue
-                        var found = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving)
-                        var cost = found.cost
-                        if cost != best_cost or not _short_of(found, against[k], against[best]):
-                            telling[r] = True
-                        if cost < best_cost:
-                            best = k
-                            best_cost = cost
+                    var assigned = _assign_builder_read(
+                        scratch.aligner, against, seqs[r], build_anchor[r], label[r], moving
+                    )
+                    var best = assigned[0]
+                    telling[r] = assigned[1]
                     if best != label[r]:
                         moved = True
                         moves += 1
@@ -357,44 +372,24 @@ def clustered_consensus(
                                 return
                             var r = unplaced[idx]
                             try:
-                                var best = 0
-                                var best_cost = _aligned(
-                                    local_aligner, against[0], seqs[r], build_anchor[r], moving
-                                ).cost
-                                for k in range(1, len(against)):
-                                    var cost = _aligned(
-                                        local_aligner, against[k], seqs[r], build_anchor[r], moving
-                                    ).cost
-                                    if cost < best_cost:
-                                        best = k
-                                        best_cost = cost
-                                bests_p[unsafe_offset=idx] = best
+                                bests_p[unsafe_offset=idx] = _nearest_cluster_for_read(
+                                    local_aligner, against, seqs[r], build_anchor[r], moving
+                                )
                             except:
                                 failed_p[unsafe_offset=idx] = True
 
                     spread(place_dropped, drop_workers, drop_workers)
                     for idx in range(len(unplaced)):
                         var r = unplaced[idx]
-                        var best = bests[idx]
-                        if failed[idx]:
-                            best = 0
-                            var best_cost = _aligned(scratch.aligner, against[0], seqs[r], build_anchor[r], moving).cost
-                            for k in range(1, len(made)):
-                                var cost = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving).cost
-                                if cost < best_cost:
-                                    best = k
-                                    best_cost = cost
+                        var best = _nearest_cluster_for_read(
+                            scratch.aligner, against, seqs[r], build_anchor[r], moving
+                        ) if failed[idx] else bests[idx]
                         groups[best].append(r)
                 else:
                     for r in unplaced:
-                        var best = 0
-                        var best_cost = _aligned(scratch.aligner, against[0], seqs[r], build_anchor[r], moving).cost
-                        for k in range(1, len(made)):
-                            var cost = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving).cost
-                            if cost < best_cost:
-                                best = k
-                                best_cost = cost
-                        groups[best].append(r)
+                        groups[
+                            _nearest_cluster_for_read(scratch.aligner, against, seqs[r], build_anchor[r], moving)
+                        ].append(r)
         var root = List[Int]()
         for k in range(len(groups)):
             root.append(k)

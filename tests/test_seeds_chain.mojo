@@ -4,7 +4,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from karan import Aligner, Costs
 
-from plegma.chain import primary_chain, rmq_chains
+from plegma.chain import _ABSENT, _MaxTree, _Present, _Top, primary_chain, rmq_chains
 from plegma.pins import pinned_pairing, pinned_pairing_with_index, pins, pins_with_index
 from plegma.seeds import ReferenceIndex, collect_anchors, radix_sort, sketch
 
@@ -129,6 +129,57 @@ def test_pinned_pairing_parallel_matches_serial_and_indexed() raises:
     for i in range(len(p1)):
         assert_equal(p4[i], p1[i])
         assert_equal(pi4[i], p1[i])
+
+
+def test_max_tree_present_and_primary_chain_rescue() raises:
+    # _MaxTree: greatest priority wins; ties break to larger leaf index.
+    var tree = _MaxTree(10)
+    assert_equal(tree.best(0, 10), -1)
+    tree.set(2, _Top(pri=5.0, leaf=2))
+    tree.set(7, _Top(pri=5.0, leaf=7))
+    tree.set(4, _Top(pri=8.0, leaf=4))
+    assert_equal(tree.best(0, 10), 4)
+    assert_equal(tree.best(5, 10), 7)
+    tree.set(4, _ABSENT)
+    assert_equal(tree.best(0, 10), 7)
+    assert_equal(tree.best(0, 6), 2)
+
+    # _Present: predecessor/successor queries across insertions and removals.
+    var present = _Present(12)
+    assert_equal(present.at_or_after(0), -1)
+    assert_equal(present.at_or_before(11), -1)
+    present.set(3, True)
+    present.set(9, True)
+    present.set(5, True)
+    assert_equal(present.at_or_after(0), 3)
+    assert_equal(present.at_or_after(4), 5)
+    assert_equal(present.at_or_after(6), 9)
+    assert_equal(present.at_or_after(10), -1)
+    assert_equal(present.at_or_before(11), 9)
+    assert_equal(present.at_or_before(8), 5)
+    assert_equal(present.at_or_before(2), -1)
+    present.set(5, False)
+    assert_equal(present.at_or_after(4), 9)
+    assert_equal(present.at_or_before(8), 3)
+
+    # primary_chain BW_LONG rescue: a 3,000-bp deletion (> BW=2000) splits initial rmq_chains into two chains,
+    # then primary_chain rescues them into one chain spanning both flanks.
+    var left = _rng_seq(301, 1500)
+    var deleted = _rng_seq(302, 3000)
+    var right = _rng_seq(303, 1500)
+    var ref_seq = List[UInt8]()
+    ref_seq.extend(left.copy())
+    ref_seq.extend(deleted.copy())
+    ref_seq.extend(right.copy())
+    var query = List[UInt8]()
+    query.extend(left.copy())
+    query.extend(right.copy())
+    var anchors = collect_anchors(ref_seq, query)
+    var raw_chains = rmq_chains(anchors, 2000)
+    assert_true(len(raw_chains) >= 2)
+    var rescued = primary_chain(ref_seq, query)
+    assert_true(len(rescued) > len(raw_chains[0]))
+    assert_true(rescued[0].x < 1500 and rescued[len(rescued) - 1].x > 4500)
 
 
 def main() raises:
