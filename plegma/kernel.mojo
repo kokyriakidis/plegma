@@ -170,24 +170,75 @@ struct Topology(Movable):
     var rank: List[Int]
     var remaining: List[Int]
 
-    def __init__(out self, graph: Graph) raises:
-        self.rank = graph.node_order()
+    def __init__(out self):
+        self.order = List[Int]()
+        self.rank = List[Int]()
+        self.remaining = List[Int]()
+
+    def compute(mut self, graph: Graph, mut incoming: List[Int32], mut ready: List[Int]) raises:
+        """Recomputes topological order, rank, and remaining path lengths in-place."""
+        graph.node_order_into(self.rank, incoming, ready)
         var n = len(self.rank)
-        self.order = List[Int](length=n, fill=0)
+        self.order.resize(n, 0)
         for node in range(n):
             self.order[self.rank[node]] = node
-        self.remaining = List[Int](length=n, fill=0)
+        self.remaining.resize(n, 0)
         for r in reversed(range(n)):
             var node = self.order[r]
+            var rem = 0
             var best_weight = Int32(-1)
             var e = Int(graph.first_out[node])
             while e >= 0:
                 var s = Int(graph.edge_to[e])
                 var weight = graph.edge_weight[e]
-                if weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > self.remaining[node]):
+                if weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > rem):
                     best_weight = weight
-                    self.remaining[node] = self.remaining[s] + 1
+                    rem = self.remaining[s] + 1
                 e = Int(graph.next_out[e])
+            self.remaining[node] = rem
+
+    def compute_allowed(
+        mut self,
+        graph: Graph,
+        allowed: List[Bool],
+        mut incoming: List[Int32],
+        mut ready: List[Int],
+        mut full: List[Int],
+    ) raises:
+        """Recomputes topological order over `allowed` nodes in-place."""
+        graph.node_order_into(self.rank, incoming, ready)
+        var n = len(self.rank)
+        full.resize(n, 0)
+        for node in range(n):
+            full[self.rank[node]] = node
+        self.order.clear()
+        for node in full:
+            if allowed[node]:
+                self.order.append(node)
+        self.remaining.resize(n, 0)
+        for node in range(n):
+            self.remaining[node] = 0
+        for r in reversed(range(len(self.order))):
+            var node = self.order[r]
+            var rem = 0
+            var best_weight = Int32(-1)
+            var e = Int(graph.first_out[node])
+            while e >= 0:
+                var s = Int(graph.edge_to[e])
+                var weight = graph.edge_weight[e]
+                if allowed[s] and (weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > rem)):
+                    best_weight = weight
+                    rem = self.remaining[s] + 1
+                e = Int(graph.next_out[e])
+            self.remaining[node] = rem
+
+    def __init__(out self, graph: Graph) raises:
+        self.order = List[Int]()
+        self.rank = List[Int]()
+        self.remaining = List[Int]()
+        var incoming = List[Int32]()
+        var ready = List[Int]()
+        self.compute(graph, incoming, ready)
 
     def __init__(out self, graph: Graph, allowed: List[Bool]) raises:
         """Over the nodes `allowed` alone: they in topological order (`order`), and each one's remaining path

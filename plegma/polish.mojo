@@ -21,7 +21,6 @@ from std.math import iota, log
 from karan import Aligner, Alignment, Costs, Mode, Ties
 
 from .alphabet import encode_base
-from .graph import DELETION, INSERTION, MATCH, cigar_runs
 from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from .kernel import LEFT, RIGHT
 
@@ -65,12 +64,11 @@ def _code(letter: UInt8) -> Int:
 
 
 struct _Realigned(Movable):
-    """The sequences' alignments to one consensus, as `_Paths.fill` found them, through one aligner. A fill against
+    """The sequences' alignments to one consensus, as `_Paths.fill` found them. A fill against
     the same consensus takes them as they are (an alignment depends on its two sequences alone), and a sequence with
     the letters and anchor of one before it takes that one's (`same_as`): the likelihood rounds mostly start on the
     consensus the edit rounds end on, and the runs on theirs, two thirds of the letters polishing aligned."""
 
-    var aligner: Aligner
     var consensus: List[UInt8]
     var found: List[Optional[Alignment]]
     """Per sequence, its alignment to `consensus`, once found."""
@@ -78,7 +76,6 @@ struct _Realigned(Movable):
     """Per sequence, the first member with its letters and anchor (itself if none before it)."""
 
     def __init__(out self, var same_as: List[Int]):
-        self.aligner = Aligner(warm=False)
         self.consensus = List[UInt8]()
         self.found = List[Optional[Alignment]]()
         self.same_as = same_as^
@@ -135,6 +132,7 @@ struct _Paths(Movable):
 
     def fill(
         mut self,
+        mut aligner: Aligner,
         mut realigned: _Realigned,
         consensus: List[UInt8],
         sequences: List[List[UInt8]],
@@ -181,17 +179,16 @@ struct _Paths(Movable):
                 mode = Mode.SUFFIX
             var first = realigned.same_as[members[k]]
             if not realigned.found[first]:
-                var aligned = realigned.aligner.align(Span(consensus), Span(seq), Costs.edit(), mode, ties=Ties.LEFT)
+                var aligned = aligner.align(Span(consensus), Span(seq), Costs.edit(), mode, ties=Ties.LEFT)
                 # Every consensus letter the read lacks costs the other way at least one: tried only where that
                 # could still win, and searched only as far as the first one's cost.
                 if (anchor == LEFT or anchor == RIGHT) and length - len(seq) < aligned.cost:
-                    var other = past_the_end(realigned.aligner, consensus, seq, anchor == LEFT)
+                    var other = past_the_end(aligner, consensus, seq, anchor == LEFT)
                     if other.cost < aligned.cost:
                         aligned = other^
                 realigned.found[first] = aligned^
             ref found = realigned.found[first].value()
             self.total += w * found.cost
-            var runs = cigar_runs(found.cigar)
             var base = k * self.stride
             var i = found.reference_start
             var j = found.query_start
@@ -201,30 +198,44 @@ struct _Paths(Movable):
             for b in range(i + 1):
                 self.enter[base + b] = Int32(j)
                 self.leave[base + b] = Int32(j)
-            for r in range(len(runs.ops)):
-                var op = runs.ops[r]
-                if op == INSERTION:
-                    self.inserted += w * runs.counts[r]
-                elif op == DELETION:
-                    self.deleted += w * runs.counts[r]
-                elif op == MATCH:
-                    self.matched += w * runs.counts[r]
-                else:
-                    self.substituted += w * runs.counts[r]
-                for _ in range(runs.counts[r]):
-                    if op == INSERTION:
+            var cigar_bytes = found.cigar.as_bytes()
+            var run_n = 0
+            for ci in range(len(cigar_bytes)):
+                var ch = cigar_bytes[ci]
+                if ch >= 48 and ch <= 57:
+                    run_n = run_n * 10 + Int(ch - 48)
+                    continue
+                var n = run_n if run_n > 0 else 1
+                run_n = 0
+                if ch == 73:  # 'I'
+                    self.inserted += w * n
+                    for _ in range(n):
                         if (i > 0 and seq[j] == consensus[i - 1]) or (i < length and seq[j] == consensus[i]):
                             self.copying += w
                         self.discord[i] += Int32(w)
                         j += 1
-                        continue
-                    self.leave[base + i] = Int32(j)
-                    if op != MATCH:
+                elif ch == 68:  # 'D'
+                    self.deleted += w * n
+                    for _ in range(n):
+                        self.leave[base + i] = Int32(j)
                         self.discord[i] += Int32(w)
-                    if op != DELETION:
+                        i += 1
+                        self.enter[base + i] = Int32(j)
+                elif ch == 61 or ch == 77:  # '=' or 'M'
+                    self.matched += w * n
+                    for _ in range(n):
+                        self.leave[base + i] = Int32(j)
                         j += 1
-                    i += 1
-                    self.enter[base + i] = Int32(j)
+                        i += 1
+                        self.enter[base + i] = Int32(j)
+                elif ch == 88:  # 'X'
+                    self.substituted += w * n
+                    for _ in range(n):
+                        self.leave[base + i] = Int32(j)
+                        self.discord[i] += Int32(w)
+                        j += 1
+                        i += 1
+                        self.enter[base + i] = Int32(j)
             self.leave[base + i] = Int32(j)
             for b in range(i + 1, self.stride):
                 self.enter[base + b] = Int32(j)
@@ -364,6 +375,63 @@ def _periods(consensus: List[UInt8], i: Int, s: Int, mut out: List[Int]):
                 return
 
 
+struct PolishScratch(Movable):
+    """Reusable workspace buffers for `polish` across calls."""
+
+    var paths: _Paths
+    var bands: _Bands
+    var backward: List[Int32]
+    var forward: List[Int32]
+    var copied: List[Int32]
+    var ahead: List[Int32]
+    var gains: List[Int32]
+    var site: List[Bool]
+    var periods: List[Int]
+    var block_at: List[Int]
+    var block_period: List[Int]
+    var block_copy: List[Bool]
+    var block_gain: List[Int32]
+    var likely_forward: List[Float64]
+    var likely_slotted: List[Float64]
+    var likely_backward: List[Float64]
+    var likely_forward_scale: List[Float64]
+    var likely_backward_scale: List[Float64]
+    var likely_copied: List[Float64]
+    var likely_ahead: List[Float64]
+    var likely_gains: List[Float64]
+    var likely_block_gain: List[Float64]
+    var lengths: List[Int]
+    var on: List[Int]
+    var which: List[Int]
+
+    def __init__(out self):
+        self.paths = _Paths()
+        self.bands = _Bands()
+        self.backward = List[Int32]()
+        self.forward = List[Int32]()
+        self.copied = List[Int32]()
+        self.ahead = List[Int32]()
+        self.gains = List[Int32]()
+        self.site = List[Bool]()
+        self.periods = List[Int]()
+        self.block_at = List[Int]()
+        self.block_period = List[Int]()
+        self.block_copy = List[Bool]()
+        self.block_gain = List[Int32]()
+        self.likely_forward = List[Float64]()
+        self.likely_slotted = List[Float64]()
+        self.likely_backward = List[Float64]()
+        self.likely_forward_scale = List[Float64]()
+        self.likely_backward_scale = List[Float64]()
+        self.likely_copied = List[Float64]()
+        self.likely_ahead = List[Float64]()
+        self.likely_gains = List[Float64]()
+        self.likely_block_gain = List[Float64]()
+        self.lengths = List[Int]()
+        self.on = List[Int]()
+        self.which = List[Int]()
+
+
 def polish(
     consensus: List[UInt8],
     sequences: List[List[UInt8]],
@@ -384,6 +452,39 @@ def polish(
     errors alone rarely reach half: on real VNTR read sets, 0 to 0.7 mended the same errors). With a `homopolymers`
     model loaded, every run of two letters or more then takes its most likely length (`_runs`), each sequence on its
     strand in `strands` (0, 1 or `STRAND_UNKNOWN`; all unknown when empty)."""
+    var aligner = Aligner(warm=False)
+    var scratch = PolishScratch()
+    return polish_with_scratch(
+        aligner,
+        scratch,
+        consensus,
+        sequences,
+        members,
+        rounds,
+        support,
+        share,
+        likely_rounds,
+        anchors,
+        homopolymers,
+        strands,
+    )
+
+
+def polish_with_scratch(
+    mut aligner: Aligner,
+    mut scratch: PolishScratch,
+    consensus: List[UInt8],
+    sequences: List[List[UInt8]],
+    members: List[Int],
+    rounds: Int,
+    support: Int = 2,
+    share: Float64 = 0.5,
+    likely_rounds: Int = 20,
+    anchors: List[Int] = List[Int](),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+    strands: List[Int] = List[Int](),
+) raises -> List[UInt8]:
+    """As `polish`, reusing `aligner` and `scratch` across calls."""
     var current = consensus.copy()
     if len(members) == 0:
         return current^
@@ -396,11 +497,11 @@ def polish(
     _groups(sequences, members, anchors, unique, weight, same_as)
     var count = len(unique)
     var realigned = _Realigned(same_as^)
-    var paths = _Paths()
+    ref paths = scratch.paths
     # A sequence whose alignment to the consensus is more than `OUTLIER` edits is no noisy copy of it (an empty read
     # between the anchors, another allele's): every round would move toward it, the likelihood model's rates with
     # it, so polishing leaves it out (all are kept when every one is such).
-    paths.fill(realigned, current, sequences, unique, anchors, weight)
+    paths.fill(aligner, realigned, current, sequences, unique, anchors, weight)
     var voters = members.copy()
     var kept = List[Int]()
     var kept_weight = List[Int]()
@@ -421,19 +522,19 @@ def polish(
         for r in members:
             if not outlier[realigned.same_as[r]]:
                 voters.append(r)
-    var bands = _Bands()
-    var backward = List[Int32]()
-    var forward = List[Int32]()
-    var copied = List[Int32]()
-    var ahead = List[Int32]()
-    var gains = List[Int32]()
-    var site = List[Bool]()
-    var periods = List[Int]()
+    ref bands = scratch.bands
+    ref backward = scratch.backward
+    ref forward = scratch.forward
+    ref copied = scratch.copied
+    ref ahead = scratch.ahead
+    ref gains = scratch.gains
+    ref site = scratch.site
+    ref periods = scratch.periods
     # A segment's whole-unit edits: at boundary `block_at`, `block_period` letters deleted or copied.
-    var block_at = List[Int]()
-    var block_period = List[Int]()
-    var block_copy = List[Bool]()
-    var block_gain = List[Int32]()
+    ref block_at = scratch.block_at
+    ref block_period = scratch.block_period
+    ref block_copy = scratch.block_copy
+    ref block_gain = scratch.block_gain
     var dirty = List[Bool](length=len(current) + 1, fill=True)
     var previous = List[UInt8]()
     var previous_dirty = List[Bool]()
@@ -442,7 +543,7 @@ def polish(
     comptime LETTERS = "ACGT"
     var unchecked = False
     for _ in range(rounds):
-        paths.fill(realigned, current, sequences, unique, anchors, weight)
+        paths.fill(aligner, realigned, current, sequences, unique, anchors, weight)
         unchecked = False
         if paths.total >= previous_total:
             # The last round's edits together cost more than they saved: back to before them. Once, then taken one
@@ -720,14 +821,14 @@ def polish(
                 dirty[q] = True
     if unchecked:
         # The last round's edits, past the rounds allowed, kept only if they gained.
-        paths.fill(realigned, current, sequences, unique, anchors, weight)
+        paths.fill(aligner, realigned, current, sequences, unique, anchors, weight)
         if paths.total >= previous_total:
             current = previous^
     if rounds > 0:
-        current = _lengthen_ties(current^, sequences, unique, anchors, weight, realigned, paths)
-    var out = _likely(current^, sequences, voters, likely_rounds, support, share, anchors, realigned)
+        current = _lengthen_ties(aligner, current^, sequences, unique, anchors, weight, realigned, scratch)
+    var out = _likely(aligner, current^, sequences, voters, likely_rounds, support, share, anchors, realigned, scratch)
     if homopolymers.loaded():
-        out = _runs(out^, sequences, voters, anchors, homopolymers, strands, realigned)
+        out = _runs(aligner, out^, sequences, voters, anchors, homopolymers, strands, realigned, scratch)
     return out^
 
 
@@ -792,13 +893,14 @@ def _run_lengths(
 
 
 def _lengthen_ties(
+    mut aligner: Aligner,
     var current: List[UInt8],
     sequences: List[List[UInt8]],
     unique: List[Int],
     anchors: List[Int],
     weight: List[Int],
     mut realigned: _Realigned,
-    mut paths: _Paths,
+    mut scratch: PolishScratch,
 ) raises -> List[UInt8]:
     """Every run of one letter at least `TIE_RUN` long one letter longer where that leaves the sequences' summed
     edit distance as it is. Between the two middle lengths the reads report the sum is flat, and the edit rounds
@@ -806,11 +908,12 @@ def _lengthen_ties(
     nanopore: on HG002 the truth's run was the longer of a tie in 193 of 203 runs a consensus had one short), so a
     tie goes to the longer. The reads' lengths screen the runs (a read the run's length or shorter loses a match
     from one letter more, one longer gains one): only where those balance are the reads aligned again to confirm."""
-    paths.fill(realigned, current, sequences, unique, anchors, weight)
+    ref paths = scratch.paths
+    paths.fill(aligner, realigned, current, sequences, unique, anchors, weight)
     var base = paths.total
-    var lengths = List[Int]()
-    var on = List[Int]()
-    var which = List[Int]()
+    ref lengths = scratch.lengths
+    ref on = scratch.on
+    ref which = scratch.which
     var ties = List[Tuple[Int, Int]]()  # the runs to confirm, (start, end)
     var i = 0
     while i < len(current):
@@ -837,7 +940,7 @@ def _lengthen_ties(
         longer.append(current[start])
         for k in range(end, len(current)):
             longer.append(current[k])
-        paths.fill(realigned, longer, sequences, unique, anchors, weight)
+        paths.fill(aligner, realigned, longer, sequences, unique, anchors, weight)
         if paths.total == base:
             current = longer^
             shift += 1
@@ -845,6 +948,7 @@ def _lengthen_ties(
 
 
 def _runs(
+    mut aligner: Aligner,
     var consensus: List[UInt8],
     sequences: List[List[UInt8]],
     members: List[Int],
@@ -852,6 +956,7 @@ def _runs(
     model: HomopolymerModel,
     strands: List[Int],
     mut realigned: _Realigned,
+    mut scratch: PolishScratch,
 ) raises -> List[UInt8]:
     """Every run of two letters or more in `consensus` at its most likely length under `model`, given the length of
     the run each member reports: the read's letters aligned to the run and inserted at its two ends; a read with
@@ -859,12 +964,12 @@ def _runs(
     than the run's aligned to each flank, does not vote (as shasta2's msa1 repair votes: the reads with the run's
     symbol in its column)."""
     var length = len(consensus)
-    var paths = _Paths()
-    paths.fill(realigned, consensus, sequences, members, anchors)
+    ref paths = scratch.paths
+    paths.fill(aligner, realigned, consensus, sequences, members, anchors)
     var out = List[UInt8](capacity=length + length // 8)
-    var lengths = List[Int]()
-    var on = List[Int]()
-    var which = List[Int]()
+    ref lengths = scratch.lengths
+    ref on = scratch.on
+    ref which = scratch.which
     var s = 0
     while s < length:
         var e = s + 1
@@ -1132,6 +1237,7 @@ def _lengthens_run(consensus: List[UInt8], i: Int, code: Int) -> Bool:
 
 
 def _likely(
+    mut aligner: Aligner,
     var current: List[UInt8],
     sequences: List[List[UInt8]],
     members: List[Int],
@@ -1140,6 +1246,7 @@ def _likely(
     share: Float64,
     anchors: List[Int],
     mut realigned: _Realigned,
+    mut scratch: PolishScratch,
 ) raises -> List[UInt8]:
     """The edits of `polish`, scored by the sequences' summed log-likelihood instead of their edit distance.
 
@@ -1154,28 +1261,28 @@ def _likely(
     var count = len(members)
     if count == 0 or rounds <= 0 or len(current) == 0:
         return current^
-    var paths = _Paths()
-    var bands = _Bands()
-    var forward = List[Float64]()
-    var slotted = List[Float64]()
-    var backward = List[Float64]()
-    var forward_scale = List[Float64]()
-    var backward_scale = List[Float64]()
-    var copied = List[Float64]()
-    var ahead = List[Float64]()
-    var gains = List[Float64]()
-    var site = List[Bool]()
-    var periods = List[Int]()
-    var block_at = List[Int]()
-    var block_period = List[Int]()
-    var block_copy = List[Bool]()
-    var block_gain = List[Float64]()
+    ref paths = scratch.paths
+    ref bands = scratch.bands
+    ref forward = scratch.likely_forward
+    ref slotted = scratch.likely_slotted
+    ref backward = scratch.likely_backward
+    ref forward_scale = scratch.likely_forward_scale
+    ref backward_scale = scratch.likely_backward_scale
+    ref copied = scratch.likely_copied
+    ref ahead = scratch.likely_ahead
+    ref gains = scratch.likely_gains
+    ref site = scratch.site
+    ref periods = scratch.periods
+    ref block_at = scratch.block_at
+    ref block_period = scratch.block_period
+    ref block_copy = scratch.block_copy
+    ref block_gain = scratch.likely_block_gain
     var dirty = List[Bool](length=len(current) + 1, fill=True)
     comptime LETTERS = "ACGT"
     var before = List[UInt8]()
     var run_gain = RUN_GAIN
     for _ in range(rounds):
-        paths.fill(realigned, current, sequences, members, anchors)
+        paths.fill(aligner, realigned, current, sequences, members, anchors)
         if Float64(paths.copying) > MAX_COPYING * Float64(max(1, paths.inserted)):
             break
         var length = len(current)

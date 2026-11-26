@@ -178,16 +178,31 @@ struct Graph(Movable, Sized):
         self.names.append(name)
         return len(self.paths) - 1
 
-    def node_order(self) raises -> List[Int]:
-        """Each node's rank in a topological order of the nodes (Kahn's, lowest node first among the ready)."""
+    def add_twin_path(mut self, name: String, twin_path: Int) -> Int:
+        """Adds a sequence identical to an existing path `twin_path`: increments its edges and appends its node list."""
+        var n = len(self.paths[twin_path])
+        var path = List[Int32](capacity=n)
+        for j in range(n):
+            var node = Int(self.paths[twin_path][j])
+            if j > 0:
+                self._link(Int(path[j - 1]), node)
+            path.append(Int32(node))
+        self.paths.append(path^)
+        self.names.append(name)
+        return len(self.paths) - 1
+
+    def node_order_into(self, mut rank: List[Int], mut incoming: List[Int32], mut ready: List[Int]) raises:
+        """Writes each node's topological rank into `rank`, reusing `incoming` and `ready`."""
         var count = len(self.bases)
-        var incoming = List[Int32](capacity=count)
-        var ready = List[Int]()
+        incoming.resize(count, 0)
+        ready.clear()
+        rank.resize(count, -1)
         for node in range(count):
-            incoming.append(self.in_degree[node])
-            if self.in_degree[node] == 0:
+            var deg = self.in_degree[node]
+            incoming[node] = deg
+            rank[node] = -1
+            if deg == 0:
                 ready.append(node)
-        var rank = List[Int](length=count, fill=-1)
         var next = 0
         var head = 0
         while head < len(ready):
@@ -204,6 +219,13 @@ struct Graph(Movable, Sized):
                 e = Int(self.next_out[e])
         if next != count:
             raise Error(t"the nodes form a cycle: {count - next} of {count} unplaced")
+
+    def node_order(self) raises -> List[Int]:
+        """Each node's rank in a topological order of the nodes (Kahn's, lowest node first among the ready)."""
+        var rank = List[Int]()
+        var incoming = List[Int32]()
+        var ready = List[Int]()
+        self.node_order_into(rank, incoming, ready)
         return rank^
 
     @staticmethod

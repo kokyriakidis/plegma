@@ -17,12 +17,12 @@ from std.math import log10
 from karan import Aligner, Alignment, Costs, Mode, Ties
 
 from .clusters import cluster_rows
-from .consensus import ConsensusOptions, consensus
+from .consensus import ConsensusOptions, ConsensusScratch, consensus
 from .graph import Graph
 from .alphabet import encode_base
 from .homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from .kernel import BOTH, INSIDE, LEFT, RIGHT, Scoring
-from .poa import poa
+from .poa import poa_with_scratch
 
 
 comptime RUN_PAIR_COSTS = Costs(4, 6, 2, -1, 0)
@@ -111,6 +111,7 @@ def _aligned(
 
 
 def _consensus_of(
+    mut scratch: ConsensusScratch,
     seqs: List[List[UInt8]],
     reads: List[Int],
     anchors: List[Int],
@@ -126,7 +127,7 @@ def _consensus_of(
         mine.append(seqs[r].copy())
         mine_anchors.append(anchors[r])
         mine_strands.append(strands[r])
-    var parts = consensus(mine^, mine_anchors, mine_strands, options, homopolymers)
+    var parts = consensus(scratch, mine^, mine_anchors, mine_strands, options, homopolymers)
     if len(parts) > 1 and len(parts[1]) > len(parts[0]):
         return parts[1].copy()
     return parts[0].copy()
@@ -211,7 +212,7 @@ def _run_pairs(
     # Gaps opened at a cost, so an indel of several letters stays one gap: at unit costs a repeat unit the two differ
     # by can split into a letter dropped from a run beside the repeat and the rest further on (HG002 chr20:21,208,762,
     # one TG of (TG)n: read as one T of the TTT before it and a G, both haplotypes then cut to TT).
-    var cigar = String()
+    var cigar: String
     try:
         cigar = aligner.align(Span(a), Span(b), RUN_PAIR_COSTS, Mode.GLOBAL, ties=Ties.LEFT).cigar
     except:
@@ -550,7 +551,12 @@ def _run_at(seq: List[UInt8], i: Int) -> Int:
 
 
 def _first_split(
-    seqs: List[List[UInt8]], spanning: List[Int], max_clusters: Int, min_freq: Float64, options: ConsensusOptions
+    mut scratch: ConsensusScratch,
+    seqs: List[List[UInt8]],
+    spanning: List[Int],
+    max_clusters: Int,
+    min_freq: Float64,
+    options: ConsensusOptions,
 ) raises -> List[List[Int]]:
     """The spanning reads split as `cluster_rows` splits their MSA's rows (one cluster when it finds no split)."""
     var names = List[String](capacity=len(spanning))
@@ -558,7 +564,9 @@ def _first_split(
     for r in spanning:
         names.append(String(t"r{r}"))
         mine.append(seqs[r].copy())
-    var made = poa(names, mine, List[Int](length=len(spanning), fill=BOTH), options.poa, Graph())
+    var made = poa_with_scratch(
+        names, mine, List[Int](length=len(spanning), fill=BOTH), options.poa, Graph(), scratch.poa, scratch.aligner
+    )
     var by_path = made.graph.msa()
     var rows = List[String](capacity=len(spanning))
     for k in range(len(spanning)):
@@ -586,6 +594,21 @@ def clustered_consensus(
     it and made as `consensus` makes one, a cluster kept apart only with at least `min_freq` of the reads that make
     consensus sequences; and every read's alignment to its cluster's consensus (at `options.poa.scoring`'s costs,
     gaps leftmost). With one cluster, or none found, the consensus of every read."""
+    var scratch = ConsensusScratch()
+    return clustered_consensus(scratch, seqs^, anchors, strands, max_clusters, min_freq, options, homopolymers)
+
+
+def clustered_consensus(
+    mut scratch: ConsensusScratch,
+    var seqs: List[List[UInt8]],
+    anchors: List[Int] = List[Int](),
+    strands: List[Int] = List[Int](),
+    max_clusters: Int = 2,
+    min_freq: Float64 = 0.25,
+    options: ConsensusOptions = ConsensusOptions(),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+) raises -> Clustered:
+    """As `clustered_consensus`, reusing `scratch` across calls."""
     var n = len(seqs)
     if max_clusters < 1:
         raise Error(t"max_clusters {max_clusters}: must be 1 or more")
@@ -620,7 +643,7 @@ def clustered_consensus(
             if build_anchor[r] == BOTH:
                 spanning.append(r)
         if len(spanning) >= 2:
-            groups = _first_split(seqs, spanning, max_clusters, min_freq, options)
+            groups = _first_split(scratch, seqs, spanning, max_clusters, min_freq, options)
     if len(groups) <= 1:
         groups = [builders.copy()]
     var costs = alignment_costs(options.poa.scoring)
@@ -630,10 +653,10 @@ def clustered_consensus(
     # letter: HG002 chr20:56,892,630, G in a poly-T on 28 of 62 reads: the G cluster came to hold one T-run length's
     # reads instead, its consensus lost the G, and the two merged as apart by a run alone (written G on both).
     var moving = MOVING_COSTS
-    var aligner = Aligner(warm=False)
+    ref aligner = scratch.aligner
     var made = List[List[UInt8]]()
     for g in groups:
-        made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
+        made.append(_consensus_of(scratch, seqs, g, build_anchor, strand_of, options, homopolymers))
     if len(groups) >= 2:
         var floor = max(1, Int(min_freq * Float64(len(builders)) + 0.999999))
         var label = List[Int](length=n, fill=-1)
@@ -674,14 +697,14 @@ def clustered_consensus(
                         label[r] = k
                 made.clear()
                 for g in groups:
-                    made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
+                    made.append(_consensus_of(scratch, seqs, g, build_anchor, strand_of, options, homopolymers))
                 continue
             if not moved:
                 break
             groups = next^
             made.clear()
             for g in groups:
-                made.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers))
+                made.append(_consensus_of(scratch, seqs, g, build_anchor, strand_of, options, homopolymers))
         # A read of a cluster dropped in the last round joins the consensus it differs from least.
         if len(groups) >= 2:
             var placed = List[Bool](length=n, fill=False)
@@ -799,12 +822,12 @@ def clustered_consensus(
                     parts += 1
             made_merged.append(
                 made[k].copy() if parts
-                == 1 else _consensus_of(seqs, members, build_anchor, strand_of, options, homopolymers)
+                == 1 else _consensus_of(scratch, seqs, members, build_anchor, strand_of, options, homopolymers)
             )
             merged.append(members^)
         if len(groups) <= 1 or len(merged) <= 1:
             groups = [builders.copy()]
-            made = [_consensus_of(seqs, builders, build_anchor, strand_of, options, homopolymers)]
+            made = [_consensus_of(scratch, seqs, builders, build_anchor, strand_of, options, homopolymers)]
         else:
             groups = merged^
             made = made_merged^
@@ -1259,6 +1282,20 @@ def phased_consensus(
     when that explains the reads `options.two_lengths_db` better than one length for both, else that one length in
     both (a run is far more often the same on the two haplotypes than not). Two clusters always, the
     second's consensus the first's when no read is on haplotype 1."""
+    var scratch = ConsensusScratch()
+    return phased_consensus(scratch, seqs^, haplotypes, anchors, strands, options, homopolymers)
+
+
+def phased_consensus(
+    mut scratch: ConsensusScratch,
+    var seqs: List[List[UInt8]],
+    haplotypes: List[Int],
+    anchors: List[Int] = List[Int](),
+    strands: List[Int] = List[Int](),
+    options: ConsensusOptions = ConsensusOptions(),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+) raises -> Clustered:
+    """As `phased_consensus`, reusing `scratch` across calls."""
     var n = len(seqs)
     if len(haplotypes) != n:
         raise Error(t"{len(haplotypes)} haplotypes for {n} sequences")
@@ -1281,14 +1318,14 @@ def phased_consensus(
     var made = List[List[UInt8]]()
     for k in range(2):
         made.append(
-            _consensus_of(seqs, groups[k], anchor_of, strand_of, options, homopolymers) if len(groups[k])
+            _consensus_of(scratch, seqs, groups[k], anchor_of, strand_of, options, homopolymers) if len(groups[k])
             > 0 else (List[UInt8]())
         )
     if len(made[1]) == 0 and len(groups[1]) == 0:
         made[1] = made[0].copy()
     if len(made[0]) == 0 and len(groups[0]) == 0:
         made[0] = made[1].copy()
-    var aligner = Aligner(warm=False)
+    ref aligner = scratch.aligner
     # Reads of neither haplotype build too: each joins the haplotype whose letters it carries where the two differ,
     # or both where it covers no such place, and the two are made again. Left out of building, they left a haplotype
     # pieced together from its few labelled reads wherever pgphase's phase set ends inside the window: HG002's
@@ -1313,7 +1350,7 @@ def phased_consensus(
                     grew[k] = True
         for k in range(2):
             if grew[k]:
-                made[k] = _consensus_of(seqs, groups[k], anchor_of, strand_of, options, homopolymers)
+                made[k] = _consensus_of(scratch, seqs, groups[k], anchor_of, strand_of, options, homopolymers)
     # Each run the two differ by is decided on both haplotypes' reads together, whatever else the two differ by.
     var runs0 = List[Int]()
     var runs1 = List[Int]()

@@ -50,7 +50,7 @@ is implementation and may change.
 from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
 from .clustered import Clustered, Placement, alignment_costs, clustered_consensus, phased_consensus
 from .clusters import cluster_rows
-from .consensus import ConsensusOptions, consensus
+from .consensus import ConsensusOptions, ConsensusScratch, consensus
 from .graph import Graph, Runs, cigar_runs
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import (

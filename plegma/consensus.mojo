@@ -9,9 +9,11 @@ spans both anchors and the two sides could not be joined, the left side's and th
 
 from .graph import Graph
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
-from .kernel import BOTH, GLOBAL, INSIDE, LEFT, RIGHT, Topology
-from .poa import PoaOptions, poa
-from .polish import polish
+from .kernel import BOTH, GLOBAL, INSIDE, LEFT, RIGHT
+from karan import Aligner
+
+from .poa import PoaOptions, _Aligner, poa_with_scratch
+from .polish import PolishScratch, polish_with_scratch
 
 
 def _check(count: Int, anchors: List[Int], strands: List[Int]) raises:
@@ -54,6 +56,19 @@ struct ConsensusOptions(Copyable, Movable):
         self.two_lengths_db = 15.0
 
 
+struct ConsensusScratch(Movable):
+    """Reusable scratch buffers for `consensus`, `clustered_consensus`, and `phased_consensus` across calls."""
+
+    var poa: _Aligner
+    var aligner: Aligner
+    var polish: PolishScratch
+
+    def __init__(out self):
+        self.poa = _Aligner()
+        self.aligner = Aligner(warm=False)
+        self.polish = PolishScratch()
+
+
 def consensus(
     var seqs: List[List[UInt8]],
     anchors: List[Int] = List[Int](),
@@ -66,12 +81,25 @@ def consensus(
     all `BOTH`) and on `strands`' strand (0, 1 or `STRAND_UNKNOWN`, for
     `homopolymers`; empty: all unknown), as `plegma poa -r 0` writes it (with `-H` when `homopolymers` is loaded).
     Raises on anchors or strands of another length than `seqs`, or values outside those."""
+    var scratch = ConsensusScratch()
+    return consensus(scratch, seqs^, anchors, strands, options, homopolymers)
+
+
+def consensus(
+    mut scratch: ConsensusScratch,
+    var seqs: List[List[UInt8]],
+    anchors: List[Int] = List[Int](),
+    strands: List[Int] = List[Int](),
+    options: ConsensusOptions = ConsensusOptions(),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+) raises -> List[List[UInt8]]:
+    """As `consensus`, reusing `scratch` across calls."""
     _check(len(seqs), anchors, strands)
     if len(seqs) == 0:
         return [List[UInt8]()]
     if len(anchors) == 0:
         var all_spanning = List[Int](length=len(seqs), fill=BOTH)
-        return consensus(seqs^, all_spanning, strands, options, homopolymers)
+        return consensus(scratch, seqs^, all_spanning, strands, options, homopolymers)
     if INSIDE in anchors:
         # Reads covering neither anchor place no letter at either end: the others make the consensus.
         var kept = List[List[UInt8]]()
@@ -83,11 +111,11 @@ def consensus(
                 kept_anchors.append(anchors[r])
                 if len(strands) > 0:
                     kept_strands.append(strands[r])
-        return consensus(kept^, kept_anchors, kept_strands, options, homopolymers)
+        return consensus(scratch, kept^, kept_anchors, kept_strands, options, homopolymers)
     var names = List[String](capacity=len(seqs))
     for k in range(len(seqs)):
         names.append(String(t"r{k}"))
-    var made = poa(names, seqs, anchors, options.poa, Graph())
+    var made = poa_with_scratch(names, seqs, anchors, options.poa, Graph(), scratch.poa, scratch.aligner)
     var polishing = options.polish_rounds > 0 or options.likely_rounds > 0 or homopolymers.loaded()
     polishing = polishing and options.poa.mode == GLOBAL
     if len(made.consensus) > 0:
@@ -102,7 +130,9 @@ def consensus(
                 f += 1
                 continue
             members.append(r)
-        var polished = polish(
+        var polished = polish_with_scratch(
+            scratch.aligner,
+            scratch.polish,
             made.consensus[0],
             seqs,
             members,
@@ -115,14 +145,16 @@ def consensus(
         return [polished^]
     # Every read spanning: the heaviest bundle over every path, polished against every read.
     var letters = List[UInt8]()
-    for node in made.graph.heaviest_path(Topology(made.graph).order, made.shown):
+    for node in made.graph.heaviest_path(scratch.poa.order_of(made.graph), made.shown):
         letters.append(made.graph.bases[node])
     if not polishing:
         return [letters^]
     var members = List[Int]()
     for r in range(len(seqs)):
         members.append(r)
-    var polished = polish(
+    var polished = polish_with_scratch(
+        scratch.aligner,
+        scratch.polish,
         letters,
         seqs,
         members,

@@ -143,16 +143,28 @@ struct Poa(Movable):
 
 
 struct _Aligner(Movable):
-    """One read at a time into a graph: the scratch the kernel and the pinned windows reuse."""
+    """One read at a time into a graph: the scratch the kernel, topology, and pinned windows reuse."""
 
     var row_of: List[Int]
     var scratch: WindowScratch
     var workspace: Workspace
+    var topology: Topology
+    var topo_in: List[Int32]
+    var topo_ready: List[Int]
+    var topo_full: List[Int]
 
     def __init__(out self):
         self.row_of = List[Int]()
         self.scratch = WindowScratch()
         self.workspace = Workspace()
+        self.topology = Topology()
+        self.topo_in = List[Int32]()
+        self.topo_ready = List[Int]()
+        self.topo_full = List[Int]()
+
+    def order_of(mut self, graph: Graph) raises -> ref[self.topology.order] List[Int]:
+        self.topology.compute(graph, self.topo_in, self.topo_ready)
+        return self.topology.order
 
     def align(
         mut self, graph: Graph, seq: List[UInt8], options: PoaOptions, mode: Int, anchors: List[Int] = List[Int]()
@@ -162,11 +174,13 @@ struct _Aligner(Movable):
         their ends alone (`_between`)."""
         self.row_of.resize(len(graph), -1)
         if not options.seeded and len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX):
-            var part = Topology(graph, _between(graph, anchors, mode))
+            self.topology.compute_allowed(
+                graph, _between(graph, anchors, mode), self.topo_in, self.topo_ready, self.topo_full
+            )
             return self.workspace.align(
                 graph,
-                part,
-                part.order,
+                self.topology,
+                self.topology.order,
                 SOURCE,
                 SINK,
                 Span(seq),
@@ -177,11 +191,11 @@ struct _Aligner(Movable):
                 options.band_f,
                 options.band_max,
             )
-        var topology = Topology(graph)
+        self.topology.compute(graph, self.topo_in, self.topo_ready)
         if options.seeded and (mode == GLOBAL or mode == PREFIX or mode == SUFFIX):
             return align_pinned(
                 graph,
-                topology,
+                self.topology,
                 seq,
                 options.scoring,
                 options.band_b,
@@ -193,8 +207,8 @@ struct _Aligner(Movable):
             )
         return self.workspace.align(
             graph,
-            topology,
-            topology.order,
+            self.topology,
+            self.topology.order,
             SOURCE,
             SINK,
             Span(seq),
@@ -217,6 +231,21 @@ def poa(
     """The POA of `seqs` (`names` theirs), each anchored as `anchors` says (`BOTH`, `LEFT` or `RIGHT`), into
     `start` (a graph made from an existing MSA, or empty). With `options.strand` a spanning read that scores poorly
     may be reverse-complemented (it and its name then change in `seqs` and `names`)."""
+    var aligner = _Aligner()
+    var karan_aligner = Aligner(warm=False)
+    return poa_with_scratch(names, seqs, anchors, options, start^, aligner, karan_aligner)
+
+
+def poa_with_scratch(
+    mut names: List[String],
+    mut seqs: List[List[UInt8]],
+    anchors: List[Int],
+    options: PoaOptions,
+    var start: Graph,
+    mut aligner: _Aligner,
+    mut karan_aligner: Aligner,
+) raises -> Poa:
+    """As `poa`, reusing `aligner` and `karan_aligner` across calls."""
     var spanning = List[Int]()
     var left = List[Int]()
     var right = List[Int]()
@@ -232,7 +261,6 @@ def poa(
     for p in range(starting):
         shown.append(p)
     var path_of = List[Int](length=len(seqs), fill=-1)
-    var aligner = _Aligner()
     var graph = start^
     if len(spanning) > 0 or len(graph.paths) > 0:
         _add_spanning(graph, names, seqs, _ordered(seqs, spanning, options.order), options, path_of, aligner)
@@ -244,15 +272,15 @@ def poa(
             members.append(path_of[r])
         var foreign = List[Int]()
         if len(spanning) >= FOREIGN_SPANNING and len(left) + len(right) > 0:
-            var core = _letters(graph, graph.heaviest_path_spanning(Topology(graph).order, members))
-            foreign = _foreign(core, seqs, spanning, left, right)
+            var core = _letters(graph, graph.heaviest_path_spanning(aligner.order_of(graph), members))
+            foreign = _foreign(karan_aligner, core, seqs, spanning, left, right)
         var kept_left = _without(left, foreign)
         var kept_right = _without(right, foreign)
         _add_anchored(graph, names, seqs, _longest_first(seqs, kept_left), options, PREFIX, path_of, aligner, members)
         _add_anchored(graph, names, seqs, _longest_first(seqs, kept_right), options, SUFFIX, path_of, aligner, members)
         var consensus = List[List[UInt8]]()
         if len(left) + len(right) > 0:
-            consensus.append(_letters(graph, graph.heaviest_path_spanning(Topology(graph).order, members)))
+            consensus.append(_letters(graph, graph.heaviest_path_spanning(aligner.order_of(graph), members)))
         # Another copy's reads in the graph too (the MSA shows every read), once the consensus is taken.
         _add_anchored(
             graph,
@@ -285,11 +313,11 @@ def poa(
     # No read spans both anchors: each side on its own, then joined.
     var parts = List[List[UInt8]]()
     if len(left) > 0:
-        var side = _one_side(names, seqs, left, options, PREFIX)
-        parts.append(_letters(side[0], side[0].heaviest_path(Topology(side[0]).order, side[1])))
+        var side = _one_side(names, seqs, left, options, PREFIX, aligner)
+        parts.append(_letters(side[0], side[0].heaviest_path(aligner.order_of(side[0]), side[1])))
     if len(right) > 0:
-        var side = _one_side(names, seqs, right, options, SUFFIX)
-        parts.append(_letters(side[0], side[0].heaviest_path_backward(Topology(side[0]).order, side[1])))
+        var side = _one_side(names, seqs, right, options, SUFFIX, aligner)
+        parts.append(_letters(side[0], side[0].heaviest_path_backward(aligner.order_of(side[0]), side[1])))
     if len(parts) == 2:
         var left_reach = List[Int](capacity=len(left))
         for r in left:
@@ -297,7 +325,7 @@ def poa(
         var right_reach = List[Int](capacity=len(right))
         for r in right:
             right_reach.append(len(seqs[r]))
-        var joined = _join(parts[0], parts[1], left_reach, right_reach)
+        var joined = _join(karan_aligner, parts[0], parts[1], left_reach, right_reach)
         if len(joined) > 0:
             parts.clear()
             parts.append(joined^)
@@ -314,7 +342,7 @@ def poa(
         # The consensus again from the graph every read voted in, between the assembled sequence's ends (its path one
         # vote among the reads'): the reads mend what joining or one side's graph got wrong.
         parts[0] = _letters(
-            graph, graph.heaviest_path_spanning(Topology(graph).order, backbone, len(left) > 0 and len(right) > 0)
+            graph, graph.heaviest_path_spanning(aligner.order_of(graph), backbone, len(left) > 0 and len(right) > 0)
         )
         # One side alone: the reads going on past the cut carry the walk past it again.
         if len(right) == 0:
@@ -339,12 +367,16 @@ def poa(
 
 
 def _foreign(
-    core: List[UInt8], seqs: List[List[UInt8]], spanning: List[Int], left: List[Int], right: List[Int]
+    mut aligner: Aligner,
+    core: List[UInt8],
+    seqs: List[List[UInt8]],
+    spanning: List[Int],
+    left: List[Int],
+    right: List[Int],
 ) raises -> List[Int]:
     """The reads of `left` and `right` (anchored at the left or the right end) another copy's: further from `core`,
     the spanning reads' consensus, than `FOREIGN_RATIO` times the worst spanning read's rate over the letters each
     covers, plus `FOREIGN_SLACK`. Edit distances; a one-sided read's as the polisher aligns it."""
-    var aligner = Aligner(warm=False)
     var worst = 0.0
     for r in spanning:
         var found = aligner.align(Span(core), Span(seqs[r]), Costs.edit(), Mode.GLOBAL)
@@ -447,10 +479,7 @@ def _twin(
     var twin = seen.get(key, -1)
     if twin < 0:
         return False
-    var nodes = List[Int](capacity=len(seqs[r]))
-    for node in graph.paths[path_of[twin]]:
-        nodes.append(Int(node))
-    path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), nodes)
+    path_of[r] = graph.add_twin_path(names[r], path_of[twin])
     return True
 
 
@@ -509,13 +538,17 @@ def _between(graph: Graph, anchors: List[Int], mode: Int) -> List[Bool]:
 
 
 def _one_side(
-    names: List[String], seqs: List[List[UInt8]], reads: List[Int], options: PoaOptions, mode: Int
+    names: List[String],
+    seqs: List[List[UInt8]],
+    reads: List[Int],
+    options: PoaOptions,
+    mode: Int,
+    mut aligner: _Aligner,
 ) raises -> Tuple[Graph, List[Int]]:
     """The graph of one side's reads alone: the longest first, the rest anchored as `mode` says; with its paths."""
     var graph = Graph()
     var order = _longest_first(seqs, reads)
     var paths = List[Int]()
-    var aligner = _Aligner()
     for k in range(len(order)):
         var r = order[k]
         if k == 0:
@@ -557,7 +590,9 @@ def _support(reach: List[Int], at: Int) -> Int:
     return n
 
 
-def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_reach: List[Int]) raises -> List[UInt8]:
+def _join(
+    mut aligner: Aligner, left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_reach: List[Int]
+) raises -> List[UInt8]:
     """`left` and `right` (the two sides' consensus sequences) joined where `right`'s start overlaps `left`'s end: at
     a pin of minimap2's chain between them whose 19-mer is unique in both (a tandem array's copies may chain to the
     wrong copy), when they place `right` starting inside `left` and reaching past its end by an overlap of
@@ -609,7 +644,6 @@ def _join(left: List[UInt8], right: List[UInt8], left_reach: List[Int], right_re
     for j in range(min(len(right), JOIN_ENDS)):
         b.append(right[j])
     var mode = Mode.ends_free(reference_start=len(a), query_end=len(b)).with_match_score(1)
-    var aligner = Aligner(warm=False)
     # Edits far dearer than a match earns (minimap2's 19 to 1): a longer overlap shifted by tandem copies, its letters
     # a few percent apart, loses to the true one, its letters as alike as the two consensus sequences.
     var got = aligner.align(Span(a), Span(b), Costs.linear(JOIN_EDIT, JOIN_EDIT), mode)
