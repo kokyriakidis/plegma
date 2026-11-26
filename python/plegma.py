@@ -18,6 +18,7 @@ import os
 __all__ = [
     "Error",
     "Model",
+    "Scratch",
     "Clustered",
     "Placement",
     "consensus",
@@ -62,6 +63,7 @@ class _Options(ctypes.Structure):
         ("band_max", ctypes.c_int32),
         ("noise_run", ctypes.c_int32),
         ("two_lengths_db", ctypes.c_float),
+        ("threads", ctypes.c_int32),
     ]
 
 
@@ -97,16 +99,10 @@ def _library():
     lib.plegma_model_parse.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]
     lib.plegma_model_free.restype = None
     lib.plegma_model_free.argtypes = [p]
-    lib.plegma_consensus.restype = p
-    lib.plegma_consensus.argtypes = [
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_char_p),
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.POINTER(ctypes.c_int32),
-        ctypes.POINTER(ctypes.c_int32),
-        p,
-        ctypes.POINTER(_Options),
-    ]
+    lib.plegma_scratch_create.restype = p
+    lib.plegma_scratch_create.argtypes = []
+    lib.plegma_scratch_free.restype = None
+    lib.plegma_scratch_free.argtypes = [p]
     reads_args = [
         ctypes.c_size_t,
         ctypes.POINTER(ctypes.c_char_p),
@@ -114,10 +110,22 @@ def _library():
         ctypes.POINTER(ctypes.c_int32),
         ctypes.POINTER(ctypes.c_int32),
     ]
+    lib.plegma_consensus.restype = p
+    lib.plegma_consensus.argtypes = reads_args + [p, ctypes.POINTER(_Options)]
+    lib.plegma_consensus_with_scratch.restype = p
+    lib.plegma_consensus_with_scratch.argtypes = [p] + reads_args + [p, ctypes.POINTER(_Options)]
     lib.plegma_clustered_consensus.restype = p
     lib.plegma_clustered_consensus.argtypes = reads_args + [p, ctypes.POINTER(_Options), ctypes.c_int32, ctypes.c_float]
+    lib.plegma_clustered_consensus_with_scratch.restype = p
+    lib.plegma_clustered_consensus_with_scratch.argtypes = (
+        [p] + reads_args + [p, ctypes.POINTER(_Options), ctypes.c_int32, ctypes.c_float]
+    )
     lib.plegma_phased_consensus.restype = p
     lib.plegma_phased_consensus.argtypes = reads_args + [ctypes.POINTER(ctypes.c_int32), p, ctypes.POINTER(_Options)]
+    lib.plegma_phased_consensus_with_scratch.restype = p
+    lib.plegma_phased_consensus_with_scratch.argtypes = (
+        [p] + reads_args + [ctypes.POINTER(ctypes.c_int32), p, ctypes.POINTER(_Options)]
+    )
     lib.plegma_result_members.restype = ctypes.c_size_t
     lib.plegma_result_members.argtypes = [p, ctypes.c_size_t, ctypes.POINTER(ctypes.POINTER(ctypes.c_int32))]
     lib.plegma_result_cigar.restype = ctypes.c_char_p
@@ -167,6 +175,27 @@ class Model:
     def close(self):
         if self._handle:
             _lib.plegma_model_free(self._handle)
+            self._handle = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
+
+class Scratch:
+    """Reusable scratch buffers for consensus calls (one per thread; use as a context manager or call `close()`)."""
+
+    def __init__(self):
+        self._handle = _lib.plegma_scratch_create()
+
+    def close(self):
+        if self._handle:
+            _lib.plegma_scratch_free(self._handle)
             self._handle = None
 
     def __enter__(self):
@@ -239,18 +268,19 @@ def _parts(result):
     return parts
 
 
-def consensus(reads, anchors=None, strands=None, model=None, **options):
+def consensus(reads, anchors=None, strands=None, model=None, scratch=None, **options):
     """The consensus of `reads` (str or bytes; A, C, G, T), as `plegma poa -r 0` writes it: a list of one sequence,
     or of the left and the right side when no read spans both anchors and the two could not be joined.
 
     anchors: per read "both", "left" or "right" (or BOTH, LEFT, RIGHT); None: all spanning. strands: per read 0, 1
-    or None (unknown), for the homopolymer model; None: all unknown. model: a Model. options: plegma_options' fields
-    by name (polish_rounds, likely_rounds, pinned, min_cover, match, mismatch, gap_open1, gap_extend1, gap_open2,
-    gap_extend2, band_b, band_f, band_max, noise_run, two_lengths_db; see capi/plegma.h), plegma poa's defaults
-    otherwise.
+    or None (unknown), for the homopolymer model; None: all unknown. model: a Model. scratch: an optional Scratch
+    reused across calls. options: plegma_options' fields by name (polish_rounds, likely_rounds, pinned, min_cover,
+    match, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2, band_b, band_f, band_max, noise_run,
+    two_lengths_db, threads; see capi/plegma.h), plegma poa's defaults otherwise.
     """
     given = _Reads(reads, anchors, strands, model, options, "consensus")
-    result = _lib.plegma_consensus(*given.head(), given.model, ctypes.byref(given.settings))
+    scratch_h = scratch._handle if scratch is not None else None
+    result = _lib.plegma_consensus_with_scratch(scratch_h, *given.head(), given.model, ctypes.byref(given.settings))
     try:
         return _parts(result)
     finally:
@@ -300,14 +330,17 @@ class Clustered:
         return f"Clustered({len(self.consensus)} clusters, {[len(m) for m in self.members]} reads)"
 
 
-def clustered_consensus(reads, anchors=None, strands=None, model=None, max_clusters=2, min_freq=0.25, **options):
+def clustered_consensus(
+    reads, anchors=None, strands=None, model=None, max_clusters=2, min_freq=0.25, scratch=None, **options
+):
     """Several consensus sequences of `reads` (haplotypes, as a diploid caller asks abPOA's -d for): at most
     `max_clusters`, each the consensus of the reads nearest it, a cluster with under `min_freq` of the reads joining
     another. Reads, anchors (also "inside": a read on neither anchor, aligned within a cluster's consensus), strands,
-    model and options as `consensus` takes them. A Clustered."""
+    model, scratch and options as `consensus` takes them. A Clustered."""
     given = _Reads(reads, anchors, strands, model, options, "clustered_consensus")
-    result = _lib.plegma_clustered_consensus(
-        *given.head(), given.model, ctypes.byref(given.settings), int(max_clusters), float(min_freq)
+    scratch_h = scratch._handle if scratch is not None else None
+    result = _lib.plegma_clustered_consensus_with_scratch(
+        scratch_h, *given.head(), given.model, ctypes.byref(given.settings), int(max_clusters), float(min_freq)
     )
     try:
         return Clustered(result, given.count)
@@ -315,7 +348,7 @@ def clustered_consensus(reads, anchors=None, strands=None, model=None, max_clust
         _lib.plegma_result_free(result)
 
 
-def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, **options):
+def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, scratch=None, **options):
     """The two haplotypes' consensus sequences of reads already phased: `haplotypes` per read 0 or 1 (-1 or None:
     neither, which builds on the haplotype whose letters it carries where the two differ, on both where it covers no
     such place, on neither where it carries as many of each, and is placed where it fits best). Where the two differ
@@ -326,7 +359,10 @@ def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, 
     if len(haplotypes) != given.count:
         raise ValueError(f"{len(haplotypes)} haplotypes for {given.count} reads")
     haps = _int32s([-1 if h is None else int(h) for h in haplotypes], "haplotype")
-    result = _lib.plegma_phased_consensus(*given.head(), haps, given.model, ctypes.byref(given.settings))
+    scratch_h = scratch._handle if scratch is not None else None
+    result = _lib.plegma_phased_consensus_with_scratch(
+        scratch_h, *given.head(), haps, given.model, ctypes.byref(given.settings)
+    )
     try:
         return Clustered(result, given.count)
     finally:

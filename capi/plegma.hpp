@@ -18,7 +18,7 @@
 
 namespace plegma {
 
-static_assert(sizeof(plegma_options) == 64, "plegma_options laid out as the library reads it");
+static_assert(sizeof(plegma_options) == 68, "plegma_options laid out as the library reads it");
 
 enum class Anchor : std::int32_t {
     Both = PLEGMA_ANCHOR_BOTH,
@@ -69,6 +69,7 @@ struct Options {
     }
     Options& noiseRun(std::int32_t run) { values.noise_run = run; return *this; }
     Options& twoLengthsDb(float db) { values.two_lengths_db = db; return *this; }
+    Options& threads(std::int32_t count) { values.threads = count; return *this; }
     Options& band(std::int32_t b, float f, std::int32_t max = 64)
     {
         values.band_b = b;
@@ -111,10 +112,24 @@ private:
     explicit Model(plegma_model* model) : model(model) {}
 };
 
+// Reusable scratch buffers for consensus calls: create one per worker thread and pass to consensus(),
+// clusteredConsensus(), or phasedConsensus() to avoid reallocating buffers across windows.
+class Scratch {
+public:
+    Scratch() : scratch(plegma_scratch_create()) {}
+    plegma_scratch* get() const { return scratch.get(); }
+
+private:
+    struct Free {
+        void operator()(plegma_scratch* s) const { plegma_scratch_free(s); }
+    };
+    std::unique_ptr<plegma_scratch, Free> scratch;
+};
+
 // The consensus of the reads, as plegma poa -r 0 writes it (with -H when a model is given): one part, or the left and
 // the right side when no read spans both anchors and the two could not be joined.
 inline std::vector<std::string> consensus(const std::vector<Read>& reads, const Model* model = nullptr,
-                                          const Options& options = Options())
+                                          const Options& options = Options(), Scratch* scratch = nullptr)
 {
     std::vector<const std::uint8_t*> sequences;
     std::vector<std::size_t> lengths;
@@ -131,8 +146,9 @@ inline std::vector<std::string> consensus(const std::vector<Read>& reads, const 
         strands.push_back(static_cast<std::int32_t>(read.strand));
     }
     std::unique_ptr<plegma_result, void (*)(plegma_result*)> result(
-        plegma_consensus(reads.size(), sequences.data(), lengths.data(), anchors.data(), strands.data(),
-                         model ? model->get() : nullptr, &options.values),
+        plegma_consensus_with_scratch(scratch ? scratch->get() : nullptr, reads.size(), sequences.data(),
+                                      lengths.data(), anchors.data(), strands.data(), model ? model->get() : nullptr,
+                                      &options.values),
         plegma_result_free);
     if (const char* error = plegma_result_error(result.get())) {
         throw std::runtime_error(std::string("plegma: ") + error);
@@ -204,7 +220,8 @@ inline Clustering clustering(plegma_result* raw, std::size_t count)
 // At most maxClusters consensus sequences of the reads (haplotypes, abPOA's -d), each from the reads nearest it, a
 // cluster kept apart only with at least minFreq of the reads (see plegma_clustered_consensus).
 inline Clustering clusteredConsensus(const std::vector<Read>& reads, const Model* model = nullptr,
-                                     const Options& options = Options(), int maxClusters = 2, float minFreq = 0.25f)
+                                     const Options& options = Options(), int maxClusters = 2, float minFreq = 0.25f,
+                                     Scratch* scratch = nullptr)
 {
     std::vector<const std::uint8_t*> sequences;
     std::vector<std::size_t> lengths;
@@ -217,15 +234,17 @@ inline Clustering clusteredConsensus(const std::vector<Read>& reads, const Model
         strands.push_back(static_cast<std::int32_t>(read.strand));
     }
     return detail::clustering(
-        plegma_clustered_consensus(reads.size(), sequences.data(), lengths.data(), anchors.data(), strands.data(),
-                                   model ? model->get() : nullptr, &options.values, maxClusters, minFreq),
+        plegma_clustered_consensus_with_scratch(scratch ? scratch->get() : nullptr, reads.size(), sequences.data(),
+                                                lengths.data(), anchors.data(), strands.data(),
+                                                model ? model->get() : nullptr, &options.values, maxClusters, minFreq),
         reads.size());
 }
 
 // The two haplotypes' consensus sequences of reads already phased (haplotypes[i] 0, 1 or -1; see
 // plegma_phased_consensus).
 inline Clustering phasedConsensus(const std::vector<Read>& reads, const std::vector<int>& haplotypes,
-                                  const Model* model = nullptr, const Options& options = Options())
+                                  const Model* model = nullptr, const Options& options = Options(),
+                                  Scratch* scratch = nullptr)
 {
     if (haplotypes.size() != reads.size()) throw std::runtime_error("plegma: one haplotype per read");
     std::vector<const std::uint8_t*> sequences;
@@ -239,8 +258,9 @@ inline Clustering phasedConsensus(const std::vector<Read>& reads, const std::vec
         haps.push_back(static_cast<std::int32_t>(haplotypes[r]));
     }
     return detail::clustering(
-        plegma_phased_consensus(reads.size(), sequences.data(), lengths.data(), anchors.data(), strands.data(),
-                                haps.data(), model ? model->get() : nullptr, &options.values),
+        plegma_phased_consensus_with_scratch(scratch ? scratch->get() : nullptr, reads.size(), sequences.data(),
+                                             lengths.data(), anchors.data(), strands.data(), haps.data(),
+                                             model ? model->get() : nullptr, &options.values),
         reads.size());
 }
 

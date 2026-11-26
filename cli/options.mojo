@@ -49,9 +49,9 @@ ref options:
     -F FILE     the reference's flanks (FASTA: left, then right): each alignment to the reference pinned as minimap2
                 pins it (-x asm5 as dipcall runs it; its seeds and chain over flank + sequence + flank), exact between
                 the pins, so differences are written as dipcall's truth sets write them
-    -t INT      threads for the alignments to the reference [1]
 
 Output options (both):
+    -t INT      threads for parallel alignment, polishing, and listed files (-l) [1]
     -r INT      output [0]: 0 consensus FASTA, 1 MSA FASTA, 2 both, 3 GFA, 4 GFA with the consensus path
     -a INT      consensus [0]: 0 heaviest path, 1 most frequent letter per column
     -d INT      at most INT consensus sequences [1]; at 2 or more the sequences are clustered on the MSA's
@@ -209,9 +209,10 @@ def parse(args: List[String]) raises -> Options:
         # ref's own.
         elif a == "-F" and reference:
             options.flanks = _value(args, i)
-        elif a == "-t" and reference:
-            options.threads = _int(args, i)
         # Both.
+        elif a == "-t":
+            options.threads = _int(args, i)
+            poa.threads = options.threads
         elif a == "-o":
             options.output = _value(args, i)
         elif a == "-r":

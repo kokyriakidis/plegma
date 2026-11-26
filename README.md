@@ -74,7 +74,8 @@ The flags, defaults and alignment modes (`-m` 0 global, 1 local, 2 extension) ar
 | `-c` | `5` | a one-sided assembly stops where fewer reads go on |
 | `-s` | | try reverse complements of poorly scoring sequences |
 | `-i FILE` | | start from an existing MSA |
-| `-l` | | the input is a list of files, each aligned on its own |
+| `-l` | | the input is a list of files, each aligned on its own (parallelized across `-t` threads) |
+| `-t INT` | `1` | worker threads for parallel stages (bit-exact with `-t 1`) |
 
 Pinning (`-S`) pays on long, divergent sequences such as a pangenome region's alleles; on reads of one place it only
 costs time, so local assembly uses `-N`.
@@ -133,6 +134,8 @@ and returns what `plegma poa -r 0 [-H model]` writes, byte for byte: one sequenc
 no read spans both anchors and they could not be joined.
 
 - **Threads**: every call is re-entrant; a homopolymer model is loaded once and shared read-only by every thread.
+  Callers assembling many windows in a loop can reuse a per-thread `plegma_scratch` (`plegma::Scratch` in C++,
+  `plegma.Scratch` in Python, `ConsensusScratch` in Mojo) to avoid reallocating buffers across calls.
 - **Errors**: wrong arguments and failures come back as messages (C), `std::runtime_error` (C++) or `plegma.Error`
   (Python), never an abort.
 - **Input**: letters other than A, C, G, T are read as N; empty reads are allowed (adjacent anchors); reads with
@@ -215,6 +218,7 @@ homopolymer model, clustering and `on_reference`.
 | `band_b`, `band_f`, `band_max` | `-b -f -B` | 10, 0.01, 64 |
 | `noise_run` | | 3 (clustered: clusters apart only by single letters in runs this long are one) |
 | `two_lengths_db` | | 15 (clustered and phased, with a model: how much better two run lengths must explain the reads) |
+| `threads` | `-t` | 1 (worker threads for parallel stages; bit-exact across thread counts) |
 
 ### Haplotypes
 

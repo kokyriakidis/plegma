@@ -11,11 +11,28 @@ at nodes with several predecessors three more (which predecessor each move came 
 """
 
 from std.math import iota
-from std.memory import bitcast
 from std.sys import simd_width_of, size_of
 
 from .alphabet import encode_base
 from .graph import Graph
+from .kernel_simd import (
+    _beats,
+    _drop,
+    _fill,
+    _first_equal,
+    _floor,
+    _heaviest_first,
+    _last,
+    _last_equal,
+    _moved,
+    _neg,
+    _predecessor,
+    _prefix_max,
+    _reach,
+    _rebased,
+    _zero,
+)
+from .topology import Topology
 
 
 comptime SOURCE = -1
@@ -61,16 +78,6 @@ comptime _F1_EXTENDS = UInt8(32)  # the insertion flags: whether the next cell's
 comptime _F2_EXTENDS = UInt8(64)
 
 
-@inline(.always)
-def _neg[dt: DType]() -> Scalar[dt]:
-    """The score of a cell nothing reaches: far below every real score, far enough above the type's floor that
-    a few gap costs taken from it cannot wrap (the kernel also clamps at it)."""
-    comptime if dt == DType.int16:
-        return Scalar[dt](-16000)
-    else:
-        return Scalar[dt](-(1 << 29))
-
-
 comptime REBASE = 1024
 """A row of 16-bit scores moves to a base of its own when its best passes this, up or down."""
 comptime REBASED_SPAN = 1025
@@ -103,18 +110,6 @@ def _rebased_fits(scoring: Scoring, reach: Int) -> Bool:
     `REBASED_SPAN`."""
     var spread = Int(scoring.gap(2 * reach + 1)) + Int(scoring.mismatch) + Int(scoring.match_score)
     return 2 * reach + 1 <= REBASED_SPAN and spread + 2 * REBASE < Int(-_neg[DType.int16]()) // 2 - 500
-
-
-@inline(.always)
-def _fill[dt: DType](p: MutPointer[Scalar[dt], _], count: Int):
-    comptime V = simd_width_of[dt]()
-    var i = 0
-    while i + V <= count:
-        p.unsafe_store(i, SIMD[dt, V](_neg[dt]()))
-        i += V
-    while i < count:
-        p[unsafe_offset=i] = _neg[dt]()
-        i += 1
 
 
 struct Scoring(ImplicitlyCopyable):
@@ -170,61 +165,6 @@ struct GraphAlignment(Movable):
         self.score = score
         self.cells = cells
         self.peak_bytes = peak_bytes
-
-
-struct Topology(Movable):
-    """The graph's nodes in topological order, each node's rank, and the length of its remaining path along
-    the heaviest out-edges (abPOA's band diagonal); or the same over a part of the graph (`allowed`)."""
-
-    var order: List[Int]
-    var rank: List[Int]
-    var remaining: List[Int]
-
-    def __init__(out self, graph: Graph) raises:
-        self.rank = graph.node_order()
-        var n = len(self.rank)
-        self.order = List[Int](length=n, fill=0)
-        for node in range(n):
-            self.order[self.rank[node]] = node
-        self.remaining = List[Int](length=n, fill=0)
-        for r in reversed(range(n)):
-            var node = self.order[r]
-            var best_weight = Int32(-1)
-            var e = Int(graph.first_out[node])
-            while e >= 0:
-                var s = Int(graph.edge_to[e])
-                var weight = graph.edge_weight[e]
-                if weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > self.remaining[node]):
-                    best_weight = weight
-                    self.remaining[node] = self.remaining[s] + 1
-                e = Int(graph.next_out[e])
-
-    def __init__(out self, graph: Graph, allowed: List[Bool]) raises:
-        """Over the nodes `allowed` alone: they in topological order (`order`), and each one's remaining path
-        through them alone; every node's rank in the whole graph."""
-        self.rank = graph.node_order()
-        var n = len(self.rank)
-        var full = List[Int](length=n, fill=0)
-        for node in range(n):
-            full[self.rank[node]] = node
-        self.order = List[Int]()
-        for node in full:
-            if allowed[node]:
-                self.order.append(node)
-        self.remaining = List[Int](length=n, fill=0)
-        for r in reversed(range(len(self.order))):
-            var node = self.order[r]
-            var best_weight = Int32(-1)
-            var e = Int(graph.first_out[node])
-            while e >= 0:
-                var s = Int(graph.edge_to[e])
-                var weight = graph.edge_weight[e]
-                if allowed[s] and (
-                    weight > best_weight or (weight == best_weight and self.remaining[s] + 1 > self.remaining[node])
-                ):
-                    best_weight = weight
-                    self.remaining[node] = self.remaining[s] + 1
-                e = Int(graph.next_out[e])
 
 
 def align_to_graph(
@@ -940,10 +880,17 @@ struct Workspace(Movable):
                     )
                 raise Error("no alignment reaches the graph's end")
 
+        var aligned = self._traceback(nodes, m, best_row, best_col, scoring)
+        for k in range(n):
+            row_of[nodes[k]] = -1
+        return GraphAlignment(aligned^, best, cells, peak)
+
+    def _traceback(self, nodes: List[Int], m: Int, best_row: Int, best_col: Int, scoring: Scoring) -> List[Int]:
+        """Walks the traceback tables from `(best_row, best_col)` back to the alignment's start."""
         var aligned = List[Int](length=m, fill=-1)
         var r = best_row
         var j = best_col
-        var state = UInt8(0)  # 0: H; otherwise the gap state, as the source codes number them
+        var state = UInt8(0)
         while r > 0 and j > 0:
             var at = j - self.lo[r]
             var byte = self.trace[self.trace_at[r] + at]
@@ -965,20 +912,16 @@ struct Workspace(Movable):
                 if not extends:
                     state = 0
             else:
-                # The cell before holds this one's flag; before the band's first cell, a gap of a cell nothing reaches
-                # (both scores the sentinel) extended when opening costs more than extending.
                 var first = state == _INSERTION1
                 var extends: Bool
                 if at > 0:
                     extends = (self.trace[self.trace_at[r] + at - 1] & (_F1_EXTENDS if first else _F2_EXTENDS)) != 0
                 else:
-                    extends = (gap1 if first else gap2) > (e1 if first else e2)
+                    extends = (scoring.open1 if first else scoring.open2) > 0
                 j -= 1
                 if not extends:
                     state = 0
-        for k in range(n):
-            row_of[nodes[k]] = -1
-        return GraphAlignment(aligned^, best, cells, peak)
+        return aligned^
 
 
 def align_between(
@@ -997,225 +940,3 @@ def align_between(
     """`Workspace.align` through a workspace of its own."""
     var workspace = Workspace()
     return workspace.align(graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f)
-
-
-@inline(.always)
-def _predecessor(
-    pred_rows: List[Int], pred_at: List[Int], choices: List[UInt8], choice_at: List[Int], r: Int, cell: Int, kind: Int
-) -> Int:
-    """The row a move at `cell` of row `r` came from (`kind`: 0 the diagonal, 1 and 2 the deletions)."""
-    var which = 0 if choice_at[r] < 0 else Int(choices[choice_at[r] + 3 * cell + kind])
-    return pred_rows[pred_at[r] + which]
-
-
-def _heaviest_first(graph: Graph, node: Int, left: Int, row_of: List[Int], mut rows: List[Int], mut keys: List[UInt64]):
-    """Appends the rows of `node`'s predecessors in the alignment, heaviest edge first (the earlier edge first
-    among equals): row 0 for `left` (or for none at all), so of equally good moves the alignment takes the one
-    most sequences took. `keys` is scratch."""
-    var e = Int(graph.first_in[node])
-    if graph.in_degree[node] == 1:
-        var p = Int(graph.edge_from[e])
-        rows.append(0 if p == left or row_of[p] < 0 else row_of[p])
-        return
-    keys.clear()
-    while e >= 0:
-        var p = Int(graph.edge_from[e])
-        if p == left or row_of[p] >= 0:
-            keys.append((UInt64((1 << 31) - Int(graph.edge_weight[e])) << 32) | UInt64(e))
-        e = Int(graph.next_in[e])
-    if len(keys) == 0:
-        rows.append(0)
-        return
-    # Equal weights keep the edges' order: edge ids grow as the edges are made. The keys are few and distinct: an
-    # insertion sort, the order `sort` gives.
-    for a in range(1, len(keys)):
-        var key = keys[a]
-        var b = a
-        while b > 0 and keys[b - 1] > key:
-            keys[b] = keys[b - 1]
-            b -= 1
-        keys[b] = key
-    for key in keys:
-        var p = Int(graph.edge_from[Int(key & 0xFFFFFFFF)])
-        rows.append(0 if p == left else row_of[p])
-
-
-@inline(.always)
-def _reach(band_b: Int, band_f: Float64, band_max: Int, m: Int) -> Int:
-    """The band's reach either side for a query of `m` letters: `band_b + band_f m`, at most `band_max` when that is
-    not negative."""
-    var reach = band_b + Int(band_f * Float64(m))
-    return min(reach, band_max) if band_max >= 0 else reach
-
-
-@inline(.always)
-def _drop(mut rows: List[Int], row: Int):
-    """`row` out of `rows` (order not kept)."""
-    for k in range(len(rows)):
-        if rows[k] == row:
-            rows[k] = rows[len(rows) - 1]
-            _ = rows.pop()
-            return
-
-
-@inline(.always)
-def _beats(score: Int, base: Int, best: Int, best_ok: Bool, neg: Int) -> Bool:
-    """Whether a cell storing `score` in a row on `base` beats the best end so far: a reached cell (above half the
-    sentinel, `neg`) beats an unreached one, then the higher absolute score."""
-    var ok = score >= neg // 2
-    if ok != best_ok:
-        return ok
-    return score + base > best
-
-
-@inline(.always)
-def _moved[dt: DType](source: MutPointer[Scalar[dt], _], into: MutPointer[Scalar[dt], _], count: Int, delta: Int):
-    """`count` scores from `source` into `into`, each plus `delta` (a lower base's to a higher one's: delta <= 0),
-    cells at the sentinel kept at it. A delta past half the lanes' range (two predecessors' bases tens of thousands
-    apart in 16 bits) is added in full width and clamped at the sentinel: narrowed, it wrapped and the lower row's
-    scores came in far too high."""
-    comptime V = simd_width_of[dt]()
-    comptime Vec = SIMD[dt, V]
-    if delta < Int(_neg[dt]()) or delta > -Int(_neg[dt]()):
-        var floor = Int(_neg[dt]())
-        for c in range(count):
-            var v = source[unsafe_offset=c]
-            into[unsafe_offset=c] = _neg[dt]() if v <= _neg[dt]() else Scalar[dt](
-                min(max(Int(v) + delta, floor), -2 * floor)
-            )
-        return
-    var shift = Scalar[dt](delta)
-    var neg = Vec(_neg[dt]())
-    var i = 0
-    while i + V <= count:
-        var v = source.unsafe_load[width=V](i)
-        into.unsafe_store(i, v.le(neg).select(neg, _floor(v + Vec(shift))))
-        i += V
-    while i < count:
-        var v = source[unsafe_offset=i]
-        into[unsafe_offset=i] = _neg[dt]() if v <= _neg[dt]() else _floor(v + shift)
-        i += 1
-
-
-@inline(.always)
-def _rebased[dt: DType](row: MutPointer[Scalar[dt], _], span: Int, shift: Scalar[dt]):
-    """Cells 0 ..< span of `row` less `shift` (the row moving to a base `shift` higher), cells at the sentinel kept
-    at it."""
-    comptime V = simd_width_of[dt]()
-    comptime Vec = SIMD[dt, V]
-    var neg = Vec(_neg[dt]())
-    var i = 0
-    while i + V <= span:
-        var v = row.unsafe_load[width=V](i)
-        row.unsafe_store(i, v.le(neg).select(neg, _floor(v - Vec(shift))))
-        i += V
-    while i < span:
-        var v = row[unsafe_offset=i]
-        row[unsafe_offset=i] = _neg[dt]() if v <= _neg[dt]() else _floor(v - shift)
-        i += 1
-
-
-@inline(.always)
-def _first_equal[dt: DType](h: MutPointer[Scalar[dt], _], span: Int, value: Scalar[dt]) -> Int:
-    """The first of cells 0 ..< span of `h` holding `value` (one does), a vector at a time."""
-    comptime V = simd_width_of[dt]()
-    var lane = iota[dt, V]()
-    var at = 0
-    while at + V <= span:
-        var hit = h.unsafe_load[width=V](at).eq(SIMD[dt, V](value))
-        if hit.reduce_or():
-            return at + Int(hit.select(lane, SIMD[dt, V](Scalar[dt](V))).reduce_min())
-        at += V
-    while h[unsafe_offset=at] != value:
-        at += 1
-    return at
-
-
-@inline(.always)
-def _last_equal[dt: DType](h: MutPointer[Scalar[dt], _], span: Int, value: Scalar[dt]) -> Int:
-    """The last of cells 0 ..< span of `h` holding `value` (one does), a vector at a time from the right."""
-    comptime V = simd_width_of[dt]()
-    var lane = iota[dt, V]()
-    var at = span - V
-    while at >= 0:
-        var hit = h.unsafe_load[width=V](at).eq(SIMD[dt, V](value))
-        if hit.reduce_or():
-            return at + Int(hit.select(lane, SIMD[dt, V](Scalar[dt](-1))).reduce_max())
-        at -= V
-    var k = min(span, at + V) - 1
-    while h[unsafe_offset=k] != value:
-        k -= 1
-    return k
-
-
-@inline(.always)
-def _prefix_max[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
-    """Each lane's maximum over itself and the lanes before it."""
-    var floor = SIMD[dt, width](_neg[dt]())
-    var out = v
-    comptime for step in range(6):
-        comptime shift = 1 << step
-        comptime if shift < width:
-            out = max(out, _up[shift](out, floor))
-    return out
-
-
-@inline(.always)
-def _up[k: Int, dt: DType, width: Int](v: SIMD[dt, width], fill: SIMD[dt, width]) -> SIMD[dt, width]:
-    """`v` moved `k` lanes up (lane i + k holds lane i), `fill`'s value (in every lane of it) in the `k` below. 16-bit
-    lanes move as pairs in 32-bit ones and shifts within them: a 16-bit shuffle across a vector takes two or three
-    micro-ops on the shuffle port (Skylake-X), a 32-bit one one, and the shifts run elsewhere."""
-    comptime if size_of[dt]() == 2 and width % 2 == 0:
-        comptime half = width // 2
-        var pairs = bitcast[DType.uint32, half](v)
-        var filled = bitcast[DType.uint32, half](fill)
-        comptime if k % 2 == 0:
-            return bitcast[dt, width](filled.join(pairs).slice[half, offset=half - k // 2]())
-        else:
-            # Lane 2d takes the high half of pair d - (k + 1) / 2, lane 2d + 1 the low half of pair d - k / 2.
-            var high = filled.join(pairs).slice[half, offset=half - (k + 1) // 2]()
-            var low = filled.join(pairs).slice[half, offset=half - k // 2]()
-            return bitcast[dt, width]((low << 16) | (high >> 16))
-    else:
-        return fill.join(v).slice[width, offset=width - k]()
-
-
-@inline(.always)
-def _last[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
-    """`v`'s last lane in every lane; 16-bit lanes by a 32-bit broadcast, as `_up` moves them."""
-    comptime if size_of[dt]() == 2 and width % 2 == 0:
-        comptime half = width // 2
-        var top = SIMD[DType.uint32, half](bitcast[DType.uint32, half](v)[half - 1])
-        return bitcast[dt, width]((top >> 16) | (top & 0xFFFF0000))
-    else:
-        return SIMD[dt, width](v[width - 1])
-
-
-@inline(.always)
-def _floor[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
-    """`v` kept at or above the sentinel in 16-bit lanes, where a few gap costs taken from it would wrap."""
-    comptime if dt == DType.int16:
-        return max(v, SIMD[dt, width](_neg[dt]()))
-    else:
-        return v
-
-
-@inline(.always)
-def _floor[dt: DType](v: Scalar[dt]) -> Scalar[dt]:
-    """The scalar `_floor`."""
-    comptime if dt == DType.int16:
-        return max(v, _neg[dt]())
-    else:
-        return v
-
-
-@inline(.always)
-def _zero[dt: DType](p: MutPointer[Scalar[dt], _], count: Int):
-    comptime V = simd_width_of[dt]()
-    var i = 0
-    while i + V <= count:
-        p.unsafe_store(i, SIMD[dt, V](0))
-        i += V
-    while i < count:
-        p[unsafe_offset=i] = 0
-        i += 1

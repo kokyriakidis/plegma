@@ -66,12 +66,19 @@ typedef struct plegma_options {
                           (3; 0 never) */
     float two_lengths_db; /* clustered and phased consensus, with a model: how many dB better two run lengths must
                              explain the reads than one to keep two (15) */
+    int32_t threads; /* worker threads for parallel stages (1: caller's thread only; >= 1; bit-exact across counts) */
 } plegma_options;
 
 void plegma_options_init(plegma_options* options);
 
 typedef struct plegma_model plegma_model;
 typedef struct plegma_result plegma_result;
+typedef struct plegma_scratch plegma_scratch;
+
+/* Reusable scratch buffers for consensus calls: create one per worker thread and pass to the *_with_scratch calls
+ * to avoid reallocating graph, POA and polishing buffers between windows. Not shared concurrently across threads. */
+plegma_scratch* plegma_scratch_create(void);
+void plegma_scratch_free(plegma_scratch* scratch);
 
 /* A homopolymer model (shasta2's csv: base,strand,left,right,n,m,count,probability,logProbabilityDb), from a file
  * or from its text in memory. NULL on failure, the message (cut to error_size, NUL-ended) in error when given. */
@@ -89,6 +96,9 @@ void plegma_model_free(plegma_model* model);
 plegma_result* plegma_consensus(size_t count, const uint8_t* const* sequences, const size_t* lengths,
                                 const int32_t* anchors, const int32_t* strands, const plegma_model* model,
                                 const plegma_options* options);
+plegma_result* plegma_consensus_with_scratch(plegma_scratch* scratch, size_t count, const uint8_t* const* sequences,
+                                             const size_t* lengths, const int32_t* anchors, const int32_t* strands,
+                                             const plegma_model* model, const plegma_options* options);
 
 /* Several consensus sequences of one read set (haplotypes: abPOA's -d, as a diploid caller asks for): at most
  * max_clusters (>= 1) parts, each the consensus of the reads nearest it, made and polished as plegma_consensus makes
@@ -100,6 +110,11 @@ plegma_result* plegma_consensus(size_t count, const uint8_t* const* sequences, c
 plegma_result* plegma_clustered_consensus(size_t count, const uint8_t* const* sequences, const size_t* lengths,
                                           const int32_t* anchors, const int32_t* strands, const plegma_model* model,
                                           const plegma_options* options, int32_t max_clusters, float min_freq);
+plegma_result* plegma_clustered_consensus_with_scratch(plegma_scratch* scratch, size_t count,
+                                                       const uint8_t* const* sequences, const size_t* lengths,
+                                                       const int32_t* anchors, const int32_t* strands,
+                                                       const plegma_model* model, const plegma_options* options,
+                                                       int32_t max_clusters, float min_freq);
 
 /* The two haplotypes' consensus sequences of reads already phased: haplotypes[i] 0 or 1 (-1: neither, which builds on
  * the haplotype whose letters it carries where the two differ, on both where it covers no such place, on neither
@@ -111,6 +126,11 @@ plegma_result* plegma_clustered_consensus(size_t count, const uint8_t* const* se
 plegma_result* plegma_phased_consensus(size_t count, const uint8_t* const* sequences, const size_t* lengths,
                                        const int32_t* anchors, const int32_t* strands, const int32_t* haplotypes,
                                        const plegma_model* model, const plegma_options* options);
+plegma_result* plegma_phased_consensus_with_scratch(plegma_scratch* scratch, size_t count,
+                                                    const uint8_t* const* sequences, const size_t* lengths,
+                                                    const int32_t* anchors, const int32_t* strands,
+                                                    const int32_t* haplotypes, const plegma_model* model,
+                                                    const plegma_options* options);
 
 /* A read's alignment to its cluster's consensus: the cluster (a part), the alignment's cost, and the spans it
  * covers, consensus letters consensus_start ..< consensus_end and read letters read_start ..< read_end. */

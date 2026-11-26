@@ -29,8 +29,9 @@ is implementation and may change.
   joined, or one side alone, one-directional).
 - One call from reads to consensus: `consensus` under `ConsensusOptions`
   (what `plegma poa -r 0` writes, with a `HomopolymerModel` as `-H`;
-  `polished` the same from a `Poa` already made), the function behind the C
-  API (`capi/plegma.h`, `capi/plegma.hpp`,
+  `polished` the same from a `Poa` already made; `ConsensusScratch`,
+  `PoaScratch`, and `PolishScratch` reuse workspace buffers across calls),
+  the function behind the C API (`capi/plegma.h`, `capi/plegma.hpp`,
   `build/libplegma.so`) a local assembler calls instead of the command.
 - Several consensus sequences of one read set (haplotypes, as a diploid caller asks abPOA's `-d` for):
   `clustered_consensus` -> `Clustered` (per cluster its consensus, members and whether its sides `joined`; per read
@@ -53,10 +54,11 @@ is implementation and may change.
   `pinned_pairing` (the alignment exact between them).
 """
 
-from .alphabet import N_CODE, CodeBuffer, encode_base, encode_into
+from .alphabet import N_CODE, CodeBuffer, base_code, encode_base, encode_into, reverse_complement
+from .bands import PolishScratch
 from .clustered import clustered_consensus
 from .clusters import cluster_rows
-from .consensus import ConsensusOptions, consensus, polished
+from .consensus import ConsensusOptions, ConsensusScratch, consensus, polished
 from .graph import Graph, Runs, cigar_runs
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import (
@@ -81,9 +83,9 @@ from .kernel import (
 from .order import guide_order
 from .phased import phased_consensus
 from .pinned import WindowScratch, align_pinned, window_nodes
-from .pins import Pins, pinned_pairing, pins, pins_in_context
+from .pins import Pins, ReferenceIndex, pinned_pairing, pinned_pairing_with_index, pins, pins_in_context
 from .placement import Clustered, Placement, alignment_costs
-from .poa import BAND_MAX, GUIDE_ORDER, INPUT_ORDER, LONGEST_FIRST, Poa, PoaOptions, poa
-from .polish import polish
+from .poa import BAND_MAX, GUIDE_ORDER, INPUT_ORDER, LONGEST_FIRST, Poa, PoaOptions, PoaScratch, poa, poa_with_scratch
+from .polish import polish, polish_with_scratch
 from .reference import on_reference
 from .version import VERSION

@@ -17,6 +17,40 @@ def encode_base(c: UInt8) -> UInt8:
     return ((c >> 1) ^ (c >> 2)) & 3 if valid else N_CODE
 
 
+@inline(.always)
+def base_code(letter: UInt8) -> Int:
+    """A, C, G and T as 0..3 (upper or lower case); 4 for anything else."""
+    var lower = letter | 0x20
+    if lower == 0x61:
+        return 0
+    if lower == 0x63:
+        return 1
+    if lower == 0x67:
+        return 2
+    if lower == 0x74:
+        return 3
+    return 4
+
+
+def reverse_complement(seq: List[UInt8]) -> List[UInt8]:
+    """The reverse complement of `seq` (A<->T/U, C<->G; other bytes kept as is)."""
+    var out = List[UInt8](capacity=len(seq))
+    for i in reversed(range(len(seq))):
+        var c = seq[i]
+        var lower = c | 0x20
+        if lower == 0x61:
+            out.append(UInt8(ord("T")))
+        elif lower == 0x63:
+            out.append(UInt8(ord("G")))
+        elif lower == 0x67:
+            out.append(UInt8(ord("C")))
+        elif lower == 0x74 or lower == 0x75:
+            out.append(UInt8(ord("A")))
+        else:
+            out.append(c)
+    return out^
+
+
 def encode_into(seq: Span[UInt8, _], dst: MutPointer[UInt8, _], n_code: UInt8 = N_CODE):
     """Encodes `seq` into `dst`, which must hold `len(seq)` bytes; non-ACGT
     bytes become `n_code`."""

@@ -85,6 +85,15 @@ class ConsensusTest(unittest.TestCase):
             plegma.consensus(self.reads, polish_rounds=2**32 + 1)
         with self.assertRaises(plegma.Error):
             plegma.consensus(self.reads, two_lengths_db=float("nan"))
+        with self.assertRaises(plegma.Error):
+            plegma.consensus(self.reads, threads=0)
+
+    def test_scratch_and_parallel_threads(self):
+        base_pinned = plegma.consensus(self.reads, pinned=True, threads=1)
+        base_unpinned = plegma.consensus(self.reads, pinned=False, threads=1)
+        with plegma.Scratch() as scratch:
+            self.assertEqual(plegma.consensus(self.reads, pinned=True, threads=4, scratch=scratch), base_pinned)
+            self.assertEqual(plegma.consensus(self.reads, pinned=False, threads=4, scratch=scratch), base_unpinned)
 
     def test_threads_agree(self):
         alone = plegma.consensus(self.reads, pinned=False)
@@ -156,6 +165,16 @@ class ClusteredTest(unittest.TestCase):
         self.assertLessEqual(_distance(got.consensus[0], self.one), 1)
         self.assertLessEqual(_distance(got.consensus[1], self.two), 1)
         self.assertEqual(got.members[0], list(range(0, 16, 2)))
+        with plegma.Scratch() as scratch:
+            got4 = plegma.phased_consensus(self.reads, haplotypes, pinned=False, threads=4, scratch=scratch)
+            self.assertEqual(got4.consensus, got.consensus)
+            self.assertEqual(got4.members, got.members)
+            cl1 = plegma.clustered_consensus(self.reads, max_clusters=2, min_freq=0.2, pinned=False)
+            cl4 = plegma.clustered_consensus(
+                self.reads, max_clusters=2, min_freq=0.2, pinned=False, threads=4, scratch=scratch
+            )
+            self.assertEqual(cl4.consensus, cl1.consensus)
+            self.assertEqual(cl4.members, cl1.members)
 
     def test_inside_and_errors(self):
         reads = self.reads + [self.one[200:450]]

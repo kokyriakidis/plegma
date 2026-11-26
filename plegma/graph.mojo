@@ -7,11 +7,7 @@ own column. An MSA's rows make a graph directly (`from_msa`).
 """
 
 
-comptime MATCH = UInt8(ord("="))
-comptime MISMATCH = UInt8(ord("X"))
-comptime INSERTION = UInt8(ord("I"))
-comptime DELETION = UInt8(ord("D"))
-comptime GAP = UInt8(ord("-"))
+from .cigar import DELETION, GAP, INSERTION, MATCH, MISMATCH, Runs, cigar_runs
 
 
 struct Graph(Movable, Sized):
@@ -178,16 +174,31 @@ struct Graph(Movable, Sized):
         self.names.append(name)
         return len(self.paths) - 1
 
-    def node_order(self) raises -> List[Int]:
-        """Each node's rank in a topological order of the nodes (Kahn's, lowest node first among the ready)."""
+    def add_twin_path(mut self, name: String, twin_path: Int) -> Int:
+        """Adds a sequence identical to an existing path `twin_path`: increments its edges and appends its node list."""
+        var n = len(self.paths[twin_path])
+        var path = List[Int32](capacity=n)
+        for j in range(n):
+            var node = Int(self.paths[twin_path][j])
+            if j > 0:
+                self._link(Int(path[j - 1]), node)
+            path.append(Int32(node))
+        self.paths.append(path^)
+        self.names.append(name)
+        return len(self.paths) - 1
+
+    def node_order_into(self, mut rank: List[Int], mut incoming: List[Int32], mut ready: List[Int]) raises:
+        """Writes each node's topological rank into `rank`, reusing `incoming` and `ready`."""
         var count = len(self.bases)
-        var incoming = List[Int32](capacity=count)
-        var ready = List[Int]()
+        incoming.resize(count, 0)
+        ready.clear()
+        rank.resize(count, -1)
         for node in range(count):
-            incoming.append(self.in_degree[node])
-            if self.in_degree[node] == 0:
+            var deg = self.in_degree[node]
+            incoming[node] = deg
+            rank[node] = -1
+            if deg == 0:
                 ready.append(node)
-        var rank = List[Int](length=count, fill=-1)
         var next = 0
         var head = 0
         while head < len(ready):
@@ -204,6 +215,13 @@ struct Graph(Movable, Sized):
                 e = Int(self.next_out[e])
         if next != count:
             raise Error(t"the nodes form a cycle: {count - next} of {count} unplaced")
+
+    def node_order(self) raises -> List[Int]:
+        """Each node's rank in a topological order of the nodes (Kahn's, lowest node first among the ready)."""
+        var rank = List[Int]()
+        var incoming = List[Int32]()
+        var ready = List[Int]()
+        self.node_order_into(rank, incoming, ready)
         return rank^
 
     @staticmethod
@@ -260,6 +278,55 @@ struct Graph(Movable, Sized):
                 starts[Int(path[0])] += 1
                 ends[Int(path[len(path) - 1])] += 1
         return self._bundle(order, starts, ends, self.edge_weight)
+
+    def heaviest_path_into(
+        self,
+        order: List[Int],
+        mut starts: List[Int],
+        mut ends: List[Int],
+        mut score: List[Int],
+        mut next: List[Int],
+        mut out: List[Int],
+    ):
+        """As `heaviest_path(order)`, writing the path into `out` and reusing `starts`, `ends`, `score`, `next`."""
+        var count = len(self.bases)
+        starts.resize(count, 0)
+        ends.resize(count, 0)
+        score.resize(count, 0)
+        next.resize(count, -1)
+        for i in range(count):
+            starts[i] = 0
+            ends[i] = 0
+        for path in self.paths:
+            if len(path) > 0:
+                starts[Int(path[0])] += 1
+                ends[Int(path[len(path) - 1])] += 1
+        for k in reversed(range(len(order))):
+            var node = order[k]
+            var best_weight = ends[node] if ends[node] > 0 else -1
+            var best_score = 0
+            var choice = -1
+            var e = Int(self.first_out[node])
+            while e >= 0:
+                var s = Int(self.edge_to[e])
+                var w = Int(self.edge_weight[e])
+                if w > 0 and (w > best_weight or (w == best_weight and score[s] >= best_score)):
+                    best_weight = w
+                    best_score = score[s]
+                    choice = s
+                e = Int(self.next_out[e])
+            next[node] = choice
+            score[node] = max(best_weight, 0) + (score[choice] if choice >= 0 else 0)
+        var at = -1
+        for node in order:
+            if starts[node] > 0 and (
+                at < 0 or starts[node] > starts[at] or (starts[node] == starts[at] and score[node] > score[at])
+            ):
+                at = node
+        out.clear()
+        while at >= 0:
+            out.append(at)
+            at = next[at]
 
     def heaviest_path(self, order: List[Int], members: List[Int], spread: Int = 0) -> List[Int]:
         """`heaviest_path` with only the paths `members` weighing the edges, starts and ends; with `spread`, the start
@@ -450,33 +517,6 @@ struct Graph(Movable, Sized):
                 row[place[Int(self.columns[Int(node)])]] = self.bases[Int(node)]
             rows.append(String(unsafe_from_utf8=row))
         return rows^
-
-
-struct Runs(Movable):
-    """A CIGAR's runs: their letters and lengths."""
-
-    var ops: List[UInt8]
-    var counts: List[Int]
-
-    def __init__(out self):
-        self.ops = List[UInt8]()
-        self.counts = List[Int]()
-
-
-def cigar_runs(cigar: StringSlice) raises -> Runs:
-    """`cigar`'s runs."""
-    var runs = Runs()
-    var length = 0
-    for c in cigar.as_bytes():
-        if c >= UInt8(ord("0")) and c <= UInt8(ord("9")):
-            length = length * 10 + Int(c - UInt8(ord("0")))
-            continue
-        if length == 0:
-            raise Error(t"run without a length in {cigar}")
-        runs.ops.append(c)
-        runs.counts.append(length)
-        length = 0
-    return runs^
 
 
 def _spread_vote(

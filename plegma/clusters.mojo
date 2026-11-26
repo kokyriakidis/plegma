@@ -11,6 +11,11 @@ end, past its far end), count for no column and set it apart from none.
 """
 
 
+from std.atomic import Atomic
+
+from karan.common import spread, thread_count
+
+
 comptime MAX_ROUNDS = 50
 """k-modes rounds at most (they stop when no row moves)."""
 
@@ -51,7 +56,7 @@ def _commonest(letters: List[List[UInt8]], label: List[Int], k: Int, mode: List[
     return out^
 
 
-def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raises -> List[List[Int]]:
+def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64, threads: Int = 1) raises -> List[List[Int]]:
     """The rows' clusters, at most `max_clusters`, each as row indices, in order of their first rows."""
     var n = len(rows)
     var everyone = List[Int]()
@@ -107,15 +112,42 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64) raise
     var first_mode = 0
     var least = Int.MAX
     var sharing = List[Int](length=n, fill=0)
-    for i in range(n):
-        var total = 0
-        for j in range(n):
-            var d = _hamming(letters[i], letters[j], weights)
-            total += d
-            sharing[i] += Int(d == 0)
-        if total < least:
-            least = total
-            first_mode = i
+    var workers = thread_count(threads, n)
+    if workers > 1 and n >= 32 and len(columns) >= 4:
+        var totals = List[Int](length=n, fill=0)
+        var totals_p = totals.unsafe_ptr()
+        var sharing_p = sharing.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+
+        def row_distances(slot: Int) {mut taken, imm n, imm letters, imm weights, imm totals_p, imm sharing_p}:
+            while True:
+                var i = Int(taken.fetch_add(1))
+                if i >= n:
+                    return
+                var total = 0
+                var shared = 0
+                for j in range(n):
+                    var d = _hamming(letters[i], letters[j], weights)
+                    total += d
+                    shared += Int(d == 0)
+                totals_p[unsafe_offset=i] = total
+                sharing_p[unsafe_offset=i] = shared
+
+        spread(row_distances, workers, workers)
+        for i in range(n):
+            if totals[i] < least:
+                least = totals[i]
+                first_mode = i
+    else:
+        for i in range(n):
+            var total = 0
+            for j in range(n):
+                var d = _hamming(letters[i], letters[j], weights)
+                total += d
+                sharing[i] += Int(d == 0)
+            if total < least:
+                least = total
+                first_mode = i
     var modes = List[List[UInt8]]()
     modes.append(letters[first_mode].copy())
     while len(modes) < max_clusters:

@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 /* ---- KGEN compiler runtime ---- */
 
@@ -43,6 +44,12 @@ int KGEN_CompilerRT_GetStackTrace(char** strings, unsigned depth)
     (void)strings;
     (void)depth;
     return 0;
+}
+
+int KGEN_CompilerRT_NumLogicalCores(void)
+{
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
 }
 
 /* TracyBridge.cpp, built without profiling. */

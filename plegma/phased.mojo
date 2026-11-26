@@ -3,58 +3,38 @@ reads, then again with the unlabelled reads on the haplotype whose letters they 
 (`_sides`, at the places `_differences` finds), and each homopolymer run they differ by decided on both haplotypes'
 reads together (`runs`)."""
 
+from std.atomic import Atomic
+
 from karan import Aligner, Alignment, Costs, Mode, Ties
+from karan.common import spread, thread_count
 
 from .alphabet import encode_base
-from .consensus import ConsensusOptions
-from .homopolymer import HomopolymerModel, STRAND_UNKNOWN, reads_say_one
-from .kernel import BOTH, INSIDE, LEFT
-from .placement import Clustered, alignment_costs, _consensus_of, _placed
-from .poa import poa
+from .cigar import ALIGN_MATCH, INSERTION, MATCH, haplotype_at, query_at
+from .consensus import ConsensusOptions, ConsensusScratch
+from .homopolymer import STRAND_UNKNOWN, HomopolymerModel, reads_say_one
+from .kernel import BOTH, INSIDE
+from .placement import Clustered, _consensus_of, _placed, alignment_costs
+from .runs import (
+    _align_group_reads,
+    _best_length,
+    _best_shared_length,
+    _flanks,
+    _read_lengths_from,
+    _run_pairs,
+    _set_runs,
+)
 from .trace import PHASED, Trace
-from .runs import _best_length, _best_shared_length, _flanks, _read_lengths, _run_pairs, _set_runs
 
+# Re-exported for callers/tests that import `_haplotype_at` from here.
+comptime _haplotype_at = haplotype_at
 
 comptime TO_BOTH = 2
 """`_sides`: a read for both haplotypes, covering no place where the two differ."""
-
-
 comptime MIN_CARRIERS = 1
-"""`_sides`: a place where the two haplotypes' consensus sequences differ decides reads only where each spelling is
-carried by at least this many reads of the window, labelled or not, and by `MIN_CARRIER_SHARE` of those spelling it
-either way. The share does the work: a spelling few of many reads carry is a read's error made the consensus's, not a
-second haplotype. HG002's HLA-DPA1 thinned to 15x had haplotype 2's left half built from 1 or 2 labelled reads, whose
-36 errors read as 36 places apart from haplotype 1, and every unlabelled read, carrying the truth there, went to
-haplotype 1 alone. Counting instead the labelled reads behind each consensus (3 of each) set aside the true
-differences low depth leaves under 3 labelled reads, and the unlabelled reads there, given to both haplotypes, made
-heterozygotes homozygous (CYP4A11 among them, unflagged); a floor of 2 carriers did the same at 10x and below (NAT2,
-MTHFR, HTR2A, GRIK1, XPC), a second allele there being one read in four."""
-
-
 comptime MIN_CARRIER_SHARE = 0.25
-"""`_sides`: the least share of the reads spelling a place either way that each spelling must have to decide reads
-there, a second haplotype being about half. On HG002 thinned to 30x down to 5x (two read sets) this kept every
-HLA-DPA1 consensus exact at 15x and 10x and left no wrong call unflagged in panStar; it still set aside a second allele
-one read in five carried at 10x and below (NAT2, MTHFR thinned), as the reads alone cannot tell it from an error
-there: at 0.15 those were kept, but so were DPA1's errors where one read in six carried them (33 edits at 15x)."""
-
-
 comptime PHASED_CARRIERS = 3
-"""`_sides`: a place also decides reads where pgphase's labels back it: each haplotype's spelling carried by at least
-this many of its own labelled reads, and by `PHASED_AGREEMENT` of its labelled reads spelling it either way. The
-share of all reads cannot tell a minority haplotype from an error (NA18941's CYP1A1: 8 reads of one haplotype, 3 of
-the other, 4 of another phase set carrying the first's letter; at 3 of 15 the place was set aside, the 4 went to
-both and outvoted the second's own 3), but an error does not follow the labels: one read's error made a thin
-consensus's (HG002's HLA-DPA1 at 15x, a haplotype built from 1 or 2 reads) has under 3 carriers of its own."""
-
-
 comptime PHASED_AGREEMENT = 0.75
-
-
 comptime SITE_FLANK = 8
-"""Letters of the longer haplotype either side of a place where the two differ, compared with a read's letters there
-along with it: two alignments may put the same gap a letter or two apart, which compared alone would read as the
-other haplotype's spelling; with the flank both are one string. Places within twice this of each other are one."""
 
 
 @fieldwise_init
@@ -70,59 +50,27 @@ struct _Site(Copyable, Movable):
     var shorter: List[UInt8]
 
 
-def _ops(cigar: String) -> List[Tuple[Int, UInt8]]:
-    """karan's run-length CIGAR as (length, letter) pairs."""
-    var out = List[Tuple[Int, UInt8]]()
-    var number = 0
-    for byte in cigar.as_bytes():
-        if byte >= UInt8(ord("0")) and byte <= UInt8(ord("9")):
-            number = number * 10 + Int(byte - UInt8(ord("0")))
-        else:
-            out.append((number, byte))
-            number = 0
-    return out^
-
-
-def _query_at(alignment: Alignment) -> List[Int]:
-    """For each reference letter `reference_start ..= reference_end` of `alignment`, the query letter it stands
-    before (a gap's letters count before the reference letter after them): the query's letters over reference
-    `s ..< e` are `query_at[s - reference_start] ..< query_at[e - reference_start]`."""
-    var out = List[Int](capacity=alignment.reference_end - alignment.reference_start + 1)
-    var q = alignment.query_start
-    var ops = _ops(alignment.cigar)
-    for ref op in ops:
-        var length = op[0]
-        var letter = op[1]
-        if letter == UInt8(ord("I")):
-            q += length
-            continue
-        for _ in range(length):
-            out.append(q)
-            if letter != UInt8(ord("D")):
-                q += 1
-    out.append(q)
-    return out^
-
-
 def _differences(mut aligner: Aligner, longer: List[UInt8], shorter: List[UInt8], costs: Costs) raises -> List[_Site]:
-    """Where `shorter`, placed inside `longer` (`Mode.INFIX`: a consensus cut short where its reads stop is not
-    thereby another haplotype), spells it otherwise, each place widened by `SITE_FLANK` and those that then touch
-    joined."""
+    """Where `shorter`, placed inside `longer` (`Mode.INFIX`), spells it otherwise, each place widened by
+    `SITE_FLANK` and those that then touch joined."""
     var out = List[_Site]()
     if len(longer) == 0 or len(shorter) == 0 or longer == shorter:
         return out^
     var placed = aligner.align(Span(longer), Span(shorter), costs, Mode.INFIX, ties=Ties.LEFT)
-    var at = _query_at(placed)
+    var at = query_at(placed)
     var spans = List[Tuple[Int, Int]]()
     var r = placed.reference_start
-    var ops = _ops(placed.cigar)
-    for ref op in ops:
-        var length = op[0]
-        var letter = op[1]
-        if letter == UInt8(ord("=")) or letter == UInt8(ord("M")):
+    var run_n = 0
+    for ch in placed.cigar.as_bytes():
+        if ch >= 48 and ch <= 57:
+            run_n = run_n * 10 + Int(ch - 48)
+            continue
+        var length = run_n if run_n > 0 else 1
+        run_n = 0
+        if ch == MATCH or ch == ALIGN_MATCH:
             r += length
             continue
-        var consumed = 0 if letter == UInt8(ord("I")) else length
+        var consumed = 0 if ch == INSERTION else length
         var start = max(placed.reference_start, r - SITE_FLANK)
         var end = min(placed.reference_end, r + consumed + SITE_FLANK)
         if len(spans) > 0 and start <= spans[len(spans) - 1][1]:
@@ -131,62 +79,85 @@ def _differences(mut aligner: Aligner, longer: List[UInt8], shorter: List[UInt8]
             spans.append((start, end))
         r += consumed
     for ref span in spans:
-        var long_letters = List[UInt8]()
+        var long_letters = List[UInt8](capacity=span[1] - span[0])
         for i in range(span[0], span[1]):
             long_letters.append(longer[i])
         var short_start = at[span[0] - placed.reference_start]
         var short_end = at[span[1] - placed.reference_start]
-        var short_letters = List[UInt8]()
+        var short_letters = List[UInt8](capacity=short_end - short_start)
         for i in range(short_start, short_end):
             short_letters.append(shorter[i])
         out.append(_Site(span[0], span[1], short_start, short_end, long_letters^, short_letters^))
     return out^
 
 
-def _haplotype_at(alignment: Alignment) -> List[Int]:
-    """`_query_at` the other way round: for a haplotype placed inside a read (`alignment`'s query the haplotype, its
-    reference the read; `Mode.INFIX`, so every haplotype letter is placed), for each haplotype letter `0 ..= len` the
-    read letter it stands before, a gap's letters counting before the haplotype letter after them."""
-    var out = List[Int](capacity=alignment.query_end - alignment.query_start + 1)
-    var r = alignment.reference_start
-    var ops = _ops(alignment.cigar)
-    for ref op in ops:
-        var length = op[0]
-        var letter = op[1]
-        if letter == UInt8(ord("D")):
-            r += length
-            continue
-        for _ in range(length):
-            out.append(r)
-            if letter != UInt8(ord("I")):
-                r += 1
-    out.append(r)
-    return out^
-
-
 def _spelling(seq: List[UInt8], start: Int, end: Int, at: List[Int], lo: Int, hi: Int, site: _Site) -> Int:
-    """Which spelling of `site` a read carries, placed over a haplotype's letters `start ..< end` (`at`: the read
-    letter each haplotype letter from `start` stands before), the site lying on that haplotype's `lo ..< hi`: 0 the
-    longer's spelling, 1 the shorter's, -1 neither, or a place the read does not span wholly short of its
-    placement's ends, where a read running past the haplotype's end piles its overhang."""
+    """Which spelling of `site` a read carries: 0 the longer's, 1 the shorter's, -1 neither."""
     if lo <= start or hi >= end:
         return -1
-    var letters = List[UInt8]()
-    for q in range(at[lo - start], at[hi - start]):
-        letters.append(seq[q])
-    if letters == site.longer:
-        return 0
-    if letters == site.shorter:
-        return 1
+    var q0 = at[lo - start]
+    var q1 = at[hi - start]
+    var span_len = q1 - q0
+    if span_len == len(site.longer):
+        var eq = True
+        for k in range(span_len):
+            if seq[q0 + k] != site.longer[k]:
+                eq = False
+                break
+        if eq:
+            return 0
+    if span_len == len(site.shorter):
+        var eq = True
+        for k in range(span_len):
+            if seq[q0 + k] != site.shorter[k]:
+                eq = False
+                break
+        if eq:
+            return 1
     return -1
 
 
 def _first(a: List[UInt8], b: List[UInt8]) -> Bool:
-    """Whether `a` comes first in letter order, or equals `b`."""
     for i in range(min(len(a), len(b))):
         if a[i] != b[i]:
             return a[i] < b[i]
     return len(a) <= len(b)
+
+
+def _spell_one_builder(
+    mut aligner: Aligner,
+    made: List[List[UInt8]],
+    seq: List[UInt8],
+    h: Int,
+    long_index: Int,
+    short_index: Int,
+    sites: List[_Site],
+    costs: Costs,
+) raises -> List[Int]:
+    """Aligns one builder read to its target haplotype and scores its spelling at every differing site."""
+    var on_shorter = h == short_index
+    ref haplotype = made[short_index if on_shorter else long_index]
+    var start: Int
+    var end: Int
+    var at: List[Int]
+    if len(seq) > len(haplotype):
+        var inside = aligner.align(Span(seq), Span(haplotype), costs, Mode.INFIX, ties=Ties.LEFT)
+        at = haplotype_at(inside)
+        start = 0
+        end = len(haplotype)
+    else:
+        var placed = aligner.align(Span(haplotype), Span(seq), costs, Mode.INFIX, ties=Ties.LEFT)
+        at = query_at(placed)
+        start = placed.reference_start
+        end = placed.reference_end
+    var row = List[Int](length=len(sites), fill=-1)
+    for k in range(len(sites)):
+        ref site = sites[k]
+        if on_shorter:
+            row[k] = _spelling(seq, start, end, at, site.short_start, site.short_end, site)
+        else:
+            row[k] = _spelling(seq, start, end, at, site.start, site.end, site)
+    return row^
 
 
 def _sides(
@@ -197,18 +168,10 @@ def _sides(
     reads: List[Int],
     costs: Costs,
     labels: List[Int] = List[Int](),
+    threads: Int = 1,
 ) raises -> List[Int]:
-    """For each of `reads`, the haplotype of `made` whose letters it carries where the two differ: 0 or 1, `TO_BOTH`
-    when it covers no such place (a stretch where the two read alike, or one neither reaches), -1 when it carries as
-    many of one's as of the other's. Every read of `builders` (labelled or not) is placed on a haplotype
-    (`Mode.INFIX`) and its letters over each place it spans wholly compared with the two spellings there -- a read
-    labelled with the shorter's haplotype on the shorter, at each place's span there, every other read on the
-    longer; a place
-    decides only where each spelling is carried by `MIN_CARRIERS` of them and `MIN_CARRIER_SHARE` of those spelling
-    it either way, or where `labels` (a haplotype per read of `seqs`, -1 none) back it (`PHASED_CARRIERS`)."""
+    """For each of `reads`, the haplotype of `made` whose letters it carries where the two differ."""
     var out = List[Int](length=len(reads), fill=TO_BOTH)
-    # The longer haplotype's consensus; of two as long, the one first in letter order, so the roles go by the
-    # sequences and not by which label each has (by the label, swapping the labels moved the places and the reads).
     var long_index = (
         0 if len(made[0]) > len(made[1]) or (len(made[0]) == len(made[1]) and _first(made[0], made[1])) else 1
     )
@@ -217,51 +180,69 @@ def _sides(
     var sites = _differences(aligner, longer, made[short_index], costs)
     if len(sites) == 0:
         return out^
-    # Each read's spelling at each place: row per read of `builders`.
-    var spelt = List[List[Int]]()
+    var n_builders = len(builders)
+    var spelt = List[List[Int]](length=n_builders, fill=List[Int]())
     var row_of = List[Int](length=len(seqs), fill=-1)
-    for b in range(len(builders)):
-        ref seq = seqs[builders[b]]
-        # A read labelled with the shorter's haplotype is placed on the shorter, the places read at their spans there
-        # (`_Site.short_start`): it carries that haplotype's letters, and placed on the longer it would differ from it
-        # wherever the two do. NA19007's HLA-DRB1 (*09:01 and *08:03, hundreds of edits apart through the introns):
-        # 77 reads placed on the other haplotype at half a second each, 39 of the window's 47 s, for 2 unlabelled
-        # reads. Every other read is placed on the longer.
-        var h = labels[builders[b]] if len(labels) > 0 else -1
-        var on_shorter = h == short_index
-        ref haplotype = made[short_index if on_shorter else long_index]
-        # A read is placed inside the haplotype, unless it is the longer of the two: then the haplotype inside it.
-        # A haplotype built from a few labelled reads can be a fraction of the window (HG02106's HLA-DPB1: 2,716 and
-        # 3,732 letters from 7 of 71 reads), and a 15.7 kb read forced inside 3.7 kb is a 12 kb gap, which an
-        # alignment's cost grows with: 1.8 s a read, 57 of the window's 59 s. The other way round the two differ by
-        # what the read's errors and the haplotypes' differences make, and every haplotype letter has its read
-        # letter.
-        var start: Int
-        var end: Int
-        var at: List[Int]
-        if len(seq) > len(haplotype):
-            var inside = aligner.align(Span(seq), Span(haplotype), costs, Mode.INFIX, ties=Ties.LEFT)
-            at = _haplotype_at(inside)
-            start = 0
-            end = len(haplotype)
-        else:
-            var placed = aligner.align(Span(haplotype), Span(seq), costs, Mode.INFIX, ties=Ties.LEFT)
-            at = _query_at(placed)
-            start = placed.reference_start
-            end = placed.reference_end
-        var row = List[Int](length=len(sites), fill=-1)
-        for k in range(len(sites)):
-            ref site = sites[k]
-            if on_shorter:
-                row[k] = _spelling(seq, start, end, at, site.short_start, site.short_end, site)
-            else:
-                row[k] = _spelling(seq, start, end, at, site.start, site.end, site)
-        spelt.append(row^)
+    for b in range(n_builders):
         row_of[builders[b]] = b
+    var workers = thread_count(threads, n_builders)
+    if workers > 1 and n_builders >= 2:
+        var order = List[UInt64](capacity=n_builders)
+        for b in range(n_builders):
+            order.append((UInt64(len(seqs[builders[b]])) << 32) | UInt64(b))
+        sort(order)
+        order.reverse()
+        var failed = List[Bool](length=n_builders, fill=False)
+        var spelt_p = spelt.unsafe_ptr()
+        var failed_p = failed.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+
+        def spell_worker(
+            slot: Int,
+        ) {
+            mut taken,
+            imm order,
+            imm builders,
+            imm labels,
+            imm made,
+            imm seqs,
+            imm long_index,
+            imm short_index,
+            imm sites,
+            imm costs,
+            imm spelt_p,
+            imm failed_p,
+        }:
+            var local_aligner = Aligner(warm=False)
+            while True:
+                var idx = Int(taken.fetch_add(1))
+                if idx >= len(order):
+                    return
+                var b = Int(order[idx] & 0xFFFFFFFF)
+                var r = builders[b]
+                var h = labels[r] if len(labels) > 0 else -1
+                try:
+                    spelt_p[unsafe_offset=b] = _spell_one_builder(
+                        local_aligner, made, seqs[r], h, long_index, short_index, sites, costs
+                    )
+                except:
+                    failed_p[unsafe_offset=b] = True
+
+        spread(spell_worker, workers, workers)
+        for b in range(n_builders):
+            if failed[b]:
+                var r = builders[b]
+                var h = labels[r] if len(labels) > 0 else -1
+                spelt[b] = _spell_one_builder(aligner, made, seqs[r], h, long_index, short_index, sites, costs)
+    else:
+        for b in range(n_builders):
+            var r = builders[b]
+            var h = labels[r] if len(labels) > 0 else -1
+            spelt[b] = _spell_one_builder(aligner, made, seqs[r], h, long_index, short_index, sites, costs)
+
     var counted = List[Bool](length=len(sites), fill=False)
     for k in range(len(sites)):
         var carriers = [0, 0]
-        # own[2 * h + c]: reads labelled h spelling the place c (0 the longer haplotype's spelling).
         var own = List[Int](length=4, fill=0)
         for b in range(len(spelt)):
             var c = spelt[b][k]
@@ -274,7 +255,6 @@ def _sides(
         var fewer = min(carriers[0], carriers[1])
         counted[k] = fewer >= MIN_CARRIERS and Float64(fewer) >= MIN_CARRIER_SHARE * Float64(carriers[0] + carriers[1])
         if not counted[k]:
-            # Labels back it: the longer haplotype's reads spell it 0, the other's 1.
             var mine = own[2 * long_index]
             var theirs = own[2 * short_index + 1]
             var mine_all = own[2 * long_index] + own[2 * long_index + 1]
@@ -290,7 +270,6 @@ def _sides(
         ref row = spelt[row_of[reads[i]]]
         for k in range(len(sites)):
             if counted[k] and row[k] >= 0:
-                # Spelling 0 is the longer haplotype's.
                 votes[long_index if row[k] == 0 else 1 - long_index] += 1
         if votes[0] > votes[1]:
             out[i] = 0
@@ -302,11 +281,72 @@ def _sides(
 
 
 def _any_builds(anchor_of: List[Int]) -> Bool:
-    """Whether any read is anchored (`BOTH`, `LEFT` or `RIGHT`), not inside."""
     for a in anchor_of:
         if a != INSIDE:
             return True
     return False
+
+
+def _build_pair(
+    mut scratch: ConsensusScratch,
+    seqs: List[List[UInt8]],
+    groups: List[List[Int]],
+    build_mask: List[Bool],
+    build_anchor: List[Int],
+    strand_of: List[Int],
+    options: ConsensusOptions,
+    homopolymers: HomopolymerModel,
+    mut made: List[List[UInt8]],
+    mut joined: List[Bool],
+) raises:
+    """Builds whichever of the two haplotypes `build_mask` requests, concurrently when both run and `threads > 1`."""
+    if options.poa.threads > 1 and build_mask[0] and build_mask[1]:
+        var sub_options = options.copy()
+        sub_options.poa.threads = max(1, options.poa.threads // 2)
+        var built = List[List[UInt8]](length=2, fill=List[UInt8]())
+        var built_joined = List[Bool](length=2, fill=True)
+        var failed = List[Bool](length=2, fill=False)
+        var built_p = built.unsafe_ptr()
+        var joined_p = built_joined.unsafe_ptr()
+        var failed_p = failed.unsafe_ptr()
+
+        def build_hap(
+            k: Int,
+        ) {
+            imm seqs,
+            imm groups,
+            imm build_anchor,
+            imm strand_of,
+            imm sub_options,
+            imm homopolymers,
+            imm built_p,
+            imm joined_p,
+            imm failed_p,
+        }:
+            var local_scratch = ConsensusScratch()
+            var whole = True
+            try:
+                built_p[unsafe_offset=k] = _consensus_of(
+                    local_scratch, seqs, groups[k], build_anchor, strand_of, sub_options, homopolymers, whole
+                )
+                joined_p[unsafe_offset=k] = whole
+            except:
+                failed_p[unsafe_offset=k] = True
+
+        spread(build_hap, 2, 2)
+        for k in range(2):
+            if failed[k]:
+                made[k] = _consensus_of(
+                    scratch, seqs, groups[k], build_anchor, strand_of, options, homopolymers, joined[k]
+                )
+            else:
+                made[k] = built[k].copy()
+                joined[k] = built_joined[k]
+        return
+
+    for k in range(2):
+        if build_mask[k]:
+            made[k] = _consensus_of(scratch, seqs, groups[k], build_anchor, strand_of, options, homopolymers, joined[k])
 
 
 def phased_consensus(
@@ -318,17 +358,21 @@ def phased_consensus(
     homopolymers: HomopolymerModel = HomopolymerModel(),
 ) raises -> Clustered:
     """The two haplotypes' consensus sequences of reads already phased (`haplotypes`: 0 or 1 per read, -1 for a read
-    of neither), each made as `consensus` makes one from its reads, and every read's alignment to its haplotype's
-    (see `clustered_consensus`). A read of neither builds as well: made first from the labelled reads, the two are
-    made again with each such read on the haplotype whose letters it carries where they differ, on both where it
-    covers no such place, on neither where it carries as many of each (`_sides`); it is then placed where it fits
-    best. Where the two differ by the length of a run of one letter and a homopolymer model is loaded, each such run
-    is decided on both haplotypes' reads together, whatever else the two differ by: their own lengths for the two only
-    when that explains the reads `options.two_lengths_db` better than one length for both, else that one length in
-    both (a run is far more often the same on the two haplotypes than not). Two clusters always: a haplotype no read
-    is labelled with is made from the unlabelled reads alone (every one of them, as the other's consensus differs
-    from itself nowhere), and with no labelled read at all both are the unlabelled reads' one consensus. With every
-    read inside, all of them build as if spanning (as `clustered_consensus` has it)."""
+    of neither), each made as `consensus` makes one from its reads, and every read's alignment to its haplotype's."""
+    var scratch = ConsensusScratch()
+    return phased_consensus(scratch, seqs^, haplotypes, anchors, strands, options, homopolymers)
+
+
+def phased_consensus(
+    mut scratch: ConsensusScratch,
+    var seqs: List[List[UInt8]],
+    haplotypes: List[Int],
+    anchors: List[Int] = List[Int](),
+    strands: List[Int] = List[Int](),
+    options: ConsensusOptions = ConsensusOptions(),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+) raises -> Clustered:
+    """As `phased_consensus`, reusing `scratch` across calls."""
     var n = len(seqs)
     if len(haplotypes) != n:
         raise Error(t"{len(haplotypes)} haplotypes for {n} sequences")
@@ -338,7 +382,6 @@ def phased_consensus(
         raise Error(t"{len(strands)} strands for {n} sequences")
     var anchor_of = anchors.copy() if len(anchors) > 0 else List[Int](length=n, fill=BOTH)
     var strand_of = strands.copy() if len(strands) > 0 else List[Int](length=n, fill=STRAND_UNKNOWN)
-    # The reads that build: all but those inside, or with every read inside all of them as if spanning.
     var build_anchor = anchor_of.copy()
     if INSIDE in anchor_of and not _any_builds(anchor_of):
         for r in range(n):
@@ -359,36 +402,26 @@ def phased_consensus(
         if haplotypes[r] < 0 and build_anchor[r] != INSIDE:
             unlabelled.append(r)
     if not labelled[0] and not labelled[1] and len(unlabelled) > 0:
-        # No labelled read builds: both haplotypes the unlabelled reads' one consensus.
         groups[0] = unlabelled.copy()
         groups[1] = unlabelled.copy()
         unlabelled.clear()
-    var made = List[List[UInt8]]()
+    var made = List[List[UInt8]](length=2, fill=List[UInt8]())
     var joined: List[Bool] = [True, True]
-    for k in range(2):
-        made.append(
-            _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers, joined[k]) if len(groups[k])
-            > 0 else (List[UInt8]())
-        )
+    var initial_mask: List[Bool] = [len(groups[0]) > 0, len(groups[1]) > 0]
+    _build_pair(scratch, seqs, groups, initial_mask, build_anchor, strand_of, options, homopolymers, made, joined)
     if len(groups[1]) == 0:
         made[1] = made[0].copy()
         joined[1] = joined[0]
     if len(groups[0]) == 0:
         made[0] = made[1].copy()
         joined[0] = joined[1]
-    var aligner = Aligner(warm=False)
-    # Reads of neither haplotype build too: each joins the haplotype whose letters it carries where the two differ,
-    # or both where it covers no such place, and the two are made again. Left out of building, they left a haplotype
-    # pieced together from its few labelled reads wherever pgphase's phase set ends inside the window: HG002's
-    # HLA-DPA1 thinned to 15x, its 14 reads of the window's left end all unlabelled, had haplotype 2's left half from
-    # its one spanning read, 36 edits from the truth; at 10x, with no labelled read reaching that end, both
-    # haplotypes stopped short, at 3,915 and 8,058 letters of 18,180. With them: 0 and 1 edits, then 0 and 0.
+    var threads = options.poa.threads
     if len(unlabelled) > 0:
         var costs = alignment_costs(options.poa.scoring)
         var builders = groups[0].copy()
         builders.extend(groups[1].copy())
         builders.extend(unlabelled.copy())
-        var sides = _sides(aligner, made, seqs, builders, unlabelled, costs, haplotypes)
+        var sides = _sides(scratch.aligner, made, seqs, builders, unlabelled, costs, haplotypes, threads)
         var trace = Trace()
         if trace.on(PHASED):
             var count = [0, 0, 0, 0]
@@ -413,24 +446,20 @@ def phased_consensus(
                     " to neither",
                 ),
             )
-        var grew = [False, False]
+        var grew: List[Bool] = [False, False]
         for i in range(len(unlabelled)):
             for k in range(2):
                 if sides[i] == k or sides[i] == TO_BOTH:
                     groups[k].append(unlabelled[i])
                     grew[k] = True
-        # A haplotype no read is labelled with is made from the unlabelled reads sent to both (the two read alike
-        # before, so every one is): a phase set covering one haplotype only leaves the other's reads unlabelled,
-        # and they still make it. One noisy unlabelled read alone makes it as well.
-        for k in range(2):
-            if grew[k]:
-                made[k] = _consensus_of(seqs, groups[k], build_anchor, strand_of, options, homopolymers, joined[k])
-    # Each run the two differ by is decided on both haplotypes' reads together, whatever else the two differ by.
+        _build_pair(scratch, seqs, groups, grew, build_anchor, strand_of, options, homopolymers, made, joined)
     var runs0 = List[Int]()
     var runs1 = List[Int]()
     if homopolymers.loaded() and made[0] != made[1]:
-        _ = _run_pairs(aligner, made[0], made[1], max(options.noise_run, 2), runs0, runs1)
+        _ = _run_pairs(scratch.aligner, made[0], made[1], max(options.noise_run, 2), runs0, runs1)
     if len(runs0) > 0:
+        var aligned0 = _align_group_reads(scratch.aligner, made[0], seqs, groups[0], anchor_of, threads)
+        var aligned1 = _align_group_reads(scratch.aligner, made[1], seqs, groups[1], anchor_of, threads)
         var first = List[Int]()
         var second = List[Int]()
         var lengths0 = List[Int]()
@@ -445,21 +474,16 @@ def phased_consensus(
             while e1 < len(made[1]) and made[1][e1] == made[1][s1]:
                 e1 += 1
             var base = Int(encode_base(made[0][s]))
-            # Each haplotype's reads scored with its own consensus's flanks: the two may differ beside the run.
             var flanks0 = _flanks(made[0], s, e)
             var flanks1 = _flanks(made[1], s1, e1)
-            # From 4 under the shorter of the two haplotypes' lengths to 4 over the longer: they may be far apart.
             var low = max(2, min(e - s, e1 - s1) - 4)
             var high = max(e - s, e1 - s1) + 4
             if not homopolymers.covers(base, high):
-                # A run longer than the model's rows: it cannot say, so each haplotype keeps its own consensus's
-                # length (searched within the rows alone, both came out at the longest row: T59 as T50).
                 first.append(e - s)
                 second.append(e1 - s1)
                 continue
-            # Each haplotype's reads measured on its own consensus: the two may differ beside the run.
-            _read_lengths(aligner, made[0], s, e, seqs, groups[0], anchor_of, lengths0)
-            _read_lengths(aligner, made[1], s1, e1, seqs, groups[1], anchor_of, lengths1)
+            _read_lengths_from(aligned0, made[0], s, e, seqs, groups[0], lengths0)
+            _read_lengths_from(aligned1, made[1], s1, e1, seqs, groups[1], lengths1)
             var shared_score = 0.0
             var score0 = 0.0
             var score1 = 0.0
@@ -484,7 +508,6 @@ def phased_consensus(
                 homopolymers, base, flanks1[0], flanks1[1], lengths1, strand_of, groups[1], low, high, score1
             )
             if shared < 0 or own0 < 0 or own1 < 0:
-                # Too few reads to say: as the two consensus sequences have it.
                 first.append(e - s)
                 second.append(e1 - s1)
                 continue
@@ -494,8 +517,6 @@ def phased_consensus(
             else:
                 first.append(shared)
                 second.append(shared)
-            # A haplotype whose reads report the letter once there has no run (`reads_say_one`): the search above
-            # starts at 2 (chr20:8,254,476, 42 reads T against the other haplotype's 26 TTT: written TT, the truth T).
             if reads_say_one(lengths0):
                 first[k] = 1
             if reads_say_one(lengths1):
@@ -504,4 +525,6 @@ def phased_consensus(
         var b = made[1].copy()
         made[0] = _set_runs(a, runs0, first)
         made[1] = _set_runs(b, runs1, second)
-    return _placed(aligner, made^, joined^, seqs, cluster_of, anchor_of, alignment_costs(options.poa.scoring))
+    return _placed(
+        scratch.aligner, made^, joined^, seqs, cluster_of, anchor_of, alignment_costs(options.poa.scoring), threads
+    )

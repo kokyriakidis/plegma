@@ -3,38 +3,92 @@ consensus path, each pin's letters matched to its path node, and the kernel's DP
 pinned nodes (the subgraph a path from one to the other can visit). The DP's cells then follow the windows, not the
 whole graph times the sequence; where the chain finds no pins, the one window is the whole graph."""
 
+from std.atomic import Atomic
+
+from karan.common import spread, thread_count
+
 from .alphabet import encode_base
 from .graph import Graph
 from .kernel import GLOBAL, PREFIX, SINK, SOURCE, SUFFIX, GraphAlignment, Scoring, Topology, Workspace
-from .pins import Pins, pins
+from .pins import Pins, pins_with_index
+from .seeds import ReferenceIndex
 from .trace import PINS, Trace
 
 
+struct _PinnedWorker(Movable):
+    """Per-worker reusable state for parallel `align_pinned` window DP."""
+
+    var row_of: List[Int]
+    var marks: List[UInt8]
+    var touched: List[Int]
+    var stack: List[Int]
+    var keys: List[Int]
+    var workspace: Workspace
+
+    def __init__(out self):
+        self.row_of = List[Int]()
+        self.marks = List[UInt8]()
+        self.touched = List[Int]()
+        self.stack = List[Int]()
+        self.keys = List[Int]()
+        self.workspace = Workspace()
+
+
 struct WindowScratch(Movable):
-    """Reusable marks for `window_nodes`: one byte a node, reset after each call for the nodes it touched."""
+    """Reusable marks for `window_nodes`, consensus-path `ReferenceIndex` cache, heaviest-path buffers, and parallel
+    worker pool for `align_pinned`."""
 
     var marks: List[UInt8]
     var touched: List[Int]
+    var stack: List[Int]
+    var keys: List[Int]
+    var hp_starts: List[Int]
+    var hp_ends: List[Int]
+    var hp_score: List[Int]
+    var hp_next: List[Int]
+    var hp_path: List[Int]
+    var hp_letters: List[UInt8]
+    var cached_letters: List[UInt8]
+    var cached_index: ReferenceIndex
+    var has_cached_index: Bool
+    var workers: List[_PinnedWorker]
 
     def __init__(out self):
         self.marks = List[UInt8]()
         self.touched = List[Int]()
+        self.stack = List[Int]()
+        self.keys = List[Int]()
+        self.hp_starts = List[Int]()
+        self.hp_ends = List[Int]()
+        self.hp_score = List[Int]()
+        self.hp_next = List[Int]()
+        self.hp_path = List[Int]()
+        self.hp_letters = List[UInt8]()
+        self.cached_letters = List[UInt8]()
+        self.cached_index = ReferenceIndex()
+        self.has_cached_index = False
+        self.workers = List[_PinnedWorker]()
 
 
-def window_nodes(
-    graph: Graph, rank: List[Int], order: List[Int], left: Int, right: Int, mut scratch: WindowScratch
+def _window_nodes_into(
+    graph: Graph,
+    rank: List[Int],
+    order: List[Int],
+    left: Int,
+    right: Int,
+    mut marks: List[UInt8],
+    mut touched: List[Int],
+    mut stack: List[Int],
+    mut keys: List[Int],
 ) -> List[Int]:
-    """The nodes strictly between `left` and `right` (or `SOURCE`, `SINK`) that a path from one to the other can
-    visit, in topological order (`rank` each node's place in `order`), touching only the nodes between the two ends
-    (and, at the graph's ends, its sources or sinks)."""
     var count = len(graph)
-    if len(scratch.marks) < count:
-        scratch.marks.resize(count, 0)
+    if len(marks) < count:
+        marks.resize(count, 0)
     var low = rank[left] if left >= 0 else -1
     var high = rank[right] if right >= 0 else count
     comptime FORWARD = UInt8(1)
     comptime BOTH = UInt8(2)
-    var stack = List[Int]()
+    stack.clear()
     if left >= 0:
         var e = Int(graph.first_out[left])
         while e >= 0:
@@ -46,10 +100,10 @@ def window_nodes(
                 stack.append(node)
     while len(stack) > 0:
         var node = stack.pop()
-        if rank[node] >= high or scratch.marks[node] != 0:
+        if rank[node] >= high or marks[node] != 0:
             continue
-        scratch.marks[node] = FORWARD
-        scratch.touched.append(node)
+        marks[node] = FORWARD
+        touched.append(node)
         var e = Int(graph.first_out[node])
         while e >= 0:
             stack.append(Int(graph.edge_to[e]))
@@ -63,20 +117,20 @@ def window_nodes(
         for node in range(count):
             if graph.out_degree[node] == 0:
                 stack.append(node)
-    var keys = List[Int]()
+    keys.clear()
     while len(stack) > 0:
         var node = stack.pop()
-        if rank[node] <= low or scratch.marks[node] != FORWARD:
+        if rank[node] <= low or marks[node] != FORWARD:
             continue
-        scratch.marks[node] = BOTH
+        marks[node] = BOTH
         keys.append(rank[node])
         var e = Int(graph.first_in[node])
         while e >= 0:
             stack.append(Int(graph.edge_from[e]))
             e = Int(graph.next_in[e])
-    for node in scratch.touched:
-        scratch.marks[node] = 0
-    scratch.touched.clear()
+    for node in touched:
+        marks[node] = 0
+    touched.clear()
     sort(keys)
     var out = List[Int](capacity=len(keys))
     for r in keys:
@@ -84,8 +138,22 @@ def window_nodes(
     return out^
 
 
+def window_nodes(
+    graph: Graph, rank: List[Int], order: List[Int], left: Int, right: Int, mut scratch: WindowScratch
+) -> List[Int]:
+    """The nodes strictly between `left` and `right` (or `SOURCE`, `SINK`) that a path from one to the other can
+    visit, in topological order (`rank` each node's place in `order`), touching only the nodes between the two ends
+    (and, at the graph's ends, its sources or sinks)."""
+    return _window_nodes_into(
+        graph, rank, order, left, right, scratch.marks, scratch.touched, scratch.stack, scratch.keys
+    )
+
+
 comptime UNIQUE_K = 19
 """A pin is kept where the k-mer centred on it is unique in both sequences (minimap2's seed length)."""
+comptime _BLOOM_WORDS = 64
+comptime _BLOOM_BITS = _BLOOM_WORDS * 64
+comptime _BLOOM_MASK = UInt64(_BLOOM_BITS - 1)
 
 
 def _kmer(seq: List[UInt8], start: Int) -> UInt64:
@@ -100,8 +168,14 @@ def _kmer(seq: List[UInt8], start: Int) -> UInt64:
     return code
 
 
-def _count(seq: List[UInt8], mut wanted: Dict[UInt64, Int]):
-    """`wanted`'s k-mers' occurrences in `seq` (each count reset first)."""
+@inline(.always)
+def _bloom_bits(key: UInt64) -> Tuple[Int, Int]:
+    var h = key ^ (key >> 19)
+    return (Int(h & _BLOOM_MASK), Int((h >> 12) & _BLOOM_MASK))
+
+
+def _count(seq: List[UInt8], mut wanted: Dict[UInt64, Int], bloom: Array[UInt64, _BLOOM_WORDS]):
+    """`wanted`'s k-mers' occurrences in `seq` (each count reset first), pre-filtered by `bloom`."""
     for key in wanted.keys():
         wanted[key] = 0
     var mask = (UInt64(1) << UInt64(2 * UNIQUE_K)) - 1
@@ -112,6 +186,13 @@ def _count(seq: List[UInt8], mut wanted: Dict[UInt64, Int]):
         valid = valid + 1 if b < 4 else 0
         code = ((code << 2) | UInt64(b & 3)) & mask
         if valid >= UNIQUE_K:
+            var bits = _bloom_bits(code)
+            var b1 = bits[0]
+            var b2 = bits[1]
+            if (bloom[b1 >> 6] & (UInt64(1) << UInt64(b1 & 63))) == 0:
+                continue
+            if (bloom[b2 >> 6] & (UInt64(1) << UInt64(b2 & 63))) == 0:
+                continue
             var seen = wanted.get(code)
             if seen:
                 wanted[code] = seen.value() + 1
@@ -125,6 +206,7 @@ def unique_pins(reference: List[UInt8], query: List[UInt8], found: Pins) -> List
     var keep = List[Bool](length=len(found.r), fill=False)
     var wanted = Dict[UInt64, Int]()
     var key_of = List[UInt64](length=len(found.r), fill=0)
+    var bloom = Array[UInt64, _BLOOM_WORDS](fill=0)
     for m in range(len(found.r)):
         var r = found.r[m]
         var q = found.q[m]
@@ -136,11 +218,14 @@ def unique_pins(reference: List[UInt8], query: List[UInt8], found: Pins) -> List
         key_of[m] = key
         keep[m] = True
         wanted[key] = 0
+        var bits = _bloom_bits(key)
+        bloom[bits[0] >> 6] |= UInt64(1) << UInt64(bits[0] & 63)
+        bloom[bits[1] >> 6] |= UInt64(1) << UInt64(bits[1] & 63)
     if len(wanted) == 0:
         return keep^
     # Counted in each sequence: occurrences of the pins' k-mers alone.
     for side in range(2):
-        _count(reference if side == 0 else query, wanted)
+        _count(reference if side == 0 else query, wanted, bloom)
         for m in range(len(found.r)):
             if keep[m] and wanted.get(key_of[m], 0) != 1:
                 keep[m] = False
@@ -158,18 +243,31 @@ def align_pinned(
     mut scratch: WindowScratch,
     mut workspace: Workspace,
     mode: Int = GLOBAL,
+    threads: Int = 1,
 ) raises -> GraphAlignment:
     """`query` aligned to the graph through the pins of its alignment to the consensus path (the heaviest bundle): a
     pin whose letters agree anchors that query letter to its path node, and between consecutive anchors the kernel
     aligns the query's letters to the nodes between their nodes. `mode` (`GLOBAL`, `PREFIX` or `SUFFIX`) is the
     alignment's as a whole: the first window starts as it does, the last ends as it does, those between are global.
     `row_of` holds a slot per node."""
-    var path = graph.heaviest_path(topology.order)
-    var letters = List[UInt8](capacity=len(path))
-    for node in path:
-        letters.append(graph.bases[node])
-    var found = pins(letters, query)
-    var unique = unique_pins(letters, query, found)
+    graph.heaviest_path_into(
+        topology.order,
+        scratch.hp_starts,
+        scratch.hp_ends,
+        scratch.hp_score,
+        scratch.hp_next,
+        scratch.hp_path,
+    )
+    scratch.hp_letters.clear()
+    scratch.hp_letters.reserve(len(scratch.hp_path))
+    for node in scratch.hp_path:
+        scratch.hp_letters.append(graph.bases[node])
+    if not scratch.has_cached_index or scratch.cached_letters != scratch.hp_letters:
+        scratch.cached_letters = scratch.hp_letters.copy()
+        scratch.cached_index = ReferenceIndex(scratch.cached_letters)
+        scratch.has_cached_index = True
+    var found = pins_with_index(scratch.cached_index, query)
+    var unique = unique_pins(scratch.hp_letters, query, found)
     # One-letter anchors, each past the last on both: the windows then meet at path nodes, so the alignment's path
     # runs forward through the graph (two windows meeting between nodes could join nodes into a cycle).
     var anchor_r = List[Int]()
@@ -177,7 +275,7 @@ def align_pinned(
     for m in range(len(found.r)):
         var r = found.r[m]
         var q = found.q[m]
-        if not unique[m] or letters[r] != query[q]:
+        if not unique[m] or scratch.hp_letters[r] != query[q]:
             continue
         if len(anchor_r) > 0 and (r <= anchor_r[len(anchor_r) - 1] or q <= anchor_q[len(anchor_q) - 1]):
             continue
@@ -191,7 +289,7 @@ def align_pinned(
                 "pinned alignment: ",
                 len(query),
                 " letters to a path of ",
-                len(path),
+                len(scratch.hp_path),
                 "; ",
                 len(found.r),
                 " pins, ",
@@ -208,46 +306,173 @@ def align_pinned(
     var score = 0
     var cells = 0
     var peak = 0
+    var num_windows = len(anchor_r) + 1
+    var dp_windows = List[Int]()
+    var dp_bases = 0
+    var path_len = len(scratch.hp_path)
     var r0 = -1
     var q0 = -1
-    for m in range(len(anchor_r) + 1):
-        var r1 = anchor_r[m] if m < len(anchor_r) else len(path)
+    for m in range(num_windows):
+        var r1 = anchor_r[m] if m < len(anchor_r) else path_len
         var q1 = anchor_q[m] if m < len(anchor_r) else len(query)
         if q1 - q0 > 1:
-            var left = path[r0] if r0 >= 0 else SOURCE
-            var right = path[r1] if r1 < len(path) else SINK
-            var nodes = window_nodes(graph, topology.rank, topology.order, left, right, scratch)
-            # No nodes between the anchors: the query's letters there are inserted, at a gap's cost (free before the
-            # graph's start in SUFFIX mode, past its end in PREFIX).
-            if len(nodes) == 0:
-                if not ((mode == SUFFIX and r0 < 0) or (mode == PREFIX and r1 >= len(path))):
-                    score -= Int(scoring.gap(q1 - q0 - 1))
-            else:
-                var window = Span(query)[q0 + 1 : q1]
+            dp_windows.append(m)
+            dp_bases += q1 - q0 - 1
+        elif q1 == q0 + 1 and r1 > r0 + 1:
+            var free = (r0 < 0 and mode == SUFFIX) or (r1 >= path_len and mode == PREFIX)
+            var joined = r0 >= 0 and r1 < path_len and graph.edge(scratch.hp_path[r0], scratch.hp_path[r1]) >= 0
+            if not free and not joined:
+                score -= Int(scoring.gap(r1 - r0 - 1))
+        if m < len(anchor_r):
+            aligned[q1] = scratch.hp_path[r1]
+            score += Int(scoring.match_score)
+        r0 = r1
+        q0 = q1
+
+    var workers = thread_count(threads, len(dp_windows))
+    if workers > 1 and len(dp_windows) >= 2 and dp_bases >= 512:
+        # Align independent pin windows concurrently, longest first; each writes to its own disjoint query slice
+        # and reuses its own pooled worker workspace across reads and calls.
+        while len(scratch.workers) < workers:
+            scratch.workers.append(_PinnedWorker())
+        var order = List[UInt64](capacity=len(dp_windows))
+        for m in dp_windows:
+            var q_prev = anchor_q[m - 1] if m > 0 else -1
+            var q_next = anchor_q[m] if m < len(anchor_r) else len(query)
+            order.append((UInt64(q_next - q_prev) << 32) | UInt64(m))
+        sort(order)
+        order.reverse()
+        var w_scores = List[Int](length=num_windows, fill=0)
+        var w_cells = List[Int](length=num_windows, fill=0)
+        var w_peaks = List[Int](length=num_windows, fill=0)
+        var w_failed = List[Bool](length=num_windows, fill=False)
+        var path_p = scratch.hp_path.unsafe_ptr()
+        var pool_p = scratch.workers.unsafe_ptr()
+        var aligned_p = aligned.unsafe_ptr()
+        var scores_p = w_scores.unsafe_ptr()
+        var cells_p = w_cells.unsafe_ptr()
+        var peaks_p = w_peaks.unsafe_ptr()
+        var failed_p = w_failed.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+        var graph_len = len(graph)
+
+        def run_pin_windows(
+            slot: Int,
+        ) {
+            mut taken,
+            imm order,
+            imm anchor_r,
+            imm anchor_q,
+            imm path_p,
+            imm path_len,
+            imm graph,
+            imm topology,
+            imm query,
+            imm scoring,
+            imm window_b,
+            imm mode,
+            imm graph_len,
+            imm pool_p,
+            imm aligned_p,
+            imm scores_p,
+            imm cells_p,
+            imm peaks_p,
+            imm failed_p,
+        }:
+            ref w = pool_p[unsafe_offset=slot]
+            w.row_of.resize(graph_len, -1)
+            while True:
+                var idx = Int(taken.fetch_add(1))
+                if idx >= len(order):
+                    return
+                var m = Int(order[idx] & 0xFFFFFFFF)
+                var wr0 = anchor_r[m - 1] if m > 0 else -1
+                var wq0 = anchor_q[m - 1] if m > 0 else -1
+                var wr1 = anchor_r[m] if m < len(anchor_r) else path_len
+                var wq1 = anchor_q[m] if m < len(anchor_r) else len(query)
+                var left = path_p[unsafe_offset=wr0] if wr0 >= 0 else SOURCE
+                var right = path_p[unsafe_offset=wr1] if wr1 < path_len else SINK
+                var nodes = _window_nodes_into(
+                    graph, topology.rank, topology.order, left, right, w.marks, w.touched, w.stack, w.keys
+                )
+                if len(nodes) == 0:
+                    if not ((mode == SUFFIX and wr0 < 0) or (mode == PREFIX and wr1 >= path_len)):
+                        scores_p[unsafe_offset=m] = -Int(scoring.gap(wq1 - wq0 - 1))
+                    continue
+                var window = Span(query)[wq0 + 1 : wq1]
                 var window_mode = GLOBAL
-                if mode == SUFFIX and r0 < 0:
+                if mode == SUFFIX and wr0 < 0:
                     window_mode = SUFFIX
-                elif mode == PREFIX and r1 >= len(path):
+                elif mode == PREFIX and wr1 >= path_len:
+                    window_mode = PREFIX
+                try:
+                    var got = w.workspace.align(
+                        graph, topology, nodes, left, right, window, scoring, w.row_of, window_mode, window_b, 0.0
+                    )
+                    for j in range(len(got.nodes)):
+                        aligned_p[unsafe_offset=wq0 + 1 + j] = got.nodes[j]
+                    scores_p[unsafe_offset=m] = got.score
+                    cells_p[unsafe_offset=m] = got.cells
+                    peaks_p[unsafe_offset=m] = got.peak_bytes
+                except:
+                    for i in range(len(w.row_of)):
+                        w.row_of[i] = -1
+                    failed_p[unsafe_offset=m] = True
+
+        spread(run_pin_windows, workers, workers)
+        for m in dp_windows:
+            if w_failed[m]:
+                var wr0 = anchor_r[m - 1] if m > 0 else -1
+                var wq0 = anchor_q[m - 1] if m > 0 else -1
+                var wr1 = anchor_r[m] if m < len(anchor_r) else path_len
+                var wq1 = anchor_q[m] if m < len(anchor_r) else len(query)
+                var left = scratch.hp_path[wr0] if wr0 >= 0 else SOURCE
+                var right = scratch.hp_path[wr1] if wr1 < path_len else SINK
+                var nodes = window_nodes(graph, topology.rank, topology.order, left, right, scratch)
+                var window = Span(query)[wq0 + 1 : wq1]
+                var window_mode = GLOBAL
+                if mode == SUFFIX and wr0 < 0:
+                    window_mode = SUFFIX
+                elif mode == PREFIX and wr1 >= path_len:
                     window_mode = PREFIX
                 var got = workspace.align(
                     graph, topology, nodes, left, right, window, scoring, row_of, window_mode, window_b, 0.0
                 )
                 for j in range(len(got.nodes)):
-                    aligned[q0 + 1 + j] = got.nodes[j]
+                    aligned[wq0 + 1 + j] = got.nodes[j]
                 score += got.score
                 cells += got.cells
                 peak = max(peak, got.peak_bytes)
-        elif q1 == q0 + 1 and r1 > r0 + 1:
-            # Anchors on consecutive query letters (or the query's first or last letter anchored): the path's nodes
-            # between them are deleted, at a gap's cost, unless an edge joins the two already or the mode lets the
-            # alignment start (SUFFIX) or end (PREFIX) there.
-            var free = (r0 < 0 and mode == SUFFIX) or (r1 >= len(path) and mode == PREFIX)
-            var joined = r0 >= 0 and r1 < len(path) and graph.edge(path[r0], path[r1]) >= 0
-            if not free and not joined:
-                score -= Int(scoring.gap(r1 - r0 - 1))
-        if m < len(anchor_r):
-            aligned[q1] = path[r1]
-            score += Int(scoring.match_score)
-        r0 = r1
-        q0 = q1
+            else:
+                score += w_scores[m]
+                cells += w_cells[m]
+                peak = max(peak, w_peaks[m])
+        return GraphAlignment(aligned^, score, cells, peak)
+
+    for m in dp_windows:
+        var wr0 = anchor_r[m - 1] if m > 0 else -1
+        var wq0 = anchor_q[m - 1] if m > 0 else -1
+        var wr1 = anchor_r[m] if m < len(anchor_r) else path_len
+        var wq1 = anchor_q[m] if m < len(anchor_r) else len(query)
+        var left = scratch.hp_path[wr0] if wr0 >= 0 else SOURCE
+        var right = scratch.hp_path[wr1] if wr1 < path_len else SINK
+        var nodes = window_nodes(graph, topology.rank, topology.order, left, right, scratch)
+        if len(nodes) == 0:
+            if not ((mode == SUFFIX and wr0 < 0) or (mode == PREFIX and wr1 >= path_len)):
+                score -= Int(scoring.gap(wq1 - wq0 - 1))
+        else:
+            var window = Span(query)[wq0 + 1 : wq1]
+            var window_mode = GLOBAL
+            if mode == SUFFIX and wr0 < 0:
+                window_mode = SUFFIX
+            elif mode == PREFIX and wr1 >= path_len:
+                window_mode = PREFIX
+            var got = workspace.align(
+                graph, topology, nodes, left, right, window, scoring, row_of, window_mode, window_b, 0.0
+            )
+            for j in range(len(got.nodes)):
+                aligned[wq0 + 1 + j] = got.nodes[j]
+            score += got.score
+            cells += got.cells
+            peak = max(peak, got.peak_bytes)
     return GraphAlignment(aligned^, score, cells, peak)

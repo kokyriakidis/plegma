@@ -24,16 +24,22 @@ prepare = "mkdir -p build"
 # The submodules deps/sporos (FASTA/FASTQ reading) and deps/karan (pairwise alignment) are on every include path.
 build = { cmd = "mojo precompile -I deps/sporos -I deps/karan plegma -o build/plegma.mojoc", depends-on = ["prepare"] }
 build-test-alphabet = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_alphabet.mojo -o build/test_alphabet", depends-on = ["prepare"] }
+build-test-cigar = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_cigar.mojo -o build/test_cigar", depends-on = ["prepare"] }
 build-test-deps = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_deps.mojo -o build/test_deps", depends-on = ["prepare"] }
 build-test-graph = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_graph.mojo -o build/test_graph", depends-on = ["prepare"] }
+build-test-topology-simd = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_topology_simd.mojo -o build/test_topology_simd", depends-on = ["prepare"] }
 build-test-kernel = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_kernel.mojo -o build/test_kernel", depends-on = ["prepare"] }
+build-test-seeds-chain = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_seeds_chain.mojo -o build/test_seeds_chain", depends-on = ["prepare"] }
 build-test-homopolymer = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_homopolymer.mojo -o build/test_homopolymer", depends-on = ["prepare"] }
+build-test-order-clusters = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_order_clusters.mojo -o build/test_order_clusters", depends-on = ["prepare"] }
 build-test-clustered = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_clustered.mojo -o build/test_clustered", depends-on = ["prepare"] }
 build-test-polish = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_polish.mojo -o build/test_polish", depends-on = ["prepare"] }
 build-test-pinned = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_pinned.mojo -o build/test_pinned", depends-on = ["prepare"] }
+build-test-anchored-join = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_anchored_join.mojo -o build/test_anchored_join", depends-on = ["prepare"] }
 build-test-poa = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_poa.mojo -o build/test_poa", depends-on = ["prepare"] }
 build-test-reference = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_reference.mojo -o build/test_reference", depends-on = ["prepare"] }
-test = { cmd = "./build/test_alphabet && ./build/test_deps && ./build/test_graph && ./build/test_kernel && ./build/test_polish && ./build/test_clustered && ./build/test_homopolymer && ./build/test_pinned && ./build/test_poa && ./build/test_reference", depends-on = ["build-test-poa", "build-test-clustered", "build-test-alphabet", "build-test-deps", "build-test-graph", "build-test-kernel", "build-test-polish", "build-test-homopolymer", "build-test-pinned", "build-test-reference"] }
+build-test-parallel-scratch = { cmd = "mojo build -I . -I deps/sporos -I deps/karan -I tests tests/test_parallel_scratch.mojo -o build/test_parallel_scratch", depends-on = ["prepare"] }
+test = { cmd = "./build/test_alphabet && ./build/test_cigar && ./build/test_deps && ./build/test_graph && ./build/test_topology_simd && ./build/test_kernel && ./build/test_seeds_chain && ./build/test_polish && ./build/test_order_clusters && ./build/test_clustered && ./build/test_homopolymer && ./build/test_pinned && ./build/test_anchored_join && ./build/test_poa && ./build/test_reference && ./build/test_parallel_scratch", depends-on = ["build-test-poa", "build-test-clustered", "build-test-alphabet", "build-test-cigar", "build-test-deps", "build-test-graph", "build-test-topology-simd", "build-test-kernel", "build-test-seeds-chain", "build-test-polish", "build-test-order-clusters", "build-test-homopolymer", "build-test-pinned", "build-test-anchored-join", "build-test-reference", "build-test-parallel-scratch"] }
 # The command line, `plegma poa` (abPOA's flags) and `plegma ref`: `pixi run build-cli`, then `build/plegma -h`.
 build-cli = { cmd = "mojo build -D ASSERT=none -I . -I deps/sporos -I deps/karan cli/plegma_cli.mojo -o build/plegma", depends-on = ["prepare"] }
 # The C API (capi/plegma.h, capi/plegma.hpp): build/libplegma.so, and its tests against it.

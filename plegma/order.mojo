@@ -5,6 +5,9 @@ Jaccard index of theirs. The most similar pair goes first, then each time the se
 those already placed.
 """
 
+from std.atomic import Atomic
+
+from karan.common import spread, thread_count
 from sporos import minimizer_positions
 
 from .alphabet import encode_base
@@ -60,7 +63,7 @@ def _before(a: List[UInt8], b: List[UInt8]) -> Bool:
     return False
 
 
-def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10) raises -> List[Int]:
+def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10, threads: Int = 1) raises -> List[Int]:
     """abPOA's progressive order of `seqs`: the most similar pair by minimizer multiset Jaccard first, then repeatedly
     the sequence with the highest summed similarity to those placed. Of the first pair, and in ties, the sequences
     decide, not their places in `seqs` (`_before`: the longer, then the first in letter order), so the order is the
@@ -74,17 +77,57 @@ def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10) raises -> Lis
         if n == 2 and _before(seqs[1], seqs[0]):
             order.reverse()
         return order^
-    var keys = List[List[UInt64]]()
-    for s in seqs:
-        keys.append(_minimizer_keys(Span(s), k, w))
+    var keys = List[List[UInt64]](length=n, fill=List[UInt64]())
+    var workers = thread_count(threads, n)
+    if workers > 1 and n >= 8:
+        var keys_p = keys.unsafe_ptr()
+        var failed = List[Bool](length=n, fill=False)
+        var failed_p = failed.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+
+        def extract(slot: Int) {mut taken, imm n, imm seqs, imm k, imm w, imm keys_p, imm failed_p}:
+            while True:
+                var i = Int(taken.fetch_add(1))
+                if i >= n:
+                    return
+                try:
+                    keys_p[unsafe_offset=i] = _minimizer_keys(Span(seqs[i]), k, w)
+                except:
+                    failed_p[unsafe_offset=i] = True
+
+        spread(extract, workers, workers)
+        for i in range(n):
+            if failed[i]:
+                keys[i] = _minimizer_keys(Span(seqs[i]), k, w)
+    else:
+        for i in range(n):
+            keys[i] = _minimizer_keys(Span(seqs[i]), k, w)
     var similar = List[Float64](length=n * n, fill=0.0)
-    for i in range(n):
-        for j in range(i + 1, n):
-            var both = _shared(keys[i], keys[j])
-            var either = len(keys[i]) + len(keys[j]) - both
-            var value = Float64(both) / Float64(either) if either > 0 else 0.0
-            similar[i * n + j] = value
-            similar[j * n + i] = value
+    if workers > 1 and n >= 16:
+        var sim_p = similar.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+
+        def pairwise(slot: Int) {mut taken, imm n, imm keys, imm sim_p}:
+            while True:
+                var i = Int(taken.fetch_add(1))
+                if i >= n:
+                    return
+                for j in range(i + 1, n):
+                    var both = _shared(keys[i], keys[j])
+                    var either = len(keys[i]) + len(keys[j]) - both
+                    var value = Float64(both) / Float64(either) if either > 0 else 0.0
+                    sim_p[unsafe_offset=i * n + j] = value
+                    sim_p[unsafe_offset=j * n + i] = value
+
+        spread(pairwise, workers, workers)
+    else:
+        for i in range(n):
+            for j in range(i + 1, n):
+                var both = _shared(keys[i], keys[j])
+                var either = len(keys[i]) + len(keys[j]) - both
+                var value = Float64(both) / Float64(either) if either > 0 else 0.0
+                similar[i * n + j] = value
+                similar[j * n + i] = value
 
     def ahead(i: Int, j: Int) capturing -> Bool:
         """Whether `i` goes before `j` of a pair."""

@@ -1,55 +1,40 @@
 """Several consensus sequences of one read set: the reads clustered into haplotypes (abPOA's `-d`, as a diploid
-caller asks for), each cluster's consensus polished against its own reads, and every read aligned to its cluster's.
+caller asks for), each cluster's consensus polished against its own reads, and every read aligned to its cluster's."""
 
-The clusters start as `cluster_rows` splits the spanning reads by the MSA columns where they disagree (with no read
-spanning and every read anchored at one end, those reads, over the letters each reaches); then, as
-k-means does, each read goes to the consensus it differs from least (`MOVING_COSTS`: a substitution weighs more than
-a letter slipped in a run) and each cluster's consensus is made again
-from its reads, until no read moves. Two clusters stay apart only while each holds at least `min_freq` of the reads
-and their consensus sequences differ by more than homopolymer run lengths the reads fit as one (`_two_lengths`: the
-reads' length errors there split one haplotype's reads as readily as two haplotypes'), nor only by one unit of a
-short tandem repeat with the smaller under `MIN_UNIT_SPLIT_FREQ` of the reads. Every run two clusters differ by is
-set so, whatever else they differ by: one length in both where the reads fit one. A read covering neither anchor
-(`INSIDE`) builds no consensus; it is aligned inside the one it fits best.
-"""
+from std.atomic import Atomic
 
 from karan import Aligner, Alignment, Costs, Mode
+from karan.common import spread, thread_count
 
 from .clusters import GAP, MISSING, cluster_rows
-from .consensus import ConsensusOptions, consensus
+from .consensus import ConsensusOptions, ConsensusScratch
 from .graph import Graph
-from .homopolymer import HomopolymerModel, STRAND_UNKNOWN, reads_say_one
+from .homopolymer import STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from .kernel import BOTH, INSIDE, LEFT, RIGHT
-from .placement import Clustered, _aligned, alignment_costs, _consensus_of, _placed
-from .poa import poa
-from .trace import CLUSTERED, Trace
-from .runs import _apart_by_runs_alone, _run_at, _run_pairs, _set_runs, _two_lengths
-
-# Re-exported for callers that import them from here.
 from .phased import phased_consensus
-from .placement import Clustered, Placement, alignment_costs
-
+from .placement import Clustered, Placement, _aligned, _consensus_of, _placed, alignment_costs
+from .poa import poa_with_scratch
+from .runs import (
+    _align_group_reads,
+    _apart_by_runs_alone,
+    _run_at,
+    _run_pairs,
+    _set_runs,
+    _two_lengths_from,
+)
+from .trace import CLUSTERED, Trace
 
 comptime MOVING_COSTS = Costs(5, 2, 1, -1, 0)
-"""The refinement's costs of a read against a consensus: a one-letter gap 3, a substitution 5, under the 6 of the
-insertion and deletion that would otherwise spell it (no costs weigh a substitution more than two one-letter gaps:
-the alignment then writes it as those two)."""
-
-
+"""The refinement's costs of a read against a consensus: a one-letter gap 3, a substitution 5."""
 comptime MAX_REFINEMENTS = 4
 """Rounds of moving reads to their nearest consensus, at most."""
-
-
 comptime MIN_UNIT_SPLIT_FREQ = 0.3
 """Two clusters apart by one unit of a tandem repeat of 2 to 6 letters stay apart only while the smaller holds this
-share of the reads: reads' slips in short tandem repeats split one haplotype's reads by a unit. On HG002 HiFi chr12,
-18 and 20 (pgphase's regions no phase set held), such splits with the smaller under 30% of the reads were 1 true het
-to 25 false; at 30% or more, 67 to 11."""
+share of the reads."""
 
 
 def _one_unit_apart(a: List[UInt8], b: List[UInt8]) -> Bool:
-    """Whether `a` and `b` differ only by one unit, 2 to 6 letters not all one, of a tandem repeat: the longer one's
-    extra letters, where the two first differ, repeat the unit beside them."""
+    """Whether `a` and `b` differ only by one unit, 2 to 6 letters not all one, of a tandem repeat."""
     var longer = a.copy() if len(a) > len(b) else b.copy()
     var shorter = b.copy() if len(a) > len(b) else a.copy()
     var p = len(longer) - len(shorter)
@@ -75,6 +60,7 @@ def _one_unit_apart(a: List[UInt8], b: List[UInt8]) -> Bool:
 
 
 def _first_split(
+    mut scratch: ConsensusScratch,
     seqs: List[List[UInt8]],
     spanning: List[Int],
     anchor: Int,
@@ -82,15 +68,15 @@ def _first_split(
     min_freq: Float64,
     options: ConsensusOptions,
 ) raises -> List[List[Int]]:
-    """The reads `spanning`, all anchored as `anchor` says (`BOTH`, `LEFT` or `RIGHT`), split as `cluster_rows`
-    splits their MSA's rows (one cluster when it finds no split); a read anchored at one end gives no letter past its
-    far end (`MISSING`), where it was not read, not deleted."""
+    """The reads `spanning`, all anchored as `anchor` says, split as `cluster_rows` splits their MSA's rows."""
     var names = List[String](capacity=len(spanning))
     var mine = List[List[UInt8]](capacity=len(spanning))
     for r in spanning:
         names.append(String(t"r{r}"))
         mine.append(seqs[r].copy())
-    var made = poa(names, mine, List[Int](length=len(spanning), fill=anchor), options.poa, Graph())
+    var made = poa_with_scratch(
+        names, mine, List[Int](length=len(spanning), fill=anchor), options.poa, Graph(), scratch.poa, scratch.aligner
+    )
     var by_path = made.graph.msa()
     var rows = List[String](capacity=len(spanning))
     for k in range(len(spanning)):
@@ -107,7 +93,7 @@ def _first_split(
                 c += 1
         rows.append(String(unsafe_from_utf8=row))
     var out = List[List[Int]]()
-    for part in cluster_rows(rows, max_clusters, min_freq):
+    for part in cluster_rows(rows, max_clusters, min_freq, options.poa.threads):
         var reads = List[Int](capacity=len(part))
         for k in part:
             reads.append(spanning[k])
@@ -124,11 +110,23 @@ def clustered_consensus(
     options: ConsensusOptions = ConsensusOptions(),
     homopolymers: HomopolymerModel = HomopolymerModel(),
 ) raises -> Clustered:
-    """At most `max_clusters` consensus sequences of `seqs` (each anchored as `anchors` says: `BOTH`, `LEFT`,
-    `RIGHT` or `INSIDE`; empty: all `BOTH`; on `strands`' strand for `homopolymers`), each from the reads nearest
-    it and made as `consensus` makes one, a cluster kept apart only with at least `min_freq` of the reads that make
-    consensus sequences; and every read's alignment to its cluster's consensus (at `options.poa.scoring`'s costs,
-    gaps leftmost). With one cluster, or none found, the consensus of every read."""
+    """At most `max_clusters` consensus sequences of `seqs`, each from the reads nearest it and made as `consensus`
+    makes one, and every read's alignment to its cluster's consensus."""
+    var scratch = ConsensusScratch()
+    return clustered_consensus(scratch, seqs^, anchors, strands, max_clusters, min_freq, options, homopolymers)
+
+
+def clustered_consensus(
+    mut scratch: ConsensusScratch,
+    var seqs: List[List[UInt8]],
+    anchors: List[Int] = List[Int](),
+    strands: List[Int] = List[Int](),
+    max_clusters: Int = 2,
+    min_freq: Float64 = 0.25,
+    options: ConsensusOptions = ConsensusOptions(),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+) raises -> Clustered:
+    """As `clustered_consensus`, reusing `scratch` across calls."""
     var n = len(seqs)
     if max_clusters < 1:
         raise Error(t"max_clusters {max_clusters}: must be 1 or more")
@@ -146,7 +144,6 @@ def clustered_consensus(
         out.members.append(List[Int]())
         out.joined.append(True)
         return out^
-    # The reads that make consensus sequences; with every read inside, all of them as if spanning.
     var builders = List[Int]()
     for r in range(n):
         if anchor_of[r] != INSIDE:
@@ -156,7 +153,6 @@ def clustered_consensus(
         for r in range(n):
             builders.append(r)
             build_anchor[r] = BOTH
-    # `consensus` checks the anchors and strands as it is first called.
     var groups = List[List[Int]]()
     if max_clusters >= 2:
         var spanning = List[Int]()
@@ -164,32 +160,22 @@ def clustered_consensus(
             if build_anchor[r] == BOTH:
                 spanning.append(r)
         if len(spanning) >= 2:
-            groups = _first_split(seqs, spanning, BOTH, max_clusters, min_freq, options)
+            groups = _first_split(scratch, seqs, spanning, BOTH, max_clusters, min_freq, options)
         elif _one_side(builders, build_anchor) != BOTH:
-            # No spanning read and one side only (a telomere's): its reads split by its own MSA (HG002 chr18's q-end,
-            # 12 left reads: one consensus 62 and 69 edits from the two haplotypes' assemblies; split, 4 and 8).
-            groups = _first_split(seqs, builders, _one_side(builders, build_anchor), max_clusters, min_freq, options)
+            groups = _first_split(
+                scratch, seqs, builders, _one_side(builders, build_anchor), max_clusters, min_freq, options
+            )
     if len(groups) <= 1:
         groups = [builders.copy()]
     var trace = Trace()
     if trace.on(CLUSTERED):
         trace.line(CLUSTERED, String(n, " reads, ", len(builders), " build; first split: ", _sizes(groups)))
     var costs = alignment_costs(options.poa.scoring)
-    # A read moves to the consensus it differs from least, a substitution weighing more than a letter slipped in a run
-    # (reads slip in runs far more often than they misread a letter), as the first split weighs them. At the
-    # scoring's costs a gap letter cost more than a mismatch, so reads moved by their run lengths, not by a SNP's
-    # letter: HG002 chr20:56,892,630, G in a poly-T on 28 of 62 reads: the G cluster came to hold one T-run length's
-    # reads instead, its consensus lost the G, and the two merged as apart by a run alone (written G on both).
     var moving = MOVING_COSTS
-    var aligner = Aligner(warm=False)
+    var threads = options.poa.threads
     var joined = List[Bool]()
-    var made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
+    var made = _made(scratch, seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
     if len(groups) >= 2:
-        # A read costing the same against every consensus and short of the letters where they differ tells the
-        # clusters nothing (a partial read): where their sizes decide (`min_freq`, `MIN_UNIT_SPLIT_FREQ`) it counts
-        # for none of them, nor in the reads they are shares of. Kept in the first input row's cluster, which takes
-        # it, it let input order alone decide; counted evenly for each, it kept a cluster no read told apart. A read
-        # over those letters at the same cost lies between the two (`_short_of`): it stays in its cluster and counts.
         var telling = List[Bool](length=n, fill=True)
         var floor = max(1, Int(min_freq * Float64(len(builders)) + 0.999999))
         var label = List[Int](length=n, fill=-1)
@@ -201,26 +187,108 @@ def clustered_consensus(
             var moved = False
             var moves = 0
             var next = List[List[Int]](length=len(made), fill=List[Int]())
-            var against = _cut(aligner, made, side)
-            for r in builders:
-                var best = label[r] if label[r] >= 0 else 0
-                var best_cost = _aligned(aligner, against[best], seqs[r], build_anchor[r], moving).cost
-                telling[r] = False
-                for k in range(len(made)):
-                    if k == best:
-                        continue
-                    var found = _aligned(aligner, against[k], seqs[r], build_anchor[r], moving)
-                    var cost = found.cost
-                    if cost != best_cost or not _short_of(found, against[k], against[best]):
-                        telling[r] = True
-                    if cost < best_cost:
-                        best = k
-                        best_cost = cost
-                if best != label[r]:
-                    moved = True
-                    moves += 1
-                    label[r] = best
-                next[best].append(r)
+            var against = _cut(scratch.aligner, made, side)
+            var assign_workers = thread_count(threads, len(builders))
+            if assign_workers > 1 and len(builders) >= 2:
+                var bests = List[Int](length=len(builders), fill=0)
+                var tells = List[Bool](length=len(builders), fill=False)
+                var failed = List[Bool](length=len(builders), fill=False)
+                var bests_p = bests.unsafe_ptr()
+                var tells_p = tells.unsafe_ptr()
+                var failed_p = failed.unsafe_ptr()
+                var taken = Atomic[Int64](0)
+                var n_builders = len(builders)
+
+                def assign_worker(
+                    slot: Int,
+                ) {
+                    mut taken,
+                    imm n_builders,
+                    imm builders,
+                    imm label,
+                    imm against,
+                    imm seqs,
+                    imm build_anchor,
+                    imm moving,
+                    imm bests_p,
+                    imm tells_p,
+                    imm failed_p,
+                }:
+                    var local_aligner = Aligner(warm=False)
+                    while True:
+                        var idx = Int(taken.fetch_add(1))
+                        if idx >= n_builders:
+                            return
+                        var r = builders[idx]
+                        try:
+                            var best = label[r] if label[r] >= 0 else 0
+                            var best_cost = _aligned(
+                                local_aligner, against[best], seqs[r], build_anchor[r], moving
+                            ).cost
+                            var is_telling = False
+                            for k in range(len(against)):
+                                if k == best:
+                                    continue
+                                var found = _aligned(local_aligner, against[k], seqs[r], build_anchor[r], moving)
+                                var cost = found.cost
+                                if cost != best_cost or not _short_of(found, against[k], against[best]):
+                                    is_telling = True
+                                if cost < best_cost:
+                                    best = k
+                                    best_cost = cost
+                            bests_p[unsafe_offset=idx] = best
+                            tells_p[unsafe_offset=idx] = is_telling
+                        except:
+                            failed_p[unsafe_offset=idx] = True
+
+                spread(assign_worker, assign_workers, assign_workers)
+                for idx in range(len(builders)):
+                    var r = builders[idx]
+                    var best: Int
+                    var is_telling: Bool
+                    if failed[idx]:
+                        best = label[r] if label[r] >= 0 else 0
+                        var best_cost = _aligned(scratch.aligner, against[best], seqs[r], build_anchor[r], moving).cost
+                        is_telling = False
+                        for k in range(len(made)):
+                            if k == best:
+                                continue
+                            var found = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving)
+                            var cost = found.cost
+                            if cost != best_cost or not _short_of(found, against[k], against[best]):
+                                is_telling = True
+                            if cost < best_cost:
+                                best = k
+                                best_cost = cost
+                    else:
+                        best = bests[idx]
+                        is_telling = tells[idx]
+                    telling[r] = is_telling
+                    if best != label[r]:
+                        moved = True
+                        moves += 1
+                        label[r] = best
+                    next[best].append(r)
+            else:
+                for r in builders:
+                    var best = label[r] if label[r] >= 0 else 0
+                    var best_cost = _aligned(scratch.aligner, against[best], seqs[r], build_anchor[r], moving).cost
+                    telling[r] = False
+                    for k in range(len(made)):
+                        if k == best:
+                            continue
+                        var found = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving)
+                        var cost = found.cost
+                        if cost != best_cost or not _short_of(found, against[k], against[best]):
+                            telling[r] = True
+                        if cost < best_cost:
+                            best = k
+                            best_cost = cost
+                    if best != label[r]:
+                        moved = True
+                        moves += 1
+                        label[r] = best
+                    next[best].append(r)
             if trace.on(CLUSTERED):
                 trace.line(
                     CLUSTERED,
@@ -234,54 +302,107 @@ def clustered_consensus(
                 if _telling(g, telling) >= floor:
                     kept.append(g.copy())
             if len(kept) < len(next):
-                # A cluster under the floor: its reads are another's, so one cluster fewer.
                 groups = kept^
                 if len(groups) <= 1:
                     break
-                # Every label again: the dropped cluster's reads kept its number, past the clusters left (or another's).
                 for r in builders:
                     label[r] = -1
                 for k in range(len(groups)):
                     for r in groups[k]:
                         label[r] = k
-                made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
+                made = _made(scratch, seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
                 continue
             if not moved:
                 break
             groups = next^
-            made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
+            made = _made(scratch, seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
         # A read of a cluster dropped in the last round joins the consensus it differs from least.
         if len(groups) >= 2:
             var placed = List[Bool](length=n, fill=False)
             for g in groups:
                 for r in g:
                     placed[r] = True
-            var against = _cut(aligner, made, side)
+            var unplaced = List[Int]()
             for r in builders:
-                if placed[r]:
-                    continue
-                var best = 0
-                var best_cost = _aligned(aligner, against[0], seqs[r], build_anchor[r], moving).cost
-                for k in range(1, len(made)):
-                    var cost = _aligned(aligner, against[k], seqs[r], build_anchor[r], moving).cost
-                    if cost < best_cost:
-                        best = k
-                        best_cost = cost
-                groups[best].append(r)
-        # Clusters spelling the same consensus are one; so are clusters apart only by homopolymer lengths, unless a
-        # homopolymer model finds two lengths at one of those runs (`options.two_lengths_db`).
-        # Each pair that is one joins (`root`: union of clusters); with two clusters, as one flag.
+                if not placed[r]:
+                    unplaced.append(r)
+            if len(unplaced) > 0:
+                var against = _cut(scratch.aligner, made, side)
+                var drop_workers = thread_count(threads, len(unplaced))
+                if drop_workers > 1 and len(unplaced) >= 2:
+                    var bests = List[Int](length=len(unplaced), fill=0)
+                    var failed = List[Bool](length=len(unplaced), fill=False)
+                    var bests_p = bests.unsafe_ptr()
+                    var failed_p = failed.unsafe_ptr()
+                    var taken = Atomic[Int64](0)
+                    var n_unplaced = len(unplaced)
+
+                    def place_dropped(
+                        slot: Int,
+                    ) {
+                        mut taken,
+                        imm n_unplaced,
+                        imm unplaced,
+                        imm against,
+                        imm seqs,
+                        imm build_anchor,
+                        imm moving,
+                        imm bests_p,
+                        imm failed_p,
+                    }:
+                        var local_aligner = Aligner(warm=False)
+                        while True:
+                            var idx = Int(taken.fetch_add(1))
+                            if idx >= n_unplaced:
+                                return
+                            var r = unplaced[idx]
+                            try:
+                                var best = 0
+                                var best_cost = _aligned(
+                                    local_aligner, against[0], seqs[r], build_anchor[r], moving
+                                ).cost
+                                for k in range(1, len(against)):
+                                    var cost = _aligned(
+                                        local_aligner, against[k], seqs[r], build_anchor[r], moving
+                                    ).cost
+                                    if cost < best_cost:
+                                        best = k
+                                        best_cost = cost
+                                bests_p[unsafe_offset=idx] = best
+                            except:
+                                failed_p[unsafe_offset=idx] = True
+
+                    spread(place_dropped, drop_workers, drop_workers)
+                    for idx in range(len(unplaced)):
+                        var r = unplaced[idx]
+                        var best = bests[idx]
+                        if failed[idx]:
+                            best = 0
+                            var best_cost = _aligned(scratch.aligner, against[0], seqs[r], build_anchor[r], moving).cost
+                            for k in range(1, len(made)):
+                                var cost = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving).cost
+                                if cost < best_cost:
+                                    best = k
+                                    best_cost = cost
+                        groups[best].append(r)
+                else:
+                    for r in unplaced:
+                        var best = 0
+                        var best_cost = _aligned(scratch.aligner, against[0], seqs[r], build_anchor[r], moving).cost
+                        for k in range(1, len(made)):
+                            var cost = _aligned(scratch.aligner, against[k], seqs[r], build_anchor[r], moving).cost
+                            if cost < best_cost:
+                                best = k
+                                best_cost = cost
+                        groups[best].append(r)
         var root = List[Int]()
         for k in range(len(groups)):
             root.append(k)
         var runs = List[Int]()
         var single = True
-        # Over the clusters still standing: a refinement that leaves one stops with `made` as it was (the two
-        # consensus sequences of the round before), and one cluster has nothing to merge.
         for a in range(len(groups)):
             for b in range(a + 1, len(groups)):
-                # One side's clusters are weighed over the letters both reach (`_cut`).
-                var cut = _cut(aligner, [made[a].copy(), made[b].copy()], side)
+                var cut = _cut(scratch.aligner, [made[a].copy(), made[b].copy()], side)
                 if cut[0] == cut[1]:
                     _join(root, a, b)
                     trace.line(CLUSTERED, String("clusters ", a, " and ", b, " one: the same consensus"))
@@ -302,8 +423,10 @@ def clustered_consensus(
                     )
                 else:
                     if not homopolymers.loaded():
-                        # Without a model: apart unless every difference is a single letter of a run.
-                        if _apart_by_runs_alone(aligner, cut[0], cut[1], options.noise_run, runs, single) and single:
+                        if (
+                            _apart_by_runs_alone(scratch.aligner, cut[0], cut[1], options.noise_run, runs, single)
+                            and single
+                        ):
                             _join(root, a, b)
                             trace.line(
                                 CLUSTERED,
@@ -320,70 +443,69 @@ def clustered_consensus(
                         else:
                             trace.line(CLUSTERED, String("clusters ", a, " and ", b, " apart"))
                         continue
-                    # With a model, each run the two differ by, whatever else they differ by: two lengths where all
-                    # the reads fit two better than one (`_two_lengths`), the cluster with the shorter run the
-                    # shorter, else the one length in both. Clusters apart by runs alone stay apart only where a
-                    # run has two. One run's two lengths no longer make every other run two (each was fitted to
-                    # the pair it found), nor does another difference spare a run the test.
                     var runs_a = List[Int]()
                     var runs_b = List[Int]()
-                    var only_runs = _run_pairs(aligner, cut[0], cut[1], options.noise_run, runs_a, runs_b)
+                    var only_runs = _run_pairs(scratch.aligner, cut[0], cut[1], options.noise_run, runs_a, runs_b)
                     var set_a = List[Int]()
                     var set_b = List[Int]()
                     var two = False
-                    var pair = List[List[UInt8]]()
-                    pair.append(cut[0].copy())
-                    pair.append(cut[1].copy())
-                    var pair_groups = List[List[Int]]()
-                    pair_groups.append(groups[a].copy())
-                    pair_groups.append(groups[b].copy())
-                    for k in range(len(runs_a)):
-                        var len_a = _run_at(cut[0], runs_a[k])
-                        var len_b = _run_at(cut[1], runs_b[k])
-                        var n1 = 0
-                        var n2 = 0
-                        var one = -1
-                        var said = List[List[Int]]()
-                        var starts = List[Int]()
-                        starts.append(runs_a[k])
-                        starts.append(runs_b[k])
-                        var gain = _two_lengths(
-                            aligner,
-                            pair,
-                            starts,
-                            pair_groups,
-                            seqs,
-                            build_anchor,
-                            strand_of,
-                            homopolymers,
-                            n1,
-                            n2,
-                            one,
-                            said,
+                    if len(runs_a) > 0:
+                        var pair = List[List[UInt8]]()
+                        pair.append(cut[0].copy())
+                        pair.append(cut[1].copy())
+                        var pair_groups = List[List[Int]]()
+                        pair_groups.append(groups[a].copy())
+                        pair_groups.append(groups[b].copy())
+                        # Align each cluster's reads once against its consensus and reuse across all differing runs.
+                        var aligned_a = _align_group_reads(
+                            scratch.aligner, pair[0], seqs, pair_groups[0], build_anchor, threads
                         )
-                        if gain > options.two_lengths_db:
-                            two = True
-                            set_a.append(n1 if len_a < len_b else n2)
-                            set_b.append(n2 if len_a < len_b else n1)
-                        elif one > 0:
-                            set_a.append(one)
-                            set_b.append(one)
-                        else:
-                            set_a.append(len_a)
-                            set_b.append(len_b)
-                        # A cluster whose reads report the letter once there has no run, as in `phased_consensus`:
-                        # the search starts at 2.
-                        if len(said) == 2 and reads_say_one(said[0]):
-                            set_a[k] = 1
-                        if len(said) == 2 and reads_say_one(said[1]):
-                            set_b[k] = 1
+                        var aligned_b = _align_group_reads(
+                            scratch.aligner, pair[1], seqs, pair_groups[1], build_anchor, threads
+                        )
+                        for k in range(len(runs_a)):
+                            var len_a = _run_at(cut[0], runs_a[k])
+                            var len_b = _run_at(cut[1], runs_b[k])
+                            var n1 = 0
+                            var n2 = 0
+                            var one = -1
+                            var said = List[List[Int]]()
+                            var starts: List[Int] = [runs_a[k], runs_b[k]]
+                            var gain = _two_lengths_from(
+                                pair,
+                                starts,
+                                pair_groups,
+                                aligned_a,
+                                aligned_b,
+                                seqs,
+                                strand_of,
+                                homopolymers,
+                                n1,
+                                n2,
+                                one,
+                                said,
+                            )
+                            if gain > options.two_lengths_db:
+                                two = True
+                                set_a.append(n1 if len_a < len_b else n2)
+                                set_b.append(n2 if len_a < len_b else n1)
+                            elif one > 0:
+                                set_a.append(one)
+                                set_b.append(one)
+                            else:
+                                set_a.append(len_a)
+                                set_b.append(len_b)
+                            if len(said) == 2 and reads_say_one(said[0]):
+                                set_a[k] = 1
+                            if len(said) == 2 and reads_say_one(said[1]):
+                                set_b[k] = 1
                     made[a] = _set_runs(
                         made[a].copy(), _shifted(runs_a, len(made[a]) - len(cut[0]) if side == RIGHT else 0), set_a
                     )
                     made[b] = _set_runs(
                         made[b].copy(), _shifted(runs_b, len(made[b]) - len(cut[1]) if side == RIGHT else 0), set_b
                     )
-                    cut = _cut(aligner, [made[a].copy(), made[b].copy()], side)
+                    cut = _cut(scratch.aligner, [made[a].copy(), made[b].copy()], side)
                     if (only_runs and not two) or cut[0] == cut[1]:
                         _join(root, a, b)
                     if trace.on(CLUSTERED):
@@ -401,8 +523,6 @@ def clustered_consensus(
                                 "; one" if _root(root, a) == _root(root, b) else "; apart",
                             ),
                         )
-        # The clusters joined made one again from their reads; with every cluster one, the consensus of every read.
-        # One flag for all pairs made three clusters one wherever two of them were (a third haplotype's lost).
         var merged = List[List[Int]]()
         var made_merged = List[List[UInt8]]()
         var joined_merged = List[Bool]()
@@ -418,13 +538,13 @@ def clustered_consensus(
             var whole = joined[k]
             made_merged.append(
                 made[k].copy() if parts
-                == 1 else _consensus_of(seqs, members, build_anchor, strand_of, options, homopolymers, whole)
+                == 1 else _consensus_of(scratch, seqs, members, build_anchor, strand_of, options, homopolymers, whole)
             )
             joined_merged.append(whole)
             merged.append(members^)
         if len(groups) <= 1 or len(merged) <= 1:
             groups = [builders.copy()]
-            made = _made(seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
+            made = _made(scratch, seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
         else:
             groups = merged^
             made = made_merged^
@@ -438,7 +558,7 @@ def clustered_consensus(
         for k in range(len(made)):
             lengths.write(", " if k > 0 else "", len(made[k]))
         trace.line(CLUSTERED, String(len(groups), " clusters of ", _sizes(groups), " reads, ", lengths, " letters"))
-    return _placed(aligner, made^, joined^, seqs, cluster_of, anchor_of, costs)
+    return _placed(scratch.aligner, made^, joined^, seqs, cluster_of, anchor_of, costs, threads)
 
 
 def _one_side(builders: List[Int], anchor_of: List[Int]) -> Int:
@@ -451,10 +571,7 @@ def _one_side(builders: List[Int], anchor_of: List[Int]) -> Int:
 
 
 def _cut(mut aligner: Aligner, made: List[List[UInt8]], side: Int) raises -> List[List[UInt8]]:
-    """`made` as reads anchored at one `side` alone are weighed against it: each cut where the shortest ends on it,
-    from that side's end, so a read reaching past one cluster's consensus pays for its overhang against every cluster,
-    not against the shorter one only (one side's consensus stops where too few reads go on). `BOTH`: `made` as it
-    is."""
+    """`made` as reads anchored at one `side` alone are weighed against it."""
     if side == BOTH or len(made) == 0:
         return made.copy()
     var shortest = 0
@@ -471,7 +588,6 @@ def _cut(mut aligner: Aligner, made: List[List[UInt8]], side: Int) raises -> Lis
 
 
 def _shifted(at: List[Int], by: Int) -> List[Int]:
-    """Positions `at` in a consensus cut `by` letters at its start (`_cut` of a right side), in the whole."""
     var out = at.copy()
     for k in range(len(out)):
         out[k] += by
@@ -479,6 +595,7 @@ def _shifted(at: List[Int], by: Int) -> List[Int]:
 
 
 def _made(
+    mut scratch: ConsensusScratch,
     seqs: List[List[UInt8]],
     groups: List[List[Int]],
     build_anchor: List[Int],
@@ -487,24 +604,66 @@ def _made(
     homopolymers: HomopolymerModel,
     mut joined: List[Bool],
 ) raises -> List[List[UInt8]]:
-    """Each group's consensus (`_consensus_of`), and in `joined` whether its sides were joined."""
-    var out = List[List[UInt8]](capacity=len(groups))
-    joined = List[Bool](capacity=len(groups))
-    for g in groups:
+    """Each group's consensus (`_consensus_of`), in parallel across groups when `options.poa.threads > 1`."""
+    var k_count = len(groups)
+    var out = List[List[UInt8]](length=k_count, fill=List[UInt8]())
+    joined = List[Bool](length=k_count, fill=True)
+    var group_workers = thread_count(options.poa.threads, k_count)
+    if group_workers > 1 and k_count >= 2:
+        var sub_options = options.copy()
+        sub_options.poa.threads = max(1, options.poa.threads // group_workers)
+        var failed = List[Bool](length=k_count, fill=False)
+        var out_p = out.unsafe_ptr()
+        var joined_p = joined.unsafe_ptr()
+        var failed_p = failed.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+
+        def build_cluster(
+            slot: Int,
+        ) {
+            mut taken,
+            imm k_count,
+            imm seqs,
+            imm groups,
+            imm build_anchor,
+            imm strand_of,
+            imm sub_options,
+            imm homopolymers,
+            imm out_p,
+            imm joined_p,
+            imm failed_p,
+        }:
+            var local_scratch = ConsensusScratch()
+            while True:
+                var k = Int(taken.fetch_add(1))
+                if k >= k_count:
+                    return
+                var whole = True
+                try:
+                    out_p[unsafe_offset=k] = _consensus_of(
+                        local_scratch, seqs, groups[k], build_anchor, strand_of, sub_options, homopolymers, whole
+                    )
+                    joined_p[unsafe_offset=k] = whole
+                except:
+                    failed_p[unsafe_offset=k] = True
+
+        spread(build_cluster, group_workers, group_workers)
+        for k in range(k_count):
+            if failed[k]:
+                var whole = True
+                out[k] = _consensus_of(scratch, seqs, groups[k], build_anchor, strand_of, options, homopolymers, whole)
+                joined[k] = whole
+        return out^
+
+    for k in range(k_count):
         var whole = True
-        out.append(_consensus_of(seqs, g, build_anchor, strand_of, options, homopolymers, whole))
-        joined.append(whole)
+        out[k] = _consensus_of(scratch, seqs, groups[k], build_anchor, strand_of, options, homopolymers, whole)
+        joined[k] = whole
     return out^
 
 
 def _short_of(found: Alignment, consensus: List[UInt8], other: List[UInt8]) -> Bool:
-    """Whether a read aligned to `consensus` (`found`) stops short of the letters where `other` differs from it: those
-    between the first letter the two do not share at their start and the last at their end (inside a repeat the two
-    overlap, a unit's insertion placeable anywhere in it, and the whole repeat counts). A read over them at the cost
-    it has against `other` lies between the two, as a run length halfway between two clusters' does once a
-    homopolymer model has moved one consensus's run: HG002 chr20:14,181,385, 19 of 24 reads of an A21 cluster
-    between its consensus's A22 and the other's A20, counted for neither, and the A21 haplotype dropped under
-    `min_freq`."""
+    """Whether a read aligned to `consensus` (`found`) stops short of the letters where `other` differs from it."""
     var shortest = min(len(consensus), len(other))
     var prefix = 0
     while prefix < shortest and consensus[prefix] == other[prefix]:
@@ -517,7 +676,6 @@ def _short_of(found: Alignment, consensus: List[UInt8], other: List[UInt8]) -> B
 
 
 def _telling(reads: List[Int], telling: List[Bool]) -> Int:
-    """How many of `reads` tell the clusters apart (`telling`)."""
     var n = 0
     for r in reads:
         if telling[r]:
@@ -526,7 +684,6 @@ def _telling(reads: List[Int], telling: List[Bool]) -> Int:
 
 
 def _sizes(groups: List[List[Int]]) -> String:
-    """Clusters' sizes, for a trace line: `[12, 9]`."""
     var out = String("[")
     for k in range(len(groups)):
         out.write(", " if k > 0 else "", len(groups[k]))
@@ -542,7 +699,6 @@ def _root(root: List[Int], k: Int) -> Int:
 
 
 def _join(mut root: List[Int], a: Int, b: Int):
-    """Clusters `a` and `b` one (`root`: each cluster's parent, a root its own)."""
     var ra = _root(root, a)
     var rb = _root(root, b)
     if ra != rb:

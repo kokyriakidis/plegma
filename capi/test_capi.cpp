@@ -280,14 +280,18 @@ int main(int argc, char** argv)
         plegma_options_init(&o);
         check(o.size == sizeof(plegma_options) and o.match == 2 and o.mismatch == 4 and o.gap_open1 == 4 and
                   o.gap_extend1 == 2 and o.gap_open2 == 24 and o.gap_extend2 == 1 and o.band_b == 10 and
-                  std::fabs(o.band_f - 0.01f) < 1e-6 and o.band_max == 64 and o.noise_run == 3,
-              "plegma_options_init sets the size, scoring and band");
+                  std::fabs(o.band_f - 0.01f) < 1e-6 and o.band_max == 64 and o.noise_run == 3 and o.threads == 1,
+              "plegma_options_init sets the size, scoring, band and threads");
         Case c = makeCase(rng, 1500);
         std::vector<std::string> full = plegma::consensus(c.reads(), nullptr, plegma::Options().pinned(false));
         plegma::Options older = plegma::Options().pinned(false);
         older.values.size = 20;  // through min_cover: the fields after it take their defaults
         older.values.match = 99;
         check(plegma::consensus(c.reads(), nullptr, older) == full, "fields past an older size take their defaults");
+        plegma::Options prevAbi = plegma::Options().pinned(false);
+        prevAbi.values.size = 64;  // pre-threads 64-byte struct: threads past size defaults to 1
+        prevAbi.values.threads = 0;
+        check(plegma::consensus(c.reads(), nullptr, prevAbi) == full, "64-byte plegma_options defaults threads to 1");
     }
 
     // Wrong arguments fail with a message, never a crash.
@@ -310,6 +314,11 @@ int main(int argc, char** argv)
         plegma_options_init(&o);
         o.polish_rounds = -1;
         check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)), "negative rounds fail");
+        plegma_options_init(&o);
+        o.threads = 0;
+        check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)), "threads 0 fails");
+        plegma_scratch_free(nullptr);
+        check(true, "plegma_scratch_free(NULL) does nothing");
         plegma_options_init(&o);
         o.size = 0;
         check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)),
@@ -410,6 +419,27 @@ int main(int argc, char** argv)
         check(plegma_result_members(plain, 0, &ids) == 0 and plegma_result_cigar(plain, 0, nullptr) == nullptr,
               "a plain consensus has no members or placements");
         plegma_result_free(plain);
+
+        // Reusable Scratch and internal threads > 1 match fresh 1-thread calls bit-for-bit.
+        plegma::Scratch scratch;
+        Case c1 = makeCase(rng, 1600);
+        Case c2 = makeCase(rng, 1200);
+        std::vector<std::string> base1 = plegma::consensus(c1.reads(), &toy);
+        std::vector<std::string> base2 = plegma::consensus(c2.reads(), &toy);
+        std::vector<std::string> fast1 = plegma::consensus(c1.reads(), &toy, plegma::Options().threads(4), &scratch);
+        std::vector<std::string> fast2 = plegma::consensus(c2.reads(), &toy, plegma::Options().threads(4), &scratch);
+        check(fast1 == base1 and fast2 == base2, "Scratch reuse and threads=4 match 1-thread consensus");
+        plegma::Clustering cl4 =
+            plegma::clusteredConsensus(reads, nullptr, plegma::Options().pinned(false).threads(4), 2, 0.2f, &scratch);
+        check(cl4.consensus == got.consensus and cl4.members == got.members,
+              "Scratch reuse and threads=4 match 1-thread clusteredConsensus");
+        std::vector<int> haps(reads.size(), -1);
+        for (std::size_t r = 0; r + 1 < reads.size(); r++) haps[r] = static_cast<int>(r % 2);
+        plegma::Clustering ph1 = plegma::phasedConsensus(reads, haps, nullptr, plegma::Options().pinned(false));
+        plegma::Clustering ph4 =
+            plegma::phasedConsensus(reads, haps, nullptr, plegma::Options().pinned(false).threads(4), &scratch);
+        check(ph4.consensus == ph1.consensus and ph4.members == ph1.members,
+              "Scratch reuse and threads=4 match 1-thread phasedConsensus");
     }
 
     std::cout << (failures ? "FAILED " : "all passed ") << failures << std::endl;

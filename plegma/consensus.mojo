@@ -9,11 +9,14 @@ spans both anchors and the two sides could not be joined, the left side's and th
 
 from std.math import isfinite
 
+from karan import Aligner
+
+from .bands import PolishScratch
 from .graph import Graph
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
-from .kernel import BOTH, GLOBAL, INSIDE, LEFT, RIGHT, Topology
-from .poa import Poa, PoaOptions, poa
-from .polish import polish
+from .kernel import BOTH, GLOBAL, INSIDE, LEFT, RIGHT
+from .poa import Poa, PoaOptions, PoaScratch, poa_with_scratch
+from .polish import polish_with_scratch
 
 
 def _check(count: Int, anchors: List[Int], strands: List[Int]) raises:
@@ -35,18 +38,14 @@ def _check(count: Int, anchors: List[Int], strands: List[Int]) raises:
 
 struct ConsensusOptions(Copyable, Movable):
     """`poa`'s options and the polishing rounds: `polish_rounds` scored by edit distance, then `likely_rounds` by
-    likelihood (`plegma poa -P`), the defaults `plegma poa`'s; and for `clustered_consensus`, `noise_run`: clusters
-    whose consensus sequences differ only by single letters in runs of one letter this long or longer are one (0:
-    never)."""
+    likelihood (`plegma poa -P`), the defaults `plegma poa`'s; and for `clustered_consensus`, `noise_run` and
+    `two_lengths_db`."""
 
     var poa: PoaOptions
     var polish_rounds: Int
     var likely_rounds: Int
     var noise_run: Int
     var two_lengths_db: Float64
-    """`clustered_consensus` and `phased_consensus`: how many dB better two run lengths must explain the reads than
-    one for the two clusters to keep different lengths, with a homopolymer model. On HG002 HiFi chr20 (the reads'
-    truth haplotypes) 15 dB kept 23 of 57 unphased splits the truth has heterozygous and 4 of 421 it has homozygous."""
 
     def __init__(out self):
         self.poa = PoaOptions()
@@ -66,6 +65,20 @@ struct ConsensusOptions(Copyable, Movable):
             raise Error(t"two_lengths_db {self.two_lengths_db}: must be a number")
 
 
+struct ConsensusScratch(Movable):
+    """Reusable scratch buffers for `consensus`, `polished`, `clustered_consensus`, and `phased_consensus` across
+    calls."""
+
+    var poa: PoaScratch
+    var aligner: Aligner
+    var polish: PolishScratch
+
+    def __init__(out self):
+        self.poa = PoaScratch()
+        self.aligner = Aligner(warm=False)
+        self.polish = PolishScratch()
+
+
 def consensus(
     var seqs: List[List[UInt8]],
     anchors: List[Int] = List[Int](),
@@ -74,20 +87,28 @@ def consensus(
     homopolymers: HomopolymerModel = HomopolymerModel(),
 ) raises -> List[List[UInt8]]:
     """The consensus of `seqs` (A, C, G, T in upper case; any other letter matches none), each anchored as `anchors`
-    says (`BOTH`, `LEFT` or `RIGHT`, or `INSIDE`, a read covering neither anchor, which makes no consensus; empty:
-    all `BOTH`) and on `strands`' strand (0, 1 or `STRAND_UNKNOWN`, for
-    `homopolymers`; empty: all unknown), as `plegma poa -r 0` writes it (with `-H` when `homopolymers` is loaded).
-    Raises on anchors or strands of another length than `seqs`, or values outside those, or on `options` it cannot
-    run with (`ConsensusOptions.check`)."""
+    says (`BOTH`, `LEFT`, `RIGHT`, or `INSIDE`; empty: all `BOTH`) and on `strands`' strand."""
+    var scratch = ConsensusScratch()
+    return consensus(scratch, seqs^, anchors, strands, options, homopolymers)
+
+
+def consensus(
+    mut scratch: ConsensusScratch,
+    var seqs: List[List[UInt8]],
+    anchors: List[Int] = List[Int](),
+    strands: List[Int] = List[Int](),
+    options: ConsensusOptions = ConsensusOptions(),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+) raises -> List[List[UInt8]]:
+    """As `consensus`, reusing `scratch` across calls."""
     options.check()
     _check(len(seqs), anchors, strands)
     if len(seqs) == 0:
         return [List[UInt8]()]
     if len(anchors) == 0:
         var all_spanning = List[Int](length=len(seqs), fill=BOTH)
-        return consensus(seqs^, all_spanning, strands, options, homopolymers)
+        return consensus(scratch, seqs^, all_spanning, strands, options, homopolymers)
     if INSIDE in anchors:
-        # Reads covering neither anchor place no letter at either end: the others make the consensus.
         var kept = List[List[UInt8]]()
         var kept_anchors = List[Int]()
         var kept_strands = List[Int]()
@@ -97,12 +118,12 @@ def consensus(
                 kept_anchors.append(anchors[r])
                 if len(strands) > 0:
                     kept_strands.append(strands[r])
-        return consensus(kept^, kept_anchors, kept_strands, options, homopolymers)
+        return consensus(scratch, kept^, kept_anchors, kept_strands, options, homopolymers)
     var names = List[String](capacity=len(seqs))
     for k in range(len(seqs)):
         names.append(String(t"r{k}"))
-    var made = poa(names, seqs, anchors, options.poa, Graph())
-    return polished(made, seqs, anchors, strands, options, homopolymers)
+    var made = poa_with_scratch(names, seqs, anchors, options.poa, Graph(), scratch.poa, scratch.aligner)
+    return polished(scratch, made, seqs, anchors, strands, options, homopolymers)
 
 
 def polished(
@@ -113,12 +134,21 @@ def polished(
     options: ConsensusOptions,
     homopolymers: HomopolymerModel,
 ) raises -> List[List[UInt8]]:
-    """The consensus of what `poa` made of `seqs` (each anchored as `anchors` says, on `strands`' strand), polished
-    (when `options` has rounds or `homopolymers` is loaded, and the alignment is global): with reads anchored at one
-    end, the assembly's own consensus against every read but another copy's (`Poa.foreign`), each aligned as it is
-    anchored, or two sides not joined, each as it is; with every read spanning, the heaviest bundle over every path
-    (a starting MSA's rows too) against every read. What `consensus` and `plegma poa -r 0` give. A read `poa`
-    reverse-complemented (`Poa.reversed`) is on the other strand of `strands` to the consensus."""
+    """The consensus of what `poa` made of `seqs`, polished when `options` has rounds or `homopolymers` is loaded."""
+    var scratch = ConsensusScratch()
+    return polished(scratch, made, seqs, anchors, strands, options, homopolymers)
+
+
+def polished(
+    mut scratch: ConsensusScratch,
+    made: Poa,
+    seqs: List[List[UInt8]],
+    anchors: List[Int],
+    strands: List[Int],
+    options: ConsensusOptions,
+    homopolymers: HomopolymerModel,
+) raises -> List[List[UInt8]]:
+    """As `polished`, reusing `scratch` across calls."""
     var strand_of = strands.copy()
     for r in made.reversed:
         if r < len(strand_of) and strand_of[r] != STRAND_UNKNOWN:
@@ -135,7 +165,9 @@ def polished(
                 f += 1
                 continue
             members.append(r)
-        var polished = polish(
+        var out = polish_with_scratch(
+            scratch.aligner,
+            scratch.polish,
             made.consensus[0],
             seqs,
             members,
@@ -144,17 +176,20 @@ def polished(
             anchors=made.anchors if len(made.anchors) == len(seqs) else anchors,
             homopolymers=homopolymers,
             strands=strand_of,
+            threads=options.poa.threads,
         )
-        return [polished^]
+        return [out^]
     var letters = List[UInt8]()
-    for node in made.graph.heaviest_path(Topology(made.graph).order, made.shown):
+    for node in made.graph.heaviest_path(scratch.poa.order_of(made.graph), made.shown):
         letters.append(made.graph.bases[node])
     if not polishing or len(seqs) == 0:
         return [letters^]
-    var members = List[Int]()
+    var members = List[Int](capacity=len(seqs))
     for r in range(len(seqs)):
         members.append(r)
-    var polished = polish(
+    var out = polish_with_scratch(
+        scratch.aligner,
+        scratch.polish,
         letters,
         seqs,
         members,
@@ -162,5 +197,6 @@ def polished(
         likely_rounds=options.likely_rounds,
         homopolymers=homopolymers,
         strands=strand_of,
+        threads=options.poa.threads,
     )
-    return [polished^]
+    return [out^]

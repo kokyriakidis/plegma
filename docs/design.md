@@ -13,29 +13,33 @@ an error is one `plegma: ...` line and exit status 1).
 pair's order) by the sequences, so any input order gives one consensus (`-p`, the default,
 `plegma/order.mojo`), input order (`-n`) or longest first (`-L`).
 
-- **Alignment to the graph** (`plegma/kernel.mojo`): banded DP over the nodes in topological order, abPOA's scoring
-  (match score, mismatch, convex two-piece gaps) and adaptive band (`b + f*L` either side of the predecessors' best
-  cells and of the diagonal the node's heaviest remaining path leaves). Memory follows the band: a row lives until its
-  last successor is done, and the traceback keeps one byte per cell (three more at nodes with several predecessors).
-  `Workspace.align` aligns between any two nodes (`SOURCE` and `SINK` for the ends), so a sequence can also be aligned
-  window by window between anchors.
+- **Alignment to the graph** (`plegma/kernel.mojo`, `plegma/kernel_simd.mojo`, `plegma/topology.mojo`): banded DP over
+  the nodes in topological order (`Topology`, reusable in-place via `compute` and `compute_allowed`), abPOA's scoring
+  and adaptive band, with SIMD lane helpers separated into `kernel_simd.mojo`. Memory follows the band: a row lives
+  until its last successor is done, and the traceback keeps one byte per cell (three more at nodes with several
+  predecessors). `Workspace.align` aligns between any two nodes (`SOURCE` and `SINK` for the ends), so a sequence can
+  also be aligned window by window between anchors.
 - **Seeded** (`-S`, the default; `-N` aligns to the whole graph; `plegma/pinned.mojo` `align_pinned`): minimap2's
   pins (`pins.pins`) between the sequence and the consensus path, kept only where the 19-mer centred on a pin is
   unique in both (in near-identical tandem copies the chain may pair the wrong copy), each pin a one-letter anchor on
   its path node; the kernel then aligns each stretch between anchors to the subgraph between their nodes
-  (`window_nodes`), in the band the whole sequence would get. Where no pin survives, the one window is the whole graph.
-- **The graph** (`plegma/graph.mojo`): flat arrays of nodes, columns and edges. A sequence joins along its aligned
-  nodes (`fuse_nodes`); an MSA's rows make a graph directly (`from_msa`); `msa` writes the rows back.
-- **Consensus** (`plegma/consensus.mojo` `polished`, the one path `plegma.consensus`, the C API and `plegma poa -r 0`
-  share): abPOA's heaviest bundle (`Graph.heaviest_path` over the member paths), then polished in global mode.
-  `-d` clusters the sequences on the MSA's heterozygous columns (`plegma/clusters.mojo` `cluster_rows`), one
-  consensus per cluster; `-a 1` takes each column's most frequent letter.
-- **Polishing** (`plegma/polish.mojo` `polish`, the edit distance stage, driving the others): one-letter and
-  whole-repeat-unit edits kept while they lower the summed edit distance of the sequences to it; then
-  `plegma/likelihood.mojo` (`_likely`), while they raise their likelihood under a pair HMM; then, with a homopolymer
-  model, `plegma/run_lengths.mojo` (`_runs`), every run at its most likely length. All three work on what
-  `plegma/bands.mojo` holds: each read aligned to the consensus (`_Paths`, a one-sided read as it is anchored,
-  `past_the_end`) and its forward and backward matrices in a band around that alignment (`_Bands`).
+  (`window_nodes`), in parallel across windows when `threads > 1`, in the band the whole sequence would get. Where no
+  pin survives, the one window is the whole graph.
+- **The graph & CIGAR** (`plegma/graph.mojo`, `plegma/cigar.mojo`): flat arrays of nodes, columns and edges. A
+  sequence joins along its aligned nodes (`fuse_nodes`) or copies an identical read directly (`add_twin_path`);
+  `node_order_into` reuses Kahn's scratch buffers; `cigar.mojo` provides zero-allocation byte-level CIGAR walkers
+  (`pairing_from_cigar`, `query_at`, `haplotype_at`) alongside `cigar_runs`.
+- **Anchored QC & two-side joining** (`plegma/anchored.mojo`, `plegma/join.mojo`): separated from `poa.mojo` so
+  spanning-read end verification (`ends_checked`), paralog/foreign-read filtering (`find_foreign`), one-directional
+  reach/trimming (`read_reach`, `trim_consensus`), repeat period detection (`repeat_period`), and two-side overlap /
+  tandem copy-shift joining (`join_sides`) are independently testable and parallelized across reads and candidates.
+- **Consensus & reusable scratch** (`plegma/consensus.mojo` `ConsensusScratch`, `PoaScratch`, `PolishScratch`):
+  reusable workspaces eliminate repeated `Aligner`, `Topology`, `Workspace`, and DP buffer allocations across rounds,
+  clusters, and repeated calls.
+- **Polishing** (`plegma/polish.mojo`, `plegma/bands.mojo`, `plegma/likelihood.mojo`, `plegma/run_lengths.mojo`):
+  edit-distance, pair-HMM likelihood, and homopolymer stages share `PolishScratch` and direct CIGAR parsing in
+  `_Paths.fill`, with multi-threaded parallel read alignment, segment-level parallelism, and deterministic bit-exact
+  read-level parallelism when a single segment dominates.
 
 ### Reads fixed at one anchor (`plegma/poa.mojo`)
 
@@ -94,19 +98,22 @@ by its own alignment to the reference, then placed in the reference letters' col
 
 - **The pairings** (`_pairings`): independent, spread over `-t` threads, an aligner each, the longest first. Exact
   (karan, asm5's scores made costs: mismatch 40, a gap of k letters min(78 + 7k, 162 + 3k), ties left), or with the
-  reference's flanks pinned as minimap2 pins it (`plegma/pins.mojo` `pinned_pairing`: minimap2 2.31's minimizers,
-  seed filters, RMQ chaining with its float arithmetic, re-chaining, bad-end and bad-seed filters, pins at the
-  minimizers' middles at dipcall's settings; karan exact between consecutive pins; then, as minimap2 last does,
-  each gap shifted left through the matched run before it, `_left_aligned`). The port is checked against
-  minimap2's own chains (`--print-chains`) and against a Python port, `experiments/chr20/mm2like.py`.
+  reference's flanks pinned as minimap2 pins it (`plegma/seeds.mojo` `ReferenceIndex` built once and shared read-only
+  across threads, `plegma/chain.mojo` `rmq_chains`, `plegma/pins.mojo` `pinned_pairing_with_index`: minimap2 2.31's
+  minimizers, seed filters, RMQ chaining with its float arithmetic, re-chaining, bad-end and bad-seed filters, pins at
+  the minimizers' middles at dipcall's settings; karan exact between consecutive pins; then, as minimap2 last does,
+  each gap shifted left through the matched run before it, `_left_aligned`). The port is checked against minimap2's own
+  chains (`--print-chains`) and against a Python port, `experiments/chr20/mm2like.py`.
 - **Fallback** (`_fall_back`): when most sequences replace stretches of the reference and those stretches are much of
-  their letters (reads of one sequence, not alleles), those are aligned again at pgrealign's costs.
+  their letters (reads of one sequence, not alleles), those are aligned again at pgrealign's costs in parallel over
+  `-t` threads.
 - **Columns** (`_on_reference_columns`): each letter on its reference letter's column; the runs different sequences
-  insert at one place aligned to each other (recursively, on the longest), so their copies share columns.
+  insert at one place aligned to each other (recursively, on the longest) in parallel across independent insertion
+  slots over `-t` threads, so their copies share columns.
 
-`_chains` in `pins.mojo` is the hot loop of `ref -F` (about half its time): minimap2's RMQ chaining with the inner
-window's anchors in a linked list over a count tree, one 32-byte record per anchor, a tabulated gap penalty and an
-outer segment tree of (priority, leaf) pairs.
+`rmq_chains` in `chain.mojo` is the hot loop of `ref -F`: minimap2's RMQ chaining with the inner window's anchors in a
+linked list over a count tree, one 32-byte record per anchor, a tabulated gap penalty and an outer segment tree of
+(priority, leaf) pairs.
 
 ## Tracing
 

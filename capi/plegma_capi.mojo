@@ -10,13 +10,14 @@ one; every call is re-entrant.
 from std.memory import Layout, alloc
 
 from plegma.clustered import Clustered, clustered_consensus, phased_consensus
-from plegma.consensus import ConsensusOptions, consensus
+from plegma.consensus import ConsensusOptions, ConsensusScratch, consensus
 from plegma.homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from plegma.kernel import BOTH
 from plegma.version import VERSION
 
 comptime Bytes = Pointer[UInt8, MutUntrackedOrigin]
 comptime Model = Pointer[HomopolymerModel, MutUntrackedOrigin]
+comptime Scratch = Pointer[ConsensusScratch, MutUntrackedOrigin]
 
 comptime _VERSION = VERSION + "\x00"
 """`plegma_version`'s text, NUL-ended; the header's PLEGMA_VERSION_* agree (test_capi checks)."""
@@ -53,6 +54,11 @@ def _free_model(pointer: Model):
 
 
 def _free_result(pointer: Pointer[Result, MutUntrackedOrigin]):
+    _ = pointer.unsafe_take_pointee()
+    pointer.unsafe_free()
+
+
+def _free_scratch(pointer: Scratch):
     _ = pointer.unsafe_take_pointee()
     pointer.unsafe_free()
 
@@ -103,7 +109,8 @@ comptime _BAND_F = _Field(48)
 comptime _BAND_MAX = _Field(52)
 comptime _NOISE_RUN = _Field(56)
 comptime _TWO_LENGTHS_DB = _Field(60)
-comptime _OPTIONS_SIZE = 64
+comptime _THREADS = _Field(64)
+comptime _OPTIONS_SIZE = 68
 """sizeof(plegma_options) in this library's plegma.h."""
 
 
@@ -158,6 +165,7 @@ def _settings(at: Bytes) raises -> ConsensusOptions:
     options.poa.band_max = given.int(_BAND_MAX, options.poa.band_max)
     options.noise_run = given.int(_NOISE_RUN, options.noise_run)
     options.two_lengths_db = given.float(_TWO_LENGTHS_DB, options.two_lengths_db)
+    options.poa.threads = given.int(_THREADS, options.poa.threads)
     options.check()
     return options^
 
@@ -194,6 +202,7 @@ def _options_init(settings: Bytes):
     _set_int(settings, _BAND_MAX, defaults.poa.band_max)
     _set_int(settings, _NOISE_RUN, defaults.noise_run)
     settings.unsafe_offset(_TWO_LENGTHS_DB.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.two_lengths_db)
+    _set_int(settings, _THREADS, defaults.poa.threads)
 
 
 @export
@@ -231,6 +240,17 @@ def plegma_model_parse(
 def plegma_model_free(model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin]) abi("C"):
     if model:
         _free_model(model.value())
+
+
+@export
+def plegma_scratch_create() abi("C") -> Scratch:
+    return _box(ConsensusScratch())
+
+
+@export
+def plegma_scratch_free(scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin]) abi("C"):
+    if scratch:
+        _free_scratch(scratch.value())
 
 
 def _letter(c: UInt8) -> UInt8:
@@ -283,6 +303,7 @@ def _reads(
 
 
 def _consensus(
+    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
@@ -297,12 +318,17 @@ def _consensus(
     var strand_of = List[Int]()
     _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
     var options = _settings(settings.value()) if settings else ConsensusOptions()
+    if scratch:
+        if model:
+            return consensus(scratch.value()[], seqs^, anchor_of, strand_of, options, model.value()[])
+        return consensus(scratch.value()[], seqs^, anchor_of, strand_of, options)
     if model:
         return consensus(seqs^, anchor_of, strand_of, options, model.value()[])
     return consensus(seqs^, anchor_of, strand_of, options)
 
 
 def _clustered(
+    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
@@ -321,11 +347,39 @@ def _clustered(
     _reads(count, sequences, lengths, anchors, strands, seqs, anchor_of, strand_of)
     var options = _settings(settings.value()) if settings else ConsensusOptions()
     var got: Clustered
-    if model:
+    if scratch:
+        if model:
+            got = clustered_consensus(
+                scratch.value()[], seqs^, anchor_of, strand_of, max_clusters, min_freq, options, model.value()[]
+            )
+        else:
+            got = clustered_consensus(scratch.value()[], seqs^, anchor_of, strand_of, max_clusters, min_freq, options)
+    elif model:
         got = clustered_consensus(seqs^, anchor_of, strand_of, max_clusters, min_freq, options, model.value()[])
     else:
         got = clustered_consensus(seqs^, anchor_of, strand_of, max_clusters, min_freq, options)
     _held(got, result)
+
+
+@export
+def plegma_consensus_with_scratch(
+    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
+    var result = Result()
+    try:
+        result.parts = _consensus(scratch, count, sequences, lengths, anchors, strands, model, settings)
+    except e:
+        result.parts.clear()
+        result.error = List[UInt8](String(e).as_bytes())
+        result.error.append(0)
+    return _box(result^)
 
 
 @export
@@ -338,11 +392,39 @@ def plegma_consensus(
     model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
     settings: OptionalPointer[UInt8, MutUntrackedOrigin],
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
+    return plegma_consensus_with_scratch(None, count, sequences, lengths, anchors, strands, model, settings)
+
+
+@export
+def plegma_clustered_consensus_with_scratch(
+    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    max_clusters: Int32,
+    min_freq: Float32,
+) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
     var result = Result()
     try:
-        result.parts = _consensus(count, sequences, lengths, anchors, strands, model, settings)
+        _clustered(
+            scratch,
+            count,
+            sequences,
+            lengths,
+            anchors,
+            strands,
+            model,
+            settings,
+            Int(max_clusters),
+            Float64(min_freq),
+            result,
+        )
     except e:
-        result.parts.clear()
+        result = Result()
         result.error = List[UInt8](String(e).as_bytes())
         result.error.append(0)
     return _box(result^)
@@ -360,19 +442,13 @@ def plegma_clustered_consensus(
     max_clusters: Int32,
     min_freq: Float32,
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
-    var result = Result()
-    try:
-        _clustered(
-            count, sequences, lengths, anchors, strands, model, settings, Int(max_clusters), Float64(min_freq), result
-        )
-    except e:
-        result = Result()
-        result.error = List[UInt8](String(e).as_bytes())
-        result.error.append(0)
-    return _box(result^)
+    return plegma_clustered_consensus_with_scratch(
+        None, count, sequences, lengths, anchors, strands, model, settings, max_clusters, min_freq
+    )
 
 
 def _phased(
+    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
@@ -395,7 +471,12 @@ def _phased(
         haps.append(Int(haplotypes.value()[unsafe_offset=r]))
     var options = _settings(settings.value()) if settings else ConsensusOptions()
     var got: Clustered
-    if model:
+    if scratch:
+        if model:
+            got = phased_consensus(scratch.value()[], seqs^, haps, anchor_of, strand_of, options, model.value()[])
+        else:
+            got = phased_consensus(scratch.value()[], seqs^, haps, anchor_of, strand_of, options)
+    elif model:
         got = phased_consensus(seqs^, haps, anchor_of, strand_of, options, model.value()[])
     else:
         got = phased_consensus(seqs^, haps, anchor_of, strand_of, options)
@@ -423,7 +504,8 @@ def _held(got: Clustered, mut result: Result):
 
 
 @export
-def plegma_phased_consensus(
+def plegma_phased_consensus_with_scratch(
+    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
@@ -435,12 +517,28 @@ def plegma_phased_consensus(
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
     var result = Result()
     try:
-        _phased(count, sequences, lengths, anchors, strands, haplotypes, model, settings, result)
+        _phased(scratch, count, sequences, lengths, anchors, strands, haplotypes, model, settings, result)
     except e:
         result = Result()
         result.error = List[UInt8](String(e).as_bytes())
         result.error.append(0)
     return _box(result^)
+
+
+@export
+def plegma_phased_consensus(
+    count: Int,
+    sequences: Sequences,
+    lengths: Lengths,
+    anchors: Values,
+    strands: Values,
+    haplotypes: Values,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
+    return plegma_phased_consensus_with_scratch(
+        None, count, sequences, lengths, anchors, strands, haplotypes, model, settings
+    )
 
 
 @export
