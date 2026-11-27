@@ -135,7 +135,14 @@ def _ref(records: Records, options: Options) raises -> Aligned:
     for r in range(len(records)):
         rows.append(String(unsafe_from_utf8=bytes[r]))
         shown.append(r)
-    var out = Aligned(Graph.from_msa(records.names, rows), shown^, rows^)
+    var need_graph = (options.result == 0 and options.consensus_rule == 0) or options.result >= 2
+    var graph: Graph
+    if need_graph:
+        graph = Graph.from_msa(records.names, rows)
+    else:
+        graph = Graph()
+        graph.names = records.names.copy()
+    var out = Aligned(graph^, shown^, rows^)
     for r in range(len(records)):
         out.polish_with.append(r)
     return out^

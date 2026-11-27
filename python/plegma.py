@@ -24,6 +24,9 @@ __all__ = [
     "consensus",
     "clustered_consensus",
     "phased_consensus",
+    "consensus_batch",
+    "clustered_consensus_batch",
+    "phased_consensus_batch",
     "version",
     "BOTH",
     "LEFT",
@@ -64,6 +67,7 @@ class _Options(ctypes.Structure):
         ("noise_run", ctypes.c_int32),
         ("two_lengths_db", ctypes.c_float),
         ("threads", ctypes.c_int32),
+        ("batch_size", ctypes.c_int32),
     ]
 
 
@@ -80,6 +84,19 @@ class _Placement(ctypes.Structure):
         ("consensus_end", ctypes.c_int64),
         ("read_start", ctypes.c_int64),
         ("read_end", ctypes.c_int64),
+    ]
+
+
+class _Locus(ctypes.Structure):
+    """plegma_locus (capi/plegma.h)."""
+
+    _fields_ = [
+        ("count", ctypes.c_size_t),
+        ("sequences", ctypes.POINTER(ctypes.c_char_p)),
+        ("lengths", ctypes.POINTER(ctypes.c_size_t)),
+        ("anchors", ctypes.POINTER(ctypes.c_int32)),
+        ("strands", ctypes.POINTER(ctypes.c_int32)),
+        ("haplotypes", ctypes.POINTER(ctypes.c_int32)),
     ]
 
 
@@ -126,6 +143,32 @@ def _library():
     lib.plegma_phased_consensus_with_scratch.argtypes = (
         [p] + reads_args + [ctypes.POINTER(ctypes.c_int32), p, ctypes.POINTER(_Options)]
     )
+    lib.plegma_consensus_batch.restype = None
+    lib.plegma_consensus_batch.argtypes = [
+        ctypes.c_size_t,
+        ctypes.POINTER(_Locus),
+        p,
+        ctypes.POINTER(_Options),
+        ctypes.POINTER(p),
+    ]
+    lib.plegma_clustered_consensus_batch.restype = None
+    lib.plegma_clustered_consensus_batch.argtypes = [
+        ctypes.c_size_t,
+        ctypes.POINTER(_Locus),
+        p,
+        ctypes.POINTER(_Options),
+        ctypes.c_int32,
+        ctypes.c_float,
+        ctypes.POINTER(p),
+    ]
+    lib.plegma_phased_consensus_batch.restype = None
+    lib.plegma_phased_consensus_batch.argtypes = [
+        ctypes.c_size_t,
+        ctypes.POINTER(_Locus),
+        p,
+        ctypes.POINTER(_Options),
+        ctypes.POINTER(p),
+    ]
     lib.plegma_result_members.restype = ctypes.c_size_t
     lib.plegma_result_members.argtypes = [p, ctypes.c_size_t, ctypes.POINTER(ctypes.POINTER(ctypes.c_int32))]
     lib.plegma_result_cigar.restype = ctypes.c_char_p
@@ -154,6 +197,7 @@ class Model:
 
     def __init__(self, handle):
         self._handle = handle
+        self._free = _lib.plegma_model_free
 
     @classmethod
     def load(cls, path):
@@ -174,7 +218,7 @@ class Model:
 
     def close(self):
         if self._handle:
-            _lib.plegma_model_free(self._handle)
+            self._free(self._handle)
             self._handle = None
 
     def __enter__(self):
@@ -192,10 +236,11 @@ class Scratch:
 
     def __init__(self):
         self._handle = _lib.plegma_scratch_create()
+        self._free = _lib.plegma_scratch_free
 
     def close(self):
         if self._handle:
-            _lib.plegma_scratch_free(self._handle)
+            self._free(self._handle)
             self._handle = None
 
     def __enter__(self):
@@ -367,3 +412,94 @@ def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, 
         return Clustered(result, given.count)
     finally:
         _lib.plegma_result_free(result)
+
+
+def _pack_batch(reads_batch, anchors_batch, strands_batch, haplotypes_batch, model, options, caller):
+    n = len(reads_batch)
+    if anchors_batch is not None and len(anchors_batch) != n:
+        raise ValueError(f"{len(anchors_batch)} anchor lists for {n} loci")
+    if strands_batch is not None and len(strands_batch) != n:
+        raise ValueError(f"{len(strands_batch)} strand lists for {n} loci")
+    if haplotypes_batch is not None and len(haplotypes_batch) != n:
+        raise ValueError(f"{len(haplotypes_batch)} haplotype lists for {n} loci")
+    settings = _Options()
+    _lib.plegma_options_init(ctypes.byref(settings))
+    for name, value in options.items():
+        if name not in _OPTION_NAMES:
+            raise TypeError(f"{caller}() got an unexpected option {name!r}")
+        value = int(value) if name == "pinned" else value
+        if isinstance(value, int):
+            _int32(value, name)
+        setattr(settings, name, value)
+    kept = []
+    loci = (_Locus * n)()
+    for i in range(n):
+        anc = None if anchors_batch is None else anchors_batch[i]
+        st = None if strands_batch is None else strands_batch[i]
+        g = _Reads(reads_batch[i], anc, st, model, {}, caller)
+        haps = None
+        if haplotypes_batch is not None:
+            if len(haplotypes_batch[i]) != g.count:
+                raise ValueError(f"{len(haplotypes_batch[i])} haplotypes for {g.count} reads")
+            haps = _int32s([-1 if h is None else int(h) for h in haplotypes_batch[i]], "haplotype")
+        kept.append((g, haps))
+        loci[i] = _Locus(g.count, g.sequences, g.lengths, g.anchors, g.strands, haps)
+    model_h = model._handle if model is not None else None
+    return n, loci, kept, model_h, settings
+
+
+def consensus_batch(reads_batch, anchors_batch=None, strands_batch=None, model=None, **options):
+    """Runs `consensus` across multiple independent loci in parallel over `threads`, reusing one scratch per worker."""
+    n, loci, kept, model_h, settings = _pack_batch(
+        reads_batch, anchors_batch, strands_batch, None, model, options, "consensus_batch"
+    )
+    if n == 0:
+        return []
+    raw = (ctypes.c_void_p * n)()
+    _lib.plegma_consensus_batch(n, loci, model_h, ctypes.byref(settings), raw)
+    try:
+        return [_parts(raw[i]) for i in range(n)]
+    finally:
+        for i in range(n):
+            if raw[i]:
+                _lib.plegma_result_free(raw[i])
+
+
+def clustered_consensus_batch(
+    reads_batch, anchors_batch=None, strands_batch=None, model=None, max_clusters=2, min_freq=0.25, **options
+):
+    """Runs `clustered_consensus` across multiple independent loci in parallel over `threads`."""
+    n, loci, kept, model_h, settings = _pack_batch(
+        reads_batch, anchors_batch, strands_batch, None, model, options, "clustered_consensus_batch"
+    )
+    if n == 0:
+        return []
+    raw = (ctypes.c_void_p * n)()
+    _lib.plegma_clustered_consensus_batch(
+        n, loci, model_h, ctypes.byref(settings), int(max_clusters), float(min_freq), raw
+    )
+    try:
+        return [Clustered(raw[i], kept[i][0].count) for i in range(n)]
+    finally:
+        for i in range(n):
+            if raw[i]:
+                _lib.plegma_result_free(raw[i])
+
+
+def phased_consensus_batch(
+    reads_batch, haplotypes_batch, anchors_batch=None, strands_batch=None, model=None, **options
+):
+    """Runs `phased_consensus` across multiple independent loci in parallel over `threads`."""
+    n, loci, kept, model_h, settings = _pack_batch(
+        reads_batch, anchors_batch, strands_batch, haplotypes_batch, model, options, "phased_consensus_batch"
+    )
+    if n == 0:
+        return []
+    raw = (ctypes.c_void_p * n)()
+    _lib.plegma_phased_consensus_batch(n, loci, model_h, ctypes.byref(settings), raw)
+    try:
+        return [Clustered(raw[i], kept[i][0].count) for i in range(n)]
+    finally:
+        for i in range(n):
+            if raw[i]:
+                _lib.plegma_result_free(raw[i])

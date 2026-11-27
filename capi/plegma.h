@@ -67,6 +67,8 @@ typedef struct plegma_options {
     float two_lengths_db; /* clustered and phased consensus, with a model: how many dB better two run lengths must
                              explain the reads than one to keep two (15) */
     int32_t threads; /* worker threads for parallel stages (1: caller's thread only; >= 1; bit-exact across counts) */
+    int32_t batch_size; /* snapshot mini-batch size for parallel single-locus POA (1: strict sequential; > 1:
+                           deterministic snapshot batches, bit-exact across thread counts) */
 } plegma_options;
 
 void plegma_options_init(plegma_options* options);
@@ -131,6 +133,28 @@ plegma_result* plegma_phased_consensus_with_scratch(plegma_scratch* scratch, siz
                                                     const int32_t* anchors, const int32_t* strands,
                                                     const int32_t* haplotypes, const plegma_model* model,
                                                     const plegma_options* options);
+
+/* One locus's reads for the parallel multi-locus batch calls: anchors/strands NULL take their defaults; haplotypes
+ * is used by plegma_phased_consensus_batch only. */
+typedef struct plegma_locus {
+    size_t count;
+    const uint8_t* const* sequences;
+    const size_t* lengths;
+    const int32_t* anchors;
+    const int32_t* strands;
+    const int32_t* haplotypes;
+} plegma_locus;
+
+/* Parallel multi-locus batch consensus calls: runs `batch_size` independent loci across options->threads workers
+ * (longest first, one pooled scratch per worker), writing results[i] for each locus i (caller frees every non-NULL
+ * results[i] with plegma_result_free). Bit-exact with calling the single-locus function on each locus. */
+void plegma_consensus_batch(size_t batch_size, const plegma_locus* loci, const plegma_model* model,
+                            const plegma_options* options, plegma_result** results);
+void plegma_clustered_consensus_batch(size_t batch_size, const plegma_locus* loci, const plegma_model* model,
+                                      const plegma_options* options, int32_t max_clusters, float min_freq,
+                                      plegma_result** results);
+void plegma_phased_consensus_batch(size_t batch_size, const plegma_locus* loci, const plegma_model* model,
+                                   const plegma_options* options, plegma_result** results);
 
 /* A read's alignment to its cluster's consensus: the cluster (a part), the alignment's cost, and the spans it
  * covers, consensus letters consensus_start ..< consensus_end and read letters read_start ..< read_end. */

@@ -76,6 +76,7 @@ The flags, defaults and alignment modes (`-m` 0 global, 1 local, 2 extension) ar
 | `-i FILE` | | start from an existing MSA |
 | `-l` | | the input is a list of files, each aligned on its own (parallelized across `-t` threads) |
 | `-t INT` | `1` | worker threads for parallel stages (bit-exact with `-t 1`) |
+| `--batch INT` | `1` | snapshot mini-batch size for parallel single-locus POA (`1` strict sequential; `> 1` deterministic across `-t`) |
 
 Pinning (`-S`) pays on long, divergent sequences such as a pangenome region's alleles; on reads of one place it only
 costs time, so local assembly uses `-N`.
@@ -133,9 +134,12 @@ PLEGMA_TRACE=poa,polish plegma poa -N la.fa > cons.fa
 and returns what `plegma poa -r 0 [-H model]` writes, byte for byte: one sequence, or the left and right sides when
 no read spans both anchors and they could not be joined.
 
-- **Threads**: every call is re-entrant; a homopolymer model is loaded once and shared read-only by every thread.
-  Callers assembling many windows in a loop can reuse a per-thread `plegma_scratch` (`plegma::Scratch` in C++,
-  `plegma.Scratch` in Python, `ConsensusScratch` in Mojo) to avoid reallocating buffers across calls.
+- **Threads & batching**: every call is re-entrant; a homopolymer model is loaded once and shared read-only by every
+  thread. Callers assembling many windows in a loop can reuse a per-thread `plegma_scratch` (`plegma::Scratch` in C++,
+  `plegma.Scratch` in Python, `ConsensusScratch` in Mojo) to avoid reallocating buffers across calls, or pass many
+  independent loci at once to `plegma_*_batch` (`plegma::consensusBatch` / `clusteredConsensusBatch` /
+  `phasedConsensusBatch` in C++, `plegma.*_batch` in Python and Mojo) to parallelize across `threads` with one scratch
+  per worker.
 - **Errors**: wrong arguments and failures come back as messages (C), `std::runtime_error` (C++) or `plegma.Error`
   (Python), never an abort.
 - **Input**: letters other than A, C, G, T are read as N; empty reads are allowed (adjacent anchors); reads with
@@ -219,6 +223,7 @@ homopolymer model, clustering and `on_reference`.
 | `noise_run` | | 3 (clustered: clusters apart only by single letters in runs this long are one) |
 | `two_lengths_db` | | 15 (clustered and phased, with a model: how much better two run lengths must explain the reads) |
 | `threads` | `-t` | 1 (worker threads for parallel stages; bit-exact across thread counts) |
+| `batch_size` | `--batch` | 1 (snapshot mini-batch size for parallel single-locus POA; `> 1` deterministic across `threads`) |
 
 ### Haplotypes
 

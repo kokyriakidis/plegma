@@ -7,7 +7,10 @@ null model with the message written into the caller's buffer. A model is read-on
 one; every call is re-entrant.
 """
 
+from std.atomic import Atomic
 from std.memory import Layout, alloc
+
+from karan.common import spread, thread_count
 
 from plegma.clustered import Clustered, clustered_consensus, phased_consensus
 from plegma.consensus import ConsensusOptions, ConsensusScratch, consensus
@@ -110,7 +113,8 @@ comptime _BAND_MAX = _Field(52)
 comptime _NOISE_RUN = _Field(56)
 comptime _TWO_LENGTHS_DB = _Field(60)
 comptime _THREADS = _Field(64)
-comptime _OPTIONS_SIZE = 68
+comptime _BATCH_SIZE = _Field(68)
+comptime _OPTIONS_SIZE = 72
 """sizeof(plegma_options) in this library's plegma.h."""
 
 
@@ -166,6 +170,7 @@ def _settings(at: Bytes) raises -> ConsensusOptions:
     options.noise_run = given.int(_NOISE_RUN, options.noise_run)
     options.two_lengths_db = given.float(_TWO_LENGTHS_DB, options.two_lengths_db)
     options.poa.threads = given.int(_THREADS, options.poa.threads)
+    options.poa.batch_size = given.int(_BATCH_SIZE, options.poa.batch_size)
     options.check()
     return options^
 
@@ -203,6 +208,7 @@ def _options_init(settings: Bytes):
     _set_int(settings, _NOISE_RUN, defaults.noise_run)
     settings.unsafe_offset(_TWO_LENGTHS_DB.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.two_lengths_db)
     _set_int(settings, _THREADS, defaults.poa.threads)
+    _set_int(settings, _BATCH_SIZE, defaults.poa.batch_size)
 
 
 @export
@@ -539,6 +545,189 @@ def plegma_phased_consensus(
     return plegma_phased_consensus_with_scratch(
         None, count, sequences, lengths, anchors, strands, haplotypes, model, settings
     )
+
+
+@fieldwise_init
+struct _Locus(Copyable, Movable):
+    """Exact ABI layout of `struct plegma_locus` in `capi/plegma.h` (6 pointers/size_t fields)."""
+
+    var count: Int
+    var sequences: Sequences
+    var lengths: Lengths
+    var anchors: Values
+    var strands: Values
+    var haplotypes: Values
+
+
+comptime Loci = OptionalPointer[_Locus, MutUntrackedOrigin]
+comptime ResultOut = OptionalPointer[Pointer[Result, MutUntrackedOrigin], MutUntrackedOrigin]
+
+
+def _error_box(message: String) -> Pointer[Result, MutUntrackedOrigin]:
+    var result = Result()
+    result.error = List[UInt8](message.as_bytes())
+    result.error.append(0)
+    return _box(result^)
+
+
+def _locus_bases(locus: _Locus) -> Int:
+    if locus.count <= 0 or locus.count >= _TOO_MANY or not locus.lengths:
+        return 0
+    var total = 0
+    for r in range(locus.count):
+        var n = locus.lengths.value()[unsafe_offset=r]
+        if n > 0 and n < _TOO_MANY:
+            total += n
+    return total
+
+
+def _batch_order(batch_size: Int, loci_p: Pointer[_Locus, MutUntrackedOrigin]) -> List[UInt64]:
+    var order = List[UInt64](capacity=batch_size)
+    for i in range(batch_size):
+        order.append((UInt64(_locus_bases(loci_p[unsafe_offset=i])) << 32) | UInt64(i))
+    sort(order)
+    order.reverse()
+    return order^
+
+
+def _run_batch(
+    kind: Int,
+    batch_size: Int,
+    loci: Loci,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    max_clusters: Int,
+    min_freq: Float64,
+    results: ResultOut,
+):
+    """Shared parallel batch dispatcher for `kind` 0 (consensus), 1 (clustered), 2 (phased)."""
+    if batch_size <= 0 or not results:
+        return
+    var out_p = results.value()
+    if not loci:
+        for i in range(batch_size):
+            out_p[unsafe_offset=i] = _error_box("loci must be given for batch_size > 0")
+        return
+    var options: ConsensusOptions
+    try:
+        options = _settings(settings.value()) if settings else ConsensusOptions()
+    except e:
+        var msg = String(e)
+        for i in range(batch_size):
+            out_p[unsafe_offset=i] = _error_box(msg)
+        return
+    var loci_p = loci.value()
+    var workers = thread_count(options.poa.threads, batch_size)
+    var sub_options = options.copy()
+    sub_options.poa.threads = max(1, options.poa.threads // workers)
+    var order = _batch_order(batch_size, loci_p)
+    var taken = Atomic[Int64](0)
+
+    def batch_worker(
+        slot: Int,
+    ) {
+        mut taken,
+        imm order,
+        imm loci_p,
+        imm kind,
+        imm model,
+        imm sub_options,
+        imm max_clusters,
+        imm min_freq,
+        imm out_p,
+    }:
+        var scratch = ConsensusScratch()
+        while True:
+            var pos = Int(taken.fetch_add(1))
+            if pos >= len(order):
+                return
+            var idx = Int(order[pos] & 0xFFFFFFFF)
+            ref locus = loci_p[unsafe_offset=idx]
+            var result = Result()
+            try:
+                var seqs = List[List[UInt8]]()
+                var anchor_of = List[Int]()
+                var strand_of = List[Int]()
+                _reads(
+                    locus.count,
+                    locus.sequences,
+                    locus.lengths,
+                    locus.anchors,
+                    locus.strands,
+                    seqs,
+                    anchor_of,
+                    strand_of,
+                )
+                if kind == 0:
+                    if model:
+                        result.parts = consensus(scratch, seqs^, anchor_of, strand_of, sub_options, model.value()[])
+                    else:
+                        result.parts = consensus(scratch, seqs^, anchor_of, strand_of, sub_options)
+                elif kind == 1:
+                    var got: Clustered
+                    if model:
+                        got = clustered_consensus(
+                            scratch, seqs^, anchor_of, strand_of, max_clusters, min_freq, sub_options, model.value()[]
+                        )
+                    else:
+                        got = clustered_consensus(
+                            scratch, seqs^, anchor_of, strand_of, max_clusters, min_freq, sub_options
+                        )
+                    _held(got, result)
+                else:
+                    if locus.count > 0 and not locus.haplotypes:
+                        raise Error("haplotypes must be given for count > 0")
+                    var haps = List[Int]()
+                    for r in range(locus.count):
+                        haps.append(Int(locus.haplotypes.value()[unsafe_offset=r]))
+                    var got: Clustered
+                    if model:
+                        got = phased_consensus(scratch, seqs^, haps, anchor_of, strand_of, sub_options, model.value()[])
+                    else:
+                        got = phased_consensus(scratch, seqs^, haps, anchor_of, strand_of, sub_options)
+                    _held(got, result)
+            except e:
+                result = Result()
+                result.error = List[UInt8](String(e).as_bytes())
+                result.error.append(0)
+            out_p[unsafe_offset=idx] = _box(result^)
+
+    spread(batch_worker, workers, workers)
+
+
+@export
+def plegma_consensus_batch(
+    batch_size: Int,
+    loci: Loci,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    results: ResultOut,
+) abi("C"):
+    _run_batch(0, batch_size, loci, model, settings, 1, 0.25, results)
+
+
+@export
+def plegma_clustered_consensus_batch(
+    batch_size: Int,
+    loci: Loci,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    max_clusters: Int32,
+    min_freq: Float32,
+    results: ResultOut,
+) abi("C"):
+    _run_batch(1, batch_size, loci, model, settings, Int(max_clusters), Float64(min_freq), results)
+
+
+@export
+def plegma_phased_consensus_batch(
+    batch_size: Int,
+    loci: Loci,
+    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    settings: Settings,
+    results: ResultOut,
+) abi("C"):
+    _run_batch(2, batch_size, loci, model, settings, 2, 0.25, results)
 
 
 @export

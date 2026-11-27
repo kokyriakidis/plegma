@@ -280,8 +280,9 @@ int main(int argc, char** argv)
         plegma_options_init(&o);
         check(o.size == sizeof(plegma_options) and o.match == 2 and o.mismatch == 4 and o.gap_open1 == 4 and
                   o.gap_extend1 == 2 and o.gap_open2 == 24 and o.gap_extend2 == 1 and o.band_b == 10 and
-                  std::fabs(o.band_f - 0.01f) < 1e-6 and o.band_max == 64 and o.noise_run == 3 and o.threads == 1,
-              "plegma_options_init sets the size, scoring, band and threads");
+                  std::fabs(o.band_f - 0.01f) < 1e-6 and o.band_max == 64 and o.noise_run == 3 and o.threads == 1 and
+                  o.batch_size == 1,
+              "plegma_options_init sets the size, scoring, band, threads and batch_size");
         Case c = makeCase(rng, 1500);
         std::vector<std::string> full = plegma::consensus(c.reads(), nullptr, plegma::Options().pinned(false));
         plegma::Options older = plegma::Options().pinned(false);
@@ -289,9 +290,15 @@ int main(int argc, char** argv)
         older.values.match = 99;
         check(plegma::consensus(c.reads(), nullptr, older) == full, "fields past an older size take their defaults");
         plegma::Options prevAbi = plegma::Options().pinned(false);
-        prevAbi.values.size = 64;  // pre-threads 64-byte struct: threads past size defaults to 1
+        prevAbi.values.size = 64;  // pre-threads 64-byte struct: threads & batch_size default to 1
         prevAbi.values.threads = 0;
-        check(plegma::consensus(c.reads(), nullptr, prevAbi) == full, "64-byte plegma_options defaults threads to 1");
+        prevAbi.values.batch_size = 0;
+        check(plegma::consensus(c.reads(), nullptr, prevAbi) == full,
+              "64-byte plegma_options defaults threads and batch_size to 1");
+        plegma::Options prev68 = plegma::Options().pinned(false);
+        prev68.values.size = 68;  // 68-byte struct: batch_size past size defaults to 1
+        prev68.values.batch_size = 0;
+        check(plegma::consensus(c.reads(), nullptr, prev68) == full, "68-byte plegma_options defaults batch_size to 1");
     }
 
     // Wrong arguments fail with a message, never a crash.
@@ -317,6 +324,9 @@ int main(int argc, char** argv)
         plegma_options_init(&o);
         o.threads = 0;
         check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)), "threads 0 fails");
+        plegma_options_init(&o);
+        o.batch_size = 0;
+        check(fails(plegma_consensus(1, letters, lengths, nullptr, nullptr, nullptr, &o)), "batch_size 0 fails");
         plegma_scratch_free(nullptr);
         check(true, "plegma_scratch_free(NULL) does nothing");
         plegma_options_init(&o);
@@ -440,6 +450,35 @@ int main(int argc, char** argv)
             plegma::phasedConsensus(reads, haps, nullptr, plegma::Options().pinned(false).threads(4), &scratch);
         check(ph4.consensus == ph1.consensus and ph4.members == ph1.members,
               "Scratch reuse and threads=4 match 1-thread phasedConsensus");
+
+        // Snapshot mini-batch POA (batchSize > 1) and multi-locus batch APIs (including nested parallelism).
+        std::vector<std::string> mb1 =
+            plegma::consensus(c1.reads(), &toy, plegma::Options().pinned(false).batchSize(4).threads(1));
+        std::vector<std::string> mb4 =
+            plegma::consensus(c1.reads(), &toy, plegma::Options().pinned(false).batchSize(4).threads(4), &scratch);
+        check(mb4 == mb1, "batchSize=4 threads=4 matches threads=1 bit-exact");
+
+        std::vector<Case> batchCases;
+        std::vector<std::vector<plegma::Read>> batchReads;
+        for (int b = 0; b < 6; b++) {
+            batchCases.push_back(makeCase(rng, 700 + 80 * b));
+            batchReads.push_back(batchCases.back().reads());
+        }
+        auto b1 = plegma::consensusBatch(batchReads, &toy, plegma::Options().pinned(false).threads(1));
+        auto b4 = plegma::consensusBatch(batchReads, &toy, plegma::Options().pinned(false).threads(4));
+        check(b4 == b1, "consensusBatch threads=4 matches threads=1 bit-exact");
+
+        std::vector<std::vector<plegma::Read>> dipBatch = {reads, reads, reads};
+        std::vector<std::vector<int>> hapBatch = {haps, haps, haps};
+        auto clb = plegma::clusteredConsensusBatch(
+            dipBatch, nullptr, plegma::Options().pinned(false).threads(4).batchSize(4), 2, 0.2f);
+        auto phb = plegma::phasedConsensusBatch(dipBatch, hapBatch, nullptr,
+                                                plegma::Options().pinned(false).threads(4));
+        bool batchOk = clb.size() == 3 and phb.size() == 3;
+        for (std::size_t i = 0; i < 3; i++) {
+            batchOk = batchOk and phb[i].consensus == ph1.consensus and phb[i].members == ph1.members;
+        }
+        check(batchOk, "clusteredConsensusBatch and phasedConsensusBatch match single-locus calls");
     }
 
     std::cout << (failures ? "FAILED " : "all passed ") << failures << std::endl;

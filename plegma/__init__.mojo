@@ -56,9 +56,9 @@ is implementation and may change.
 
 from .alphabet import N_CODE, CodeBuffer, base_code, encode_base, encode_into, reverse_complement
 from .bands import PolishScratch
-from .clustered import clustered_consensus
+from .clustered import clustered_consensus, clustered_consensus_batch
 from .clusters import cluster_rows
-from .consensus import ConsensusOptions, ConsensusScratch, consensus, polished
+from .consensus import ConsensusOptions, ConsensusScratch, consensus, consensus_batch, polished
 from .graph import Graph, Runs, cigar_runs
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel
 from .kernel import (
@@ -81,7 +81,7 @@ from .kernel import (
     align_to_graph,
 )
 from .order import guide_order
-from .phased import phased_consensus
+from .phased import phased_consensus, phased_consensus_batch
 from .pinned import WindowScratch, align_pinned, window_nodes
 from .pins import Pins, ReferenceIndex, pinned_pairing, pinned_pairing_with_index, pins, pins_in_context
 from .placement import Clustered, Placement, alignment_costs

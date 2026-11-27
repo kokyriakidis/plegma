@@ -1,13 +1,16 @@
 """Partial order alignment of a set of reads, as `plegma poa` runs it, reads anchored at both ends or at one.
 
 Anchored-read quality checks and reach/trimming live in `anchored.mojo`; two-side joining lives in `join.mojo`;
-this module manages `PoaOptions`, `Poa`, reusable `PoaScratch`, and graph construction (`poa`, `poa_with_scratch`).
+this module manages `PoaOptions`, `Poa`, reusable `PoaScratch`, speculative parallel seeding for pinned POA,
+optional deterministic snapshot mini-batch parallel POA (`batch_size > 1`), and graph construction (`poa`,
+`poa_with_scratch`).
 """
 
+from std.atomic import Atomic
 from std.math import isfinite
 
 from karan import Aligner
-from karan.common import spread
+from karan.common import spread, thread_count
 
 from .alphabet import reverse_complement
 from .anchored import (
@@ -39,7 +42,14 @@ from .kernel import (
     Workspace,
 )
 from .order import guide_order
-from .pinned import WindowScratch, align_pinned
+from .pinned import (
+    WindowScratch,
+    _PinnedWorker,
+    align_pinned,
+    align_pinned_snapshot,
+    prefetch_pin_anchors,
+)
+from .seeds import POSITION_BITS, ReferenceIndex
 from .trace import POA, Trace
 
 comptime INPUT_ORDER = 0
@@ -50,13 +60,16 @@ comptime ANCHOR_SPREAD = 16
 """A one-sided assembly's anchored end is voted on over this many nodes (`Graph._spread_vote`)."""
 comptime BAND_MAX = 64
 """The adaptive band's reach at most, either side."""
+comptime _BATCH_WARMUP = 4
+"""Sequential warmup reads before snapshot mini-batch parallel alignment (`batch_size > 1`)."""
 
 
 struct PoaOptions(Copyable, Movable):
     """How `poa` aligns: the kernel's `mode` (`GLOBAL`, `LOCAL` or `EXTENSION` for spanning reads), its `scoring`
     and band, the spanning reads' `order`, whether each read is pinned to the consensus (`seeded`), whether a read
     scoring poorly is tried reverse-complemented (`strand`, spanning reads only), `min_cover` for one-directional
-    trimming, and `threads` for parallel stages (1: caller's thread only)."""
+    trimming, `threads` for parallel stages (1: caller's thread only), and `batch_size` for snapshot mini-batch
+    parallel POA (1: strict sequential read-by-read POA; > 1: deterministic snapshot batches)."""
 
     var mode: Int
     var scoring: Scoring
@@ -68,6 +81,7 @@ struct PoaOptions(Copyable, Movable):
     var strand: Bool
     var min_cover: Int
     var threads: Int
+    var batch_size: Int
 
     def __init__(out self):
         self.mode = GLOBAL
@@ -80,6 +94,7 @@ struct PoaOptions(Copyable, Movable):
         self.strand = False
         self.min_cover = 5
         self.threads = 1
+        self.batch_size = 1
 
     def check(self) raises:
         """Raises on options `poa` cannot run with, naming the value."""
@@ -96,6 +111,8 @@ struct PoaOptions(Copyable, Movable):
             raise Error(t"min_cover {self.min_cover}: must be 1 or more")
         if self.threads < 1:
             raise Error(t"threads {self.threads}: must be 1 or more")
+        if self.batch_size < 1:
+            raise Error(t"batch_size {self.batch_size}: must be 1 or more")
 
 
 struct Poa(Movable):
@@ -164,15 +181,49 @@ struct PoaScratch(Movable):
         self.topology.compute(graph, self.topo_in, self.topo_ready)
         return self.topology.order
 
+    def _ensure_full_topology(mut self, graph: Graph, mut topo_ver: Int, mut weight_ver: Int) raises:
+        """Recomputes full-graph topology incrementally within one growing graph: skips Kahn's sort when
+        `graph.topology_version` is unchanged and skips `recompute_remaining` when `graph.weight_version` is also
+        unchanged."""
+        if topo_ver == graph.topology_version and len(self.topology.order) == len(graph):
+            if weight_ver != graph.weight_version:
+                self.topology.recompute_remaining(graph)
+                weight_ver = graph.weight_version
+            return
+        self.topology.compute(graph, self.topo_in, self.topo_ready)
+        topo_ver = graph.topology_version
+        weight_ver = graph.weight_version
+
     def align(
-        mut self, graph: Graph, seq: List[UInt8], options: PoaOptions, mode: Int, anchors: List[Int] = List[Int]()
+        mut self,
+        graph: Graph,
+        seq: List[UInt8],
+        options: PoaOptions,
+        mode: Int,
+        anchors: List[Int] = List[Int](),
+        read_id: Int = -1,
     ) raises -> GraphAlignment:
         """`seq` aligned to `graph` in `mode`, reusing all internal topology and workspace buffers."""
+        var topo_ver = -1
+        var weight_ver = -1
+        return self._align_tracked(graph, seq, options, mode, anchors, read_id, topo_ver, weight_ver)
+
+    def _align_tracked(
+        mut self,
+        graph: Graph,
+        seq: List[UInt8],
+        options: PoaOptions,
+        mode: Int,
+        anchors: List[Int],
+        read_id: Int,
+        mut topo_ver: Int,
+        mut weight_ver: Int,
+    ) raises -> GraphAlignment:
         self.row_of.resize(len(graph), -1)
         if len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX):
             _between_into(graph, anchors, mode, self.allowed, self.bfs_work)
             if options.seeded:
-                self.topology.compute(graph, self.topo_in, self.topo_ready)
+                self._ensure_full_topology(graph, topo_ver, weight_ver)
                 var found = align_pinned(
                     graph,
                     self.topology,
@@ -185,10 +236,13 @@ struct PoaScratch(Movable):
                     self.workspace,
                     mode,
                     options.threads,
+                    read_id,
                 )
                 _past_anchor(found, self.allowed)
                 return found^
             else:
+                topo_ver = -1
+                weight_ver = -1
                 self.topology.compute_allowed(graph, self.allowed, self.topo_in, self.topo_ready, self.topo_full)
                 return self.workspace.align(
                     graph,
@@ -204,7 +258,7 @@ struct PoaScratch(Movable):
                     options.band_f,
                     options.band_max,
                 )
-        self.topology.compute(graph, self.topo_in, self.topo_ready)
+        self._ensure_full_topology(graph, topo_ver, weight_ver)
         if options.seeded and (mode == GLOBAL or mode == PREFIX or mode == SUFFIX):
             return align_pinned(
                 graph,
@@ -218,6 +272,7 @@ struct PoaScratch(Movable):
                 self.workspace,
                 mode,
                 options.threads,
+                read_id,
             )
         return self.workspace.align(
             graph,
@@ -236,6 +291,323 @@ struct PoaScratch(Movable):
 
 
 comptime _Aligner = PoaScratch
+
+
+def _align_one_snapshot(
+    graph: Graph,
+    topology: Topology,
+    use_pinned: Bool,
+    has_index: Bool,
+    hp_path: List[Int],
+    hp_letters: List[UInt8],
+    cached_index: ReferenceIndex,
+    filter_allowed: Bool,
+    allowed: List[Bool],
+    seq: List[UInt8],
+    options: PoaOptions,
+    mode: Int,
+    mut w: _PinnedWorker,
+) raises -> GraphAlignment:
+    """Aligns one read against a read-only `(graph, topology)` snapshot using worker-owned `w`."""
+    var found: GraphAlignment
+    if use_pinned and has_index:
+        found = align_pinned_snapshot(
+            graph,
+            topology,
+            hp_path,
+            hp_letters,
+            cached_index,
+            seq,
+            options.scoring,
+            options.band_b,
+            options.band_f,
+            w.row_of,
+            w.marks,
+            w.touched,
+            w.stack,
+            w.keys,
+            w.workspace,
+            mode,
+        )
+    else:
+        found = w.workspace.align(
+            graph,
+            topology,
+            topology.order,
+            SOURCE,
+            SINK,
+            Span(seq),
+            options.scoring,
+            w.row_of,
+            mode,
+            options.band_b,
+            options.band_f,
+            options.band_max,
+        )
+    if filter_allowed:
+        _past_anchor(found, allowed)
+    return found^
+
+
+def _align_snapshot_batch(
+    graph: Graph,
+    seqs: List[List[UInt8]],
+    unique_reads: List[Int],
+    options: PoaOptions,
+    mode: Int,
+    anchors: List[Int],
+    check_strand: Bool,
+    mut aligner: PoaScratch,
+    mut out_nodes: List[List[Int]],
+    mut out_flipped: List[Bool],
+    mut out_seqs: List[List[UInt8]],
+) raises:
+    """Aligns `unique_reads` concurrently against one read-only snapshot of `graph`, deterministic across all thread
+    counts."""
+    var count = len(unique_reads)
+    out_nodes = List[List[Int]](length=count, fill=List[Int]())
+    out_flipped = List[Bool](length=count, fill=False)
+    out_seqs = List[List[UInt8]](length=count, fill=List[UInt8]())
+    if count == 0:
+        return
+    var anchored_restrict = len(anchors) > 0 and (mode == PREFIX or mode == SUFFIX)
+    var use_pinned = options.seeded and (mode == GLOBAL or mode == PREFIX or mode == SUFFIX)
+    var filter_allowed = anchored_restrict and use_pinned
+    if anchored_restrict:
+        _between_into(graph, anchors, mode, aligner.allowed, aligner.bfs_work)
+        if use_pinned:
+            aligner.topology.compute(graph, aligner.topo_in, aligner.topo_ready)
+        else:
+            aligner.topology.compute_allowed(
+                graph, aligner.allowed, aligner.topo_in, aligner.topo_ready, aligner.topo_full
+            )
+    else:
+        aligner.topology.compute(graph, aligner.topo_in, aligner.topo_ready)
+    var has_index = False
+    if use_pinned:
+        graph.heaviest_path_into(
+            aligner.topology.order,
+            aligner.scratch.hp_starts,
+            aligner.scratch.hp_ends,
+            aligner.scratch.hp_score,
+            aligner.scratch.hp_next,
+            aligner.scratch.hp_path,
+        )
+        aligner.scratch.hp_letters.clear()
+        aligner.scratch.hp_letters.reserve(len(aligner.scratch.hp_path))
+        for node in aligner.scratch.hp_path:
+            aligner.scratch.hp_letters.append(graph.bases[node])
+        if len(aligner.scratch.hp_letters) < 1 << POSITION_BITS:
+            if not aligner.scratch.has_cached_index or aligner.scratch.cached_letters != aligner.scratch.hp_letters:
+                aligner.scratch.cached_letters = aligner.scratch.hp_letters.copy()
+                aligner.scratch.cached_index = ReferenceIndex(aligner.scratch.cached_letters)
+                aligner.scratch.has_cached_index = True
+            has_index = True
+
+    var graph_len = len(graph)
+    var path0_len = len(graph.paths[0]) if len(graph.paths) > 0 else 0
+    var workers = thread_count(options.threads, count)
+    while len(aligner.scratch.workers) < workers:
+        aligner.scratch.workers.append(_PinnedWorker())
+
+    if workers > 1 and count >= 2:
+        var order = List[UInt64](capacity=count)
+        for i in range(count):
+            order.append((UInt64(len(seqs[unique_reads[i]])) << 32) | UInt64(i))
+        sort(order)
+        order.reverse()
+        var failed = List[Bool](length=count, fill=False)
+        var pool_p = aligner.scratch.workers.unsafe_ptr()
+        var nodes_p = out_nodes.unsafe_ptr()
+        var flipped_p = out_flipped.unsafe_ptr()
+        var seqs_p = out_seqs.unsafe_ptr()
+        var failed_p = failed.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+        ref topology = aligner.topology
+        ref hp_path = aligner.scratch.hp_path
+        ref hp_letters = aligner.scratch.hp_letters
+        ref cached_index = aligner.scratch.cached_index
+        ref allowed = aligner.allowed
+
+        def batch_worker(
+            slot: Int,
+        ) {
+            mut taken,
+            imm order,
+            imm unique_reads,
+            imm graph,
+            imm topology,
+            imm use_pinned,
+            imm has_index,
+            imm hp_path,
+            imm hp_letters,
+            imm cached_index,
+            imm filter_allowed,
+            imm allowed,
+            imm seqs,
+            imm options,
+            imm mode,
+            imm check_strand,
+            imm path0_len,
+            imm graph_len,
+            imm pool_p,
+            imm nodes_p,
+            imm flipped_p,
+            imm seqs_p,
+            imm failed_p,
+        }:
+            ref w = pool_p[unsafe_offset=slot]
+            w.row_of.resize(graph_len, -1)
+            while True:
+                var pos = Int(taken.fetch_add(1))
+                if pos >= len(order):
+                    return
+                var idx = Int(order[pos] & 0xFFFFFFFF)
+                var r = unique_reads[idx]
+                try:
+                    var found = _align_one_snapshot(
+                        graph,
+                        topology,
+                        use_pinned,
+                        has_index,
+                        hp_path,
+                        hp_letters,
+                        cached_index,
+                        filter_allowed,
+                        allowed,
+                        seqs[r],
+                        options,
+                        mode,
+                        w,
+                    )
+                    var best_score = found.score
+                    var best_nodes = List[Int]()
+                    swap(best_nodes, found.nodes)
+                    if check_strand:
+                        var floor = Int(options.scoring.match_score) * min(len(seqs[r]), path0_len) // 3
+                        if best_score < floor:
+                            var flipped = reverse_complement(seqs[r])
+                            var other = _align_one_snapshot(
+                                graph,
+                                topology,
+                                use_pinned,
+                                has_index,
+                                hp_path,
+                                hp_letters,
+                                cached_index,
+                                filter_allowed,
+                                allowed,
+                                flipped,
+                                options,
+                                mode,
+                                w,
+                            )
+                            if other.score > best_score:
+                                flipped_p[unsafe_offset=idx] = True
+                                seqs_p[unsafe_offset=idx] = flipped^
+                                swap(best_nodes, other.nodes)
+                    nodes_p[unsafe_offset=idx] = best_nodes^
+                except:
+                    for k in range(len(w.row_of)):
+                        w.row_of[k] = -1
+                    failed_p[unsafe_offset=idx] = True
+
+        spread(batch_worker, workers, workers)
+        ref w0 = aligner.scratch.workers[0]
+        w0.row_of.resize(graph_len, -1)
+        for idx in range(count):
+            if failed[idx]:
+                var r = unique_reads[idx]
+                var found = _align_one_snapshot(
+                    graph,
+                    aligner.topology,
+                    use_pinned,
+                    has_index,
+                    aligner.scratch.hp_path,
+                    aligner.scratch.hp_letters,
+                    aligner.scratch.cached_index,
+                    filter_allowed,
+                    aligner.allowed,
+                    seqs[r],
+                    options,
+                    mode,
+                    w0,
+                )
+                var best_score = found.score
+                var best_nodes = List[Int]()
+                swap(best_nodes, found.nodes)
+                if check_strand:
+                    var floor = Int(options.scoring.match_score) * min(len(seqs[r]), path0_len) // 3
+                    if best_score < floor:
+                        var flipped = reverse_complement(seqs[r])
+                        var other = _align_one_snapshot(
+                            graph,
+                            aligner.topology,
+                            use_pinned,
+                            has_index,
+                            aligner.scratch.hp_path,
+                            aligner.scratch.hp_letters,
+                            aligner.scratch.cached_index,
+                            filter_allowed,
+                            aligner.allowed,
+                            flipped,
+                            options,
+                            mode,
+                            w0,
+                        )
+                        if other.score > best_score:
+                            out_flipped[idx] = True
+                            out_seqs[idx] = flipped^
+                            swap(best_nodes, other.nodes)
+                out_nodes[idx] = best_nodes^
+        return
+
+    ref w0 = aligner.scratch.workers[0]
+    w0.row_of.resize(graph_len, -1)
+    for idx in range(count):
+        var r = unique_reads[idx]
+        var found = _align_one_snapshot(
+            graph,
+            aligner.topology,
+            use_pinned,
+            has_index,
+            aligner.scratch.hp_path,
+            aligner.scratch.hp_letters,
+            aligner.scratch.cached_index,
+            filter_allowed,
+            aligner.allowed,
+            seqs[r],
+            options,
+            mode,
+            w0,
+        )
+        var best_score = found.score
+        var best_nodes = List[Int]()
+        swap(best_nodes, found.nodes)
+        if check_strand:
+            var floor = Int(options.scoring.match_score) * min(len(seqs[r]), path0_len) // 3
+            if best_score < floor:
+                var flipped = reverse_complement(seqs[r])
+                var other = _align_one_snapshot(
+                    graph,
+                    aligner.topology,
+                    use_pinned,
+                    has_index,
+                    aligner.scratch.hp_path,
+                    aligner.scratch.hp_letters,
+                    aligner.scratch.cached_index,
+                    filter_allowed,
+                    aligner.allowed,
+                    flipped,
+                    options,
+                    mode,
+                    w0,
+                )
+                if other.score > best_score:
+                    out_flipped[idx] = True
+                    out_seqs[idx] = flipped^
+                    swap(best_nodes, other.nodes)
+        out_nodes[idx] = best_nodes^
 
 
 def poa(
@@ -478,10 +850,10 @@ def poa_with_scratch(
         if len(order) > 0:
             path_of[order[0]] = graph.add(names[order[0]], Span(seqs[order[0]]))
             var right_side: List[Int] = [path_of[order[0]]]
+            var tail = List[Int](capacity=len(order) - 1)
             for k in range(1, len(order)):
-                var r = order[k]
-                var found = aligner.align(graph, seqs[r], options, SUFFIX, right_side)
-                path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+                tail.append(order[k])
+            _add_anchored(graph, names, seqs, tail, options, SUFFIX, path_of, aligner, right_side)
     _add_strays(graph, names, seqs, strays, options, path_of, aligner)
     for r in range(len(seqs)):
         shown.append(path_of[r])
@@ -506,6 +878,29 @@ def _add_strays(
         path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
 
 
+def _maybe_prefetch(
+    mut aligner: PoaScratch,
+    seqs: List[List[UInt8]],
+    order: List[Int],
+    idx: Int,
+    options: PoaOptions,
+    mut prev_consensus: List[UInt8],
+):
+    """Triggers a parallel speculative pin prefetch over `order[idx + 1:]` once the consensus path stabilizes."""
+    if not options.seeded or options.threads <= 1 or options.batch_size > 1:
+        return
+    if len(aligner.scratch.hp_letters) == 0:
+        return
+    var remaining = len(order) - (idx + 1)
+    if (
+        remaining >= 4
+        and aligner.scratch.hp_letters == prev_consensus
+        and aligner.scratch.precomp_letters != aligner.scratch.hp_letters
+    ):
+        prefetch_pin_anchors(aligner.scratch, seqs, order, idx + 1, options.threads)
+    prev_consensus = aligner.scratch.hp_letters.copy()
+
+
 def _add_spanning(
     mut graph: Graph,
     mut names: List[String],
@@ -517,7 +912,15 @@ def _add_spanning(
 ) raises -> List[Int]:
     var seen = Dict[String, Int]()
     var reversed = List[Int]()
-    for r in order:
+    var topo_ver = -1
+    var weight_ver = -1
+    var prev_consensus = List[UInt8]()
+    var empty_anchors = List[Int]()
+    aligner.scratch.clear_precomp()
+
+    var seq_limit = len(order) if options.batch_size <= 1 else min(_BATCH_WARMUP, len(order))
+    for idx in range(seq_limit):
+        var r = order[idx]
         if len(graph) == 0:
             path_of[r] = graph.add(names[r], Span(seqs[r]))
             if not options.strand:
@@ -525,12 +928,16 @@ def _add_spanning(
             continue
         if not options.strand and _twin(graph, names, seqs, r, seen, path_of):
             continue
-        var found = aligner.align(graph, seqs[r], options, options.mode)
+        var found = aligner._align_tracked(
+            graph, seqs[r], options, options.mode, empty_anchors, r, topo_ver, weight_ver
+        )
         if options.strand:
             var floor = Int(options.scoring.match_score) * min(len(seqs[r]), len(graph.paths[0])) // 3
             if found.score < floor:
                 var flipped = reverse_complement(seqs[r])
-                var other = aligner.align(graph, flipped, options, options.mode)
+                var other = aligner._align_tracked(
+                    graph, flipped, options, options.mode, empty_anchors, -1, topo_ver, weight_ver
+                )
                 if other.score > found.score:
                     seqs[r] = flipped^
                     found = other^
@@ -539,6 +946,53 @@ def _add_spanning(
         path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
         if not options.strand:
             seen[String(unsafe_from_utf8=seqs[r])] = r
+        _maybe_prefetch(aligner, seqs, order, idx, options, prev_consensus)
+
+    var pos = seq_limit
+    while pos < len(order):
+        var end = min(pos + options.batch_size, len(order))
+        var unique_reads = List[Int]()
+        var slot_of_pos = List[Int](length=end - pos, fill=-1)
+        var batch_seen = Dict[String, Int]()
+        for k in range(pos, end):
+            var r = order[k]
+            if not options.strand:
+                var key = String(unsafe_from_utf8=seqs[r])
+                if seen.get(key, -1) >= 0 or batch_seen.get(key, -1) >= 0:
+                    continue
+                batch_seen[key] = r
+            slot_of_pos[k - pos] = len(unique_reads)
+            unique_reads.append(r)
+        var out_nodes = List[List[Int]]()
+        var out_flipped = List[Bool]()
+        var out_seqs = List[List[UInt8]]()
+        _align_snapshot_batch(
+            graph,
+            seqs,
+            unique_reads,
+            options,
+            options.mode,
+            empty_anchors,
+            options.strand,
+            aligner,
+            out_nodes,
+            out_flipped,
+            out_seqs,
+        )
+        for k in range(pos, end):
+            var r = order[k]
+            var u = slot_of_pos[k - pos]
+            if u < 0:
+                _ = _twin(graph, names, seqs, r, seen, path_of)
+                continue
+            if out_flipped[u]:
+                seqs[r] = out_seqs[u].copy()
+                names[r] += "_reverse_complement"
+                reversed.append(r)
+            path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), out_nodes[u])
+            if not options.strand:
+                seen[String(unsafe_from_utf8=seqs[r])] = r
+        pos = end
     return reversed^
 
 
@@ -571,12 +1025,51 @@ def _add_anchored(
     anchors: List[Int] = List[Int](),
 ) raises:
     var seen = Dict[String, Int]()
-    for r in order:
-        if _twin(graph, names, seqs, r, seen, path_of):
-            continue
-        var found = aligner.align(graph, seqs[r], options, mode, anchors)
-        path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
-        seen[String(unsafe_from_utf8=seqs[r])] = r
+    var topo_ver = -1
+    var weight_ver = -1
+    var prev_consensus = List[UInt8]()
+    aligner.scratch.clear_precomp()
+
+    if options.batch_size <= 1:
+        for idx in range(len(order)):
+            var r = order[idx]
+            if _twin(graph, names, seqs, r, seen, path_of):
+                continue
+            var found = aligner._align_tracked(graph, seqs[r], options, mode, anchors, r, topo_ver, weight_ver)
+            path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
+            seen[String(unsafe_from_utf8=seqs[r])] = r
+            _maybe_prefetch(aligner, seqs, order, idx, options, prev_consensus)
+        return
+
+    var pos = 0
+    while pos < len(order):
+        var end = min(pos + options.batch_size, len(order))
+        var unique_reads = List[Int]()
+        var slot_of_pos = List[Int](length=end - pos, fill=-1)
+        var batch_seen = Dict[String, Int]()
+        for k in range(pos, end):
+            var r = order[k]
+            var key = String(unsafe_from_utf8=seqs[r])
+            if seen.get(key, -1) >= 0 or batch_seen.get(key, -1) >= 0:
+                continue
+            batch_seen[key] = r
+            slot_of_pos[k - pos] = len(unique_reads)
+            unique_reads.append(r)
+        var out_nodes = List[List[Int]]()
+        var out_flipped = List[Bool]()
+        var out_seqs = List[List[UInt8]]()
+        _align_snapshot_batch(
+            graph, seqs, unique_reads, options, mode, anchors, False, aligner, out_nodes, out_flipped, out_seqs
+        )
+        for k in range(pos, end):
+            var r = order[k]
+            var u = slot_of_pos[k - pos]
+            if u < 0:
+                _ = _twin(graph, names, seqs, r, seen, path_of)
+                continue
+            path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), out_nodes[u])
+            seen[String(unsafe_from_utf8=seqs[r])] = r
+        pos = end
 
 
 def _between_into(graph: Graph, anchors: List[Int], mode: Int, mut allowed: List[Bool], mut work: List[Int]):
@@ -624,13 +1117,38 @@ def _one_side(
     var graph = Graph()
     var order = _longest_first(seqs, reads)
     var paths = List[Int]()
-    for k in range(len(order)):
+    var topo_ver = -1
+    var weight_ver = -1
+    var prev_consensus = List[UInt8]()
+    var empty_anchors = List[Int]()
+    aligner.scratch.clear_precomp()
+
+    var seq_limit = len(order) if options.batch_size <= 1 else min(_BATCH_WARMUP, len(order))
+    for k in range(seq_limit):
         var r = order[k]
         if k == 0:
             paths.append(graph.add(names[r], Span(seqs[r])))
             continue
-        var found = aligner.align(graph, seqs[r], options, mode)
+        var found = aligner._align_tracked(graph, seqs[r], options, mode, empty_anchors, r, topo_ver, weight_ver)
         paths.append(graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes))
+        _maybe_prefetch(aligner, seqs, order, k, options, prev_consensus)
+
+    var pos = seq_limit
+    while pos < len(order):
+        var end = min(pos + options.batch_size, len(order))
+        var batch_reads = List[Int](capacity=end - pos)
+        for k in range(pos, end):
+            batch_reads.append(order[k])
+        var out_nodes = List[List[Int]]()
+        var out_flipped = List[Bool]()
+        var out_seqs = List[List[UInt8]]()
+        _align_snapshot_batch(
+            graph, seqs, batch_reads, options, mode, empty_anchors, False, aligner, out_nodes, out_flipped, out_seqs
+        )
+        for i in range(len(batch_reads)):
+            var r = batch_reads[i]
+            paths.append(graph.fuse_nodes(names[r], Span(seqs[r]), out_nodes[i]))
+        pos = end
     return (graph^, paths^)
 
 

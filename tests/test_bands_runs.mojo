@@ -128,13 +128,17 @@ def test_paths_fill_weights_anchors_and_parallel() raises:
 def test_placement_costs_and_place_one_margin() raises:
     var affine_scoring = Scoring(2, 4, 4, 2, 0, 0)
     var two_piece_scoring = Scoring(2, 4, 4, 2, 24, 1)
+    var flat_second_scoring = Scoring(2, 4, 4, 2, 24, 0)
     var c_aff = alignment_costs(affine_scoring)
     var c_two = alignment_costs(two_piece_scoring)
+    var c_flat = alignment_costs(flat_second_scoring)
     assert_equal(c_aff.mismatch, 12)
     assert_equal(c_aff.opening, 8)
     assert_equal(c_aff.extension, 6)
     assert_equal(c_two.opening2, 48)
     assert_equal(c_two.extension2, 4)
+    assert_equal(c_flat.opening2, 48)
+    assert_equal(c_flat.extension2, 2)
 
     var hap0 = _rng_seq(31, 120)
     var hap1 = hap0.copy()

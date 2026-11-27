@@ -7,9 +7,11 @@ command for each.
 spans both anchors and the two sides could not be joined, the left side's and the right side's, unpolished.
 """
 
+from std.atomic import Atomic
 from std.math import isfinite
 
 from karan import Aligner
+from karan.common import spread, thread_count
 
 from .bands import PolishScratch
 from .graph import Graph
@@ -200,3 +202,101 @@ def polished(
         threads=options.poa.threads,
     )
     return [out^]
+
+
+def consensus_batch(
+    seqs_batch: List[List[List[UInt8]]],
+    anchors_batch: List[List[Int]] = List[List[Int]](),
+    strands_batch: List[List[Int]] = List[List[Int]](),
+    options: ConsensusOptions = ConsensusOptions(),
+    homopolymers: HomopolymerModel = HomopolymerModel(),
+) raises -> List[List[List[UInt8]]]:
+    """Runs `consensus` across multiple independent loci in parallel over `options.poa.threads`, scheduling longest
+    loci first and reusing one `ConsensusScratch` per worker thread. Results are bit-exact with calling `consensus`
+    individually."""
+    options.check()
+    var n = len(seqs_batch)
+    if len(anchors_batch) != 0 and len(anchors_batch) != n:
+        raise Error(t"{len(anchors_batch)} anchor lists for {n} loci")
+    if len(strands_batch) != 0 and len(strands_batch) != n:
+        raise Error(t"{len(strands_batch)} strand lists for {n} loci")
+    var out = List[List[List[UInt8]]](length=n, fill=List[List[UInt8]]())
+    if n == 0:
+        return out^
+    var workers = thread_count(options.poa.threads, n)
+    if workers > 1 and n >= 2:
+        var order = List[UInt64](capacity=n)
+        for i in range(n):
+            var bases = 0
+            for s in seqs_batch[i]:
+                bases += len(s)
+            order.append((UInt64(bases) << 32) | UInt64(i))
+        sort(order)
+        order.reverse()
+        var sub_options = options.copy()
+        sub_options.poa.threads = max(1, options.poa.threads // workers)
+        var failed = List[Bool](length=n, fill=False)
+        var out_p = out.unsafe_ptr()
+        var failed_p = failed.unsafe_ptr()
+        var taken = Atomic[Int64](0)
+        var has_anchors = len(anchors_batch) > 0
+        var has_strands = len(strands_batch) > 0
+
+        def batch_worker(
+            slot: Int,
+        ) {
+            mut taken,
+            imm order,
+            imm seqs_batch,
+            imm anchors_batch,
+            imm strands_batch,
+            imm has_anchors,
+            imm has_strands,
+            imm sub_options,
+            imm homopolymers,
+            imm out_p,
+            imm failed_p,
+        }:
+            var local_scratch = ConsensusScratch()
+            while True:
+                var pos = Int(taken.fetch_add(1))
+                if pos >= len(order):
+                    return
+                var idx = Int(order[pos] & 0xFFFFFFFF)
+                try:
+                    out_p[unsafe_offset=idx] = consensus(
+                        local_scratch,
+                        seqs_batch[idx].copy(),
+                        anchors_batch[idx].copy() if has_anchors else List[Int](),
+                        strands_batch[idx].copy() if has_strands else List[Int](),
+                        sub_options,
+                        homopolymers,
+                    )
+                except:
+                    failed_p[unsafe_offset=idx] = True
+
+        spread(batch_worker, workers, workers)
+        var scratch = ConsensusScratch()
+        for idx in range(n):
+            if failed[idx]:
+                out[idx] = consensus(
+                    scratch,
+                    seqs_batch[idx].copy(),
+                    anchors_batch[idx].copy() if has_anchors else List[Int](),
+                    strands_batch[idx].copy() if has_strands else List[Int](),
+                    options,
+                    homopolymers,
+                )
+        return out^
+
+    var scratch = ConsensusScratch()
+    for idx in range(n):
+        out[idx] = consensus(
+            scratch,
+            seqs_batch[idx].copy(),
+            anchors_batch[idx].copy() if len(anchors_batch) > 0 else List[Int](),
+            strands_batch[idx].copy() if len(strands_batch) > 0 else List[Int](),
+            options,
+            homopolymers,
+        )
+    return out^

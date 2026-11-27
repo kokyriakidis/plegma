@@ -4,11 +4,11 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from karan import Costs
 
-from plegma.clustered import clustered_consensus
-from plegma.consensus import ConsensusOptions, ConsensusScratch, consensus
+from plegma.clustered import clustered_consensus, clustered_consensus_batch
+from plegma.consensus import ConsensusOptions, ConsensusScratch, consensus, consensus_batch
 from plegma.graph import Graph
 from plegma.kernel import BOTH, INSIDE, LEFT, RIGHT, Scoring, Topology, Workspace
-from plegma.phased import phased_consensus
+from plegma.phased import phased_consensus, phased_consensus_batch
 from plegma.pinned import WindowScratch, align_pinned
 from plegma.poa import PoaOptions, poa
 from plegma.polish import PolishScratch, polish, polish_with_scratch
@@ -211,6 +211,90 @@ def test_on_reference_parallel_fallback_and_insertions_bit_exact() raises:
     assert_equal(len(r4), len(r1))
     for i in range(len(r1)):
         assert_equal(r4[i], r1[i])
+
+
+def test_speculative_seeding_and_snapshot_batch_poa_bit_exact() raises:
+    # 30 reads of 1800 bp: exercises speculative parallel seeding (batch_size=1) and snapshot mini-batch POA
+    # (batch_size=8) for both pinned and unpinned modes, verifying 1T == 4T bit-exact and accurate recovery.
+    var truth = _rng_seq(901, 1800)
+    var reads = List[List[UInt8]]()
+    for r in range(30):
+        reads.append(_mutate(truth, UInt64(9000 + r), 3))
+
+    # Pinned strict sequential (batch_size=1): speculative seeding 4T must match 1T bit-for-bit.
+    var seq1 = ConsensusOptions()
+    seq1.poa.seeded = True
+    seq1.poa.threads = 1
+    var seq4 = ConsensusOptions()
+    seq4.poa.seeded = True
+    seq4.poa.threads = 4
+    var c_seq1 = consensus(reads.copy(), options=seq1)
+    var c_seq4 = consensus(reads.copy(), options=seq4)
+    assert_equal(c_seq4[0], c_seq1[0])
+    assert_equal(c_seq4[0], truth)
+
+    # Snapshot mini-batch POA (batch_size=8): 1T == 4T bit-exact for BOTH pinned and unpinned modes.
+    for seeded in [False, True]:
+        var b1 = ConsensusOptions()
+        b1.poa.seeded = seeded
+        b1.poa.batch_size = 8
+        b1.poa.threads = 1
+        var b4 = ConsensusOptions()
+        b4.poa.seeded = seeded
+        b4.poa.batch_size = 8
+        b4.poa.threads = 4
+        var cb1 = consensus(reads.copy(), options=b1)
+        var cb4 = consensus(reads.copy(), options=b4)
+        assert_equal(cb4[0], cb1[0])
+        assert_equal(cb4[0], truth)
+
+
+def test_multi_locus_batch_apis_bit_exact() raises:
+    var seqs_batch = List[List[List[UInt8]]]()
+    var haps_batch = List[List[Int]]()
+    for locus in range(6):
+        var hap0 = _rng_seq(UInt64(1100 + locus), 300 + locus * 50)
+        var hap1 = hap0.copy()
+        for pos in [40, 100, 160, 220]:
+            hap1[pos] = UInt8(ord("A")) if hap1[pos] != UInt8(ord("A")) else UInt8(ord("C"))
+        var reads = List[List[UInt8]]()
+        var haps = List[Int]()
+        for r in range(16):
+            var h = r % 2
+            reads.append(_mutate(hap0 if h == 0 else hap1, UInt64(12000 + locus * 100 + r), 2))
+            haps.append(h if r < 12 else -1)
+        seqs_batch.append(reads^)
+        haps_batch.append(haps^)
+
+    var o1 = ConsensusOptions()
+    o1.poa.seeded = False
+    o1.poa.threads = 1
+    var o4 = ConsensusOptions()
+    o4.poa.seeded = False
+    o4.poa.threads = 4
+
+    var cb1 = consensus_batch(seqs_batch, options=o1)
+    var cb4 = consensus_batch(seqs_batch, options=o4)
+    assert_equal(len(cb4), len(cb1))
+    for i in range(len(cb1)):
+        assert_equal(cb4[i][0], cb1[i][0])
+
+    var clb1 = clustered_consensus_batch(seqs_batch, options=o1)
+    var clb4 = clustered_consensus_batch(seqs_batch, options=o4)
+    assert_equal(len(clb4), len(clb1))
+    for i in range(len(clb1)):
+        assert_equal(len(clb4[i].consensus), len(clb1[i].consensus))
+        for k in range(len(clb1[i].consensus)):
+            assert_equal(clb4[i].consensus[k], clb1[i].consensus[k])
+            assert_equal(clb4[i].members[k], clb1[i].members[k])
+
+    var phb1 = phased_consensus_batch(seqs_batch, haps_batch, options=o1)
+    var phb4 = phased_consensus_batch(seqs_batch, haps_batch, options=o4)
+    assert_equal(len(phb4), len(phb1))
+    for i in range(len(phb1)):
+        for k in range(2):
+            assert_equal(phb4[i].consensus[k], phb1[i].consensus[k])
+            assert_equal(phb4[i].members[k], phb1[i].members[k])
 
 
 def main() raises:

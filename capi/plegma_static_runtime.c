@@ -7,6 +7,9 @@
  * MLRT/lib/Driver/DeviceContext/MojoBindings.cpp) and how max.algorithm.parallelize drives a CPU
  * DeviceContext (max/mojo/max/gpu/host/_legacy/device_context.mojo, enqueue_cpu_range).
  *
+ * CPU tasks run on a lazy persistent pthread pool with caller-helps-drain synchronization, so nested `spread`
+ * calls never deadlock and repeated parallel regions avoid per-call pthread creation overhead.
+ *
  * Signatures belong to the pinned Mojo nightly (pixi.toml). A runtime function plegma starts to call shows up as
  * an undefined symbol when test-static links; after moving the nightly, check these against its runtime sources and
  * run pixi run test-static. A Mojo program (a main) needs more of the runtime than this: it is for the library. */
@@ -63,33 +66,107 @@ uint64_t KGEN_CompilerRT_TracyZoneBegin(const char* name, size_t length, uint32_
 }
 void KGEN_CompilerRT_TracyZoneEnd(uint64_t context) { (void)context; }
 
-/* ---- AsyncRT CPU DeviceContext, as parallelize uses it ----
+/* ---- AsyncRT CPU DeviceContext: persistent work-stealing pthread pool ----
  * parallelize: create("cpu"), deviceApi (must say "cpu"), enqueueHostFunctionRange with one coroutine per
  * work item (each resumed once runs its item to completion), synchronize, release. Errors are returned as
- * strings the caller frees with strfree; NULL is success. */
+ * strings the caller frees with strfree; NULL is success.
+ *
+ * A single mutex guards the shared work queue and every DeviceContext's remaining counter. Waiting threads in
+ * synchronize() pop and execute queued tasks while waiting, guaranteeing deadlock-freedom under arbitrary nested
+ * parallelize() calls and concurrent external caller threads. */
 
 typedef void (*CoroutineFunction)(int8_t*);
+
+typedef struct DeviceContext DeviceContext;
 
 typedef struct Task {
     CoroutineFunction resume;
     CoroutineFunction destroy;
     int8_t* handle;
+    DeviceContext* owner;
+    struct Task* next;
 } Task;
 
-typedef struct DeviceContext {
-    pthread_mutex_t mutex;
-    pthread_t* threads;
-    int* joinable;
-    size_t count;
-    size_t capacity;
-} DeviceContext;
+struct DeviceContext {
+    size_t remaining;
+    pthread_cond_t done_cond;
+};
 
 typedef struct StringRef {
     const char* data;
     size_t length;
 } StringRef;
 
+static pthread_mutex_t g_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pool_cond = PTHREAD_COND_INITIALIZER;
+static Task* g_queue_head = NULL;
+static Task* g_queue_tail = NULL;
+static int g_pool_started = 0;
+
 static char* error_string(const char* message) { return strdup(message); }
+
+static Task* pop_task_locked(void)
+{
+    Task* task = g_queue_head;
+    if (task) {
+        g_queue_head = task->next;
+        if (!g_queue_head) {
+            g_queue_tail = NULL;
+        }
+        task->next = NULL;
+    }
+    return task;
+}
+
+static void complete_task_locked(DeviceContext* owner)
+{
+    owner->remaining--;
+    if (owner->remaining == 0) {
+        pthread_cond_broadcast(&owner->done_cond);
+    }
+}
+
+static void* pool_worker(void* unused)
+{
+    (void)unused;
+    pthread_mutex_lock(&g_pool_mutex);
+    for (;;) {
+        while (!g_queue_head) {
+            pthread_cond_wait(&g_pool_cond, &g_pool_mutex);
+        }
+        Task* task = pop_task_locked();
+        pthread_mutex_unlock(&g_pool_mutex);
+
+        DeviceContext* owner = task->owner;
+        task->resume(task->handle);
+        task->destroy(task->handle);
+        free(task);
+
+        pthread_mutex_lock(&g_pool_mutex);
+        complete_task_locked(owner);
+    }
+    return NULL;
+}
+
+static void ensure_pool_started_locked(void)
+{
+    if (g_pool_started) {
+        return;
+    }
+    g_pool_started = 1;
+    int workers = KGEN_CompilerRT_NumLogicalCores();
+    if (workers < 1) {
+        workers = 1;
+    }
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    for (int i = 0; i < workers; i++) {
+        pthread_t tid;
+        (void)pthread_create(&tid, &attr, pool_worker, NULL);
+    }
+    pthread_attr_destroy(&attr);
+}
 
 const char* AsyncRT_DeviceContext_create(DeviceContext** result, const char* kind, int id)
 {
@@ -101,7 +178,7 @@ const char* AsyncRT_DeviceContext_create(DeviceContext** result, const char* kin
     if (!context) {
         return error_string("plegma static runtime: out of memory");
     }
-    pthread_mutex_init(&context->mutex, NULL);
+    pthread_cond_init(&context->done_cond, NULL);
     *result = context;
     return NULL;
 }
@@ -113,82 +190,84 @@ void AsyncRT_DeviceContext_deviceApi(StringRef* result, DeviceContext* context)
     result->length = 3;
 }
 
-/* Runs one coroutine to completion and destroys it; frees its Task. */
-static void* run_task(void* argument)
-{
-    Task* task = argument;
-    task->resume(task->handle);
-    task->destroy(task->handle);
-    free(task);
-    return NULL;
-}
-
-/* Each coroutine on a thread of its own: parallelize makes one per worker, and karan asks for no more
- * workers than the machine runs at once. */
 const char* AsyncRT_DeviceContext_enqueueHostFunctionRange(DeviceContext* context, CoroutineFunction resume,
                                                           CoroutineFunction destroy, int8_t** handles,
                                                           size_t count)
 {
-    pthread_mutex_lock(&context->mutex);
-    if (context->count + count > context->capacity) {
-        size_t capacity = (context->count + count) * 2;
-        pthread_t* threads = realloc(context->threads, capacity * sizeof(pthread_t));
-        if (threads) {
-            context->threads = threads;
-        }
-        int* joinable = realloc(context->joinable, capacity * sizeof(int));
-        if (joinable) {
-            context->joinable = joinable;
-        }
-        if (!threads || !joinable) {
-            pthread_mutex_unlock(&context->mutex);
-            return error_string("plegma static runtime: out of memory");
-        }
-        context->capacity = capacity;
+    if (count == 0) {
+        return NULL;
     }
+    Task* head = NULL;
+    Task* tail = NULL;
     for (size_t i = 0; i < count; i++) {
         Task* task = malloc(sizeof(Task));
         if (!task) {
+            while (head) {
+                Task* next = head->next;
+                destroy(head->handle);
+                free(head);
+                head = next;
+            }
             for (size_t j = i; j < count; j++) {
                 destroy(handles[j]);
             }
-            pthread_mutex_unlock(&context->mutex);
             return error_string("plegma static runtime: out of memory");
         }
         task->resume = resume;
         task->destroy = destroy;
         task->handle = handles[i];
-        context->joinable[context->count] =
-            pthread_create(&context->threads[context->count], NULL, run_task, task) == 0;
-        if (!context->joinable[context->count]) {
-            /* No thread: run it here. */
-            run_task(task);
+        task->owner = context;
+        task->next = NULL;
+        if (tail) {
+            tail->next = task;
+        } else {
+            head = task;
         }
-        context->count++;
+        tail = task;
     }
-    pthread_mutex_unlock(&context->mutex);
+    pthread_mutex_lock(&g_pool_mutex);
+    ensure_pool_started_locked();
+    if (g_queue_tail) {
+        g_queue_tail->next = head;
+    } else {
+        g_queue_head = head;
+    }
+    g_queue_tail = tail;
+    context->remaining += count;
+    if (count == 1) {
+        pthread_cond_signal(&g_pool_cond);
+    } else {
+        pthread_cond_broadcast(&g_pool_cond);
+    }
+    pthread_mutex_unlock(&g_pool_mutex);
     return NULL;
 }
 
 const char* AsyncRT_DeviceContext_synchronize(DeviceContext* context)
 {
-    pthread_mutex_lock(&context->mutex);
-    for (size_t i = 0; i < context->count; i++) {
-        if (context->joinable[i]) {
-            pthread_join(context->threads[i], NULL);
+    pthread_mutex_lock(&g_pool_mutex);
+    while (context->remaining > 0) {
+        Task* task = pop_task_locked();
+        if (task) {
+            pthread_mutex_unlock(&g_pool_mutex);
+            DeviceContext* owner = task->owner;
+            task->resume(task->handle);
+            task->destroy(task->handle);
+            free(task);
+            pthread_mutex_lock(&g_pool_mutex);
+            complete_task_locked(owner);
+        } else {
+            pthread_cond_wait(&context->done_cond, &g_pool_mutex);
         }
     }
-    context->count = 0;
-    pthread_mutex_unlock(&context->mutex);
+    pthread_mutex_unlock(&g_pool_mutex);
     return NULL;
 }
 
 void AsyncRT_DeviceContext_release(DeviceContext* context)
 {
     AsyncRT_DeviceContext_synchronize(context);
-    pthread_mutex_destroy(&context->mutex);
-    free(context->joinable);
-    free(context->threads);
+    pthread_cond_destroy(&context->done_cond);
     free(context);
 }
 

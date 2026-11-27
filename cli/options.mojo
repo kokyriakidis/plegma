@@ -52,6 +52,7 @@ ref options:
 
 Output options (both):
     -t INT      threads for parallel alignment, polishing, and listed files (-l) [1]
+    --batch INT snapshot mini-batch size for parallel single-locus POA [1 = strict sequential]
     -r INT      output [0]: 0 consensus FASTA, 1 MSA FASTA, 2 both, 3 GFA, 4 GFA with the consensus path
     -a INT      consensus [0]: 0 heaviest path, 1 most frequent letter per column
     -d INT      at most INT consensus sequences [1]; at 2 or more the sequences are clustered on the MSA's
@@ -213,6 +214,8 @@ def parse(args: List[String]) raises -> Options:
         elif a == "-t":
             options.threads = _int(args, i)
             poa.threads = options.threads
+        elif a == "--batch" and not reference:
+            poa.batch_size = _int(args, i)
         elif a == "-o":
             options.output = _value(args, i)
         elif a == "-r":

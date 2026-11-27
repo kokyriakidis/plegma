@@ -87,6 +87,8 @@ class ConsensusTest(unittest.TestCase):
             plegma.consensus(self.reads, two_lengths_db=float("nan"))
         with self.assertRaises(plegma.Error):
             plegma.consensus(self.reads, threads=0)
+        with self.assertRaises(plegma.Error):
+            plegma.consensus(self.reads, batch_size=0)
 
     def test_scratch_and_parallel_threads(self):
         base_pinned = plegma.consensus(self.reads, pinned=True, threads=1)
@@ -94,6 +96,13 @@ class ConsensusTest(unittest.TestCase):
         with plegma.Scratch() as scratch:
             self.assertEqual(plegma.consensus(self.reads, pinned=True, threads=4, scratch=scratch), base_pinned)
             self.assertEqual(plegma.consensus(self.reads, pinned=False, threads=4, scratch=scratch), base_unpinned)
+        mb1 = plegma.consensus(self.reads, pinned=False, batch_size=4, threads=1)
+        mb4 = plegma.consensus(self.reads, pinned=False, batch_size=4, threads=4)
+        self.assertEqual(mb4, mb1)
+        batch = [self.reads, self.reads[:6], self.reads]
+        b1 = plegma.consensus_batch(batch, pinned=False, threads=1)
+        b4 = plegma.consensus_batch(batch, pinned=False, threads=4)
+        self.assertEqual(b4, b1)
 
     def test_threads_agree(self):
         alone = plegma.consensus(self.reads, pinned=False)
@@ -175,6 +184,13 @@ class ClusteredTest(unittest.TestCase):
             )
             self.assertEqual(cl4.consensus, cl1.consensus)
             self.assertEqual(cl4.members, cl1.members)
+        clb = plegma.clustered_consensus_batch([self.reads, self.reads], max_clusters=2, min_freq=0.2, pinned=False, threads=4)
+        phb = plegma.phased_consensus_batch([self.reads, self.reads], [haplotypes, haplotypes], pinned=False, threads=4)
+        self.assertEqual(len(clb), 2)
+        self.assertEqual(len(phb), 2)
+        for item in phb:
+            self.assertEqual(item.consensus, got.consensus)
+            self.assertEqual(item.members, got.members)
 
     def test_inside_and_errors(self):
         reads = self.reads + [self.one[200:450]]

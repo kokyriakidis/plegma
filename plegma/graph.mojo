@@ -39,6 +39,10 @@ struct Graph(Movable, Sized):
     var next_in: List[Int32]
     var paths: List[List[Int32]]
     var names: List[String]
+    var topology_version: Int
+    """Incremented whenever a new node or a new edge is added."""
+    var weight_version: Int
+    """Incremented whenever any edge is added or incremented."""
 
     def __init__(out self):
         self.bases = List[UInt8]()
@@ -58,6 +62,8 @@ struct Graph(Movable, Sized):
         self.next_in = List[Int32]()
         self.paths = List[List[Int32]]()
         self.names = List[String]()
+        self.topology_version = 0
+        self.weight_version = 0
 
     def __len__(self) -> Int:
         """The number of nodes."""
@@ -101,6 +107,7 @@ struct Graph(Movable, Sized):
         self.last_in.append(-1)
         self.out_degree.append(0)
         self.in_degree.append(0)
+        self.topology_version += 1
         return node
 
     def edge(self, before: Int, after: Int) -> Int:
@@ -116,6 +123,7 @@ struct Graph(Movable, Sized):
         var found = self.edge(before, after)
         if found >= 0:
             self.edge_weight[found] += 1
+            self.weight_version += 1
             return
         var e = Int32(len(self.edge_to))
         self.edge_from.append(Int32(before))
@@ -135,6 +143,8 @@ struct Graph(Movable, Sized):
         self.last_in[after] = e
         self.out_degree[before] += 1
         self.in_degree[after] += 1
+        self.topology_version += 1
+        self.weight_version += 1
 
     def _on_path(mut self, mut path: List[Int32], node: Int):
         if len(path) > 0:

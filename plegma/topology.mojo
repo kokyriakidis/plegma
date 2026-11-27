@@ -23,6 +23,11 @@ struct Topology(Movable):
         self.order.resize(n, 0)
         for node in range(n):
             self.order[self.rank[node]] = node
+        self.recompute_remaining(graph)
+
+    def recompute_remaining(mut self, graph: Graph):
+        """Recomputes heaviest remaining path lengths in-place, reusing the existing full `self.order`."""
+        var n = len(self.order)
         self.remaining.resize(n, 0)
         for r in reversed(range(n)):
             var node = self.order[r]

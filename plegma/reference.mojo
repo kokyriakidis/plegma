@@ -168,12 +168,18 @@ def _pairings(
                     flags[unsafe_offset=d] = True
 
         spread(pair_pinned, workers, workers)
-        var aligner = Aligner(warm=False)
+        var any_failed = False
         for d in range(1, len(distinct)):
             if failed[d]:
-                partner[d] = pinned_pairing_with_index(
-                    aligner, ref_index, reference, seqs[distinct[d]], flanks[0], flanks[1], costs
-                )
+                any_failed = True
+                break
+        if any_failed:
+            var aligner = Aligner(warm=False)
+            for d in range(1, len(distinct)):
+                if failed[d]:
+                    partner[d] = pinned_pairing_with_index(
+                        aligner, ref_index, reference, seqs[distinct[d]], flanks[0], flanks[1], costs
+                    )
         return partner^
 
     var workers = thread_count(threads, len(order))
@@ -197,10 +203,16 @@ def _pairings(
                 flags[unsafe_offset=d] = True
 
     spread(pair_exact, workers, workers)
-    var aligner = Aligner(warm=False)
+    var any_failed = False
     for d in range(1, len(distinct)):
         if failed[d]:
-            partner[d] = _onto(aligner, reference, seqs[distinct[d]], costs)
+            any_failed = True
+            break
+    if any_failed:
+        var aligner = Aligner(warm=False)
+        for d in range(1, len(distinct)):
+            if failed[d]:
+                partner[d] = _onto(aligner, reference, seqs[distinct[d]], costs)
     return partner^
 
 
@@ -278,10 +290,16 @@ def _fall_back(
                     flags[unsafe_offset=d] = True
 
         spread(fallback_worker, workers, workers)
-        var aligner = Aligner(warm=False)
+        var any_failed = False
         for d in replaced:
             if failed[d]:
-                partner[d] = _onto(aligner, seqs[distinct[0]], seqs[distinct[d]], fallback)
+                any_failed = True
+                break
+        if any_failed:
+            var aligner = Aligner(warm=False)
+            for d in replaced:
+                if failed[d]:
+                    partner[d] = _onto(aligner, seqs[distinct[0]], seqs[distinct[d]], fallback)
         return
 
     var aligner = Aligner(warm=False)

@@ -18,7 +18,7 @@
 
 namespace plegma {
 
-static_assert(sizeof(plegma_options) == 68, "plegma_options laid out as the library reads it");
+static_assert(sizeof(plegma_options) == 72, "plegma_options laid out as the library reads it");
 
 enum class Anchor : std::int32_t {
     Both = PLEGMA_ANCHOR_BOTH,
@@ -70,6 +70,7 @@ struct Options {
     Options& noiseRun(std::int32_t run) { values.noise_run = run; return *this; }
     Options& twoLengthsDb(float db) { values.two_lengths_db = db; return *this; }
     Options& threads(std::int32_t count) { values.threads = count; return *this; }
+    Options& batchSize(std::int32_t size) { values.batch_size = size; return *this; }
     Options& band(std::int32_t b, float f, std::int32_t max = 64)
     {
         values.band_b = b;
@@ -262,6 +263,144 @@ inline Clustering phasedConsensus(const std::vector<Read>& reads, const std::vec
                                              lengths.data(), anchors.data(), strands.data(), haps.data(),
                                              model ? model->get() : nullptr, &options.values),
         reads.size());
+}
+
+namespace detail {
+struct PackedBatch {
+    std::vector<std::vector<const std::uint8_t*>> sequences;
+    std::vector<std::vector<std::size_t>> lengths;
+    std::vector<std::vector<std::int32_t>> anchors;
+    std::vector<std::vector<std::int32_t>> strands;
+    std::vector<std::vector<std::int32_t>> haps;
+    std::vector<plegma_locus> loci;
+
+    explicit PackedBatch(const std::vector<std::vector<Read>>& batch,
+                         const std::vector<std::vector<int>>* haplotypesBatch = nullptr)
+    {
+        const std::size_t n = batch.size();
+        sequences.resize(n);
+        lengths.resize(n);
+        anchors.resize(n);
+        strands.resize(n);
+        if (haplotypesBatch) haps.resize(n);
+        loci.resize(n);
+        for (std::size_t i = 0; i < n; i++) {
+            const auto& reads = batch[i];
+            if (haplotypesBatch && (*haplotypesBatch)[i].size() != reads.size()) {
+                throw std::runtime_error("plegma: one haplotype per read");
+            }
+            sequences[i].reserve(reads.size());
+            lengths[i].reserve(reads.size());
+            anchors[i].reserve(reads.size());
+            strands[i].reserve(reads.size());
+            if (haplotypesBatch) haps[i].reserve(reads.size());
+            for (std::size_t r = 0; r < reads.size(); r++) {
+                sequences[i].push_back(reinterpret_cast<const std::uint8_t*>(reads[r].sequence.data()));
+                lengths[i].push_back(reads[r].sequence.size());
+                anchors[i].push_back(static_cast<std::int32_t>(reads[r].anchor));
+                strands[i].push_back(static_cast<std::int32_t>(reads[r].strand));
+                if (haplotypesBatch) haps[i].push_back(static_cast<std::int32_t>((*haplotypesBatch)[i][r]));
+            }
+            loci[i] = {reads.size(),
+                       sequences[i].data(),
+                       lengths[i].data(),
+                       anchors[i].data(),
+                       strands[i].data(),
+                       haplotypesBatch ? haps[i].data() : nullptr};
+        }
+    }
+};
+}  // namespace detail
+
+// Parallel multi-locus consensus across `batch` (scheduled longest-first over options.threads workers).
+inline std::vector<std::vector<std::string>> consensusBatch(const std::vector<std::vector<Read>>& batch,
+                                                            const Model* model = nullptr,
+                                                            const Options& options = Options())
+{
+    if (batch.empty()) return {};
+    detail::PackedBatch packed(batch);
+    std::vector<plegma_result*> raw(batch.size(), nullptr);
+    plegma_consensus_batch(batch.size(), packed.loci.data(), model ? model->get() : nullptr, &options.values,
+                           raw.data());
+    std::vector<std::vector<std::string>> out;
+    out.reserve(batch.size());
+    std::string firstError;
+    for (std::size_t i = 0; i < batch.size(); i++) {
+        std::unique_ptr<plegma_result, void (*)(plegma_result*)> result(raw[i], plegma_result_free);
+        if (firstError.empty()) {
+            if (const char* error = plegma_result_error(result.get())) {
+                firstError = std::string("plegma: ") + error;
+            } else {
+                std::vector<std::string> parts;
+                for (std::size_t part = 0; part < plegma_result_parts(result.get()); part++) {
+                    std::size_t length = 0;
+                    const std::uint8_t* letters = plegma_result_sequence(result.get(), part, &length);
+                    parts.emplace_back(reinterpret_cast<const char*>(letters), length);
+                }
+                out.push_back(std::move(parts));
+            }
+        }
+    }
+    if (!firstError.empty()) throw std::runtime_error(firstError);
+    return out;
+}
+
+// Parallel multi-locus clusteredConsensus across `batch`.
+inline std::vector<Clustering> clusteredConsensusBatch(const std::vector<std::vector<Read>>& batch,
+                                                       const Model* model = nullptr,
+                                                       const Options& options = Options(), int maxClusters = 2,
+                                                       float minFreq = 0.25f)
+{
+    if (batch.empty()) return {};
+    detail::PackedBatch packed(batch);
+    std::vector<plegma_result*> raw(batch.size(), nullptr);
+    plegma_clustered_consensus_batch(batch.size(), packed.loci.data(), model ? model->get() : nullptr, &options.values,
+                                     maxClusters, minFreq, raw.data());
+    std::vector<Clustering> out;
+    out.reserve(batch.size());
+    std::string firstError;
+    for (std::size_t i = 0; i < batch.size(); i++) {
+        if (firstError.empty()) {
+            try {
+                out.push_back(detail::clustering(raw[i], batch[i].size()));
+            } catch (const std::runtime_error& e) {
+                firstError = e.what();
+            }
+        } else {
+            plegma_result_free(raw[i]);
+        }
+    }
+    if (!firstError.empty()) throw std::runtime_error(firstError);
+    return out;
+}
+
+// Parallel multi-locus phasedConsensus across `batch`.
+inline std::vector<Clustering> phasedConsensusBatch(const std::vector<std::vector<Read>>& batch,
+                                                    const std::vector<std::vector<int>>& haplotypesBatch,
+                                                    const Model* model = nullptr, const Options& options = Options())
+{
+    if (haplotypesBatch.size() != batch.size()) throw std::runtime_error("plegma: one haplotype list per locus");
+    if (batch.empty()) return {};
+    detail::PackedBatch packed(batch, &haplotypesBatch);
+    std::vector<plegma_result*> raw(batch.size(), nullptr);
+    plegma_phased_consensus_batch(batch.size(), packed.loci.data(), model ? model->get() : nullptr, &options.values,
+                                  raw.data());
+    std::vector<Clustering> out;
+    out.reserve(batch.size());
+    std::string firstError;
+    for (std::size_t i = 0; i < batch.size(); i++) {
+        if (firstError.empty()) {
+            try {
+                out.push_back(detail::clustering(raw[i], batch[i].size()));
+            } catch (const std::runtime_error& e) {
+                firstError = e.what();
+            }
+        } else {
+            plegma_result_free(raw[i]);
+        }
+    }
+    if (!firstError.empty()) throw std::runtime_error(firstError);
+    return out;
 }
 
 }  // namespace plegma

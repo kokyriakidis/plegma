@@ -51,7 +51,7 @@ def alignment_costs(scoring: Scoring) raises -> Costs:
     match), a gap letter 2 extend + match over 2 opens. Globally the least costly alignment is the best-scoring one."""
     var per_match = Int(scoring.match_score)
     var mismatch = 2 * (Int(scoring.mismatch) + per_match)
-    if scoring.open2 > 0 and scoring.extend2 > 0:
+    if scoring.convex() and 2 * Int(scoring.extend2) + per_match > 0:
         return Costs.two_piece(
             mismatch,
             2 * Int(scoring.open1),
