@@ -120,7 +120,7 @@ struct _Present(Movable):
 
     def at_or_after(self, leaf: Int) -> Int:
         """The first present leaf at or after `leaf`, -1 for none."""
-        if leaf >= self.size:
+        if leaf < 0 or leaf >= self.size:
             return -1
         var v = leaf + self.size
         if self.count[v] > 0:

@@ -7,7 +7,7 @@ from karan import Aligner, Alignment, Costs, Mode
 from karan.common import spread, thread_count
 
 from .clusters import GAP, MISSING, cluster_rows
-from .consensus import ConsensusOptions, ConsensusScratch
+from .consensus import ConsensusOptions, ConsensusScratch, _check
 from .graph import Graph
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from .kernel import BOTH, INSIDE, LEFT, RIGHT
@@ -170,15 +170,13 @@ def clustered_consensus(
     homopolymers: HomopolymerModel = HomopolymerModel(),
 ) raises -> Clustered:
     """As `clustered_consensus`, reusing `scratch` across calls."""
+    options.check()
     var n = len(seqs)
     if max_clusters < 1:
         raise Error(t"max_clusters {max_clusters}: must be 1 or more")
     if not (min_freq >= 0.0 and min_freq <= 1.0):
         raise Error(t"min_freq {min_freq}: must be within 0 and 1")
-    if len(anchors) != 0 and len(anchors) != n:
-        raise Error(t"{len(anchors)} anchors for {n} sequences")
-    if len(strands) != 0 and len(strands) != n:
-        raise Error(t"{len(strands)} strands for {n} sequences")
+    _check(n, anchors, strands)
     var anchor_of = anchors.copy() if len(anchors) > 0 else List[Int](length=n, fill=BOTH)
     var strand_of = strands.copy() if len(strands) > 0 else List[Int](length=n, fill=STRAND_UNKNOWN)
     var out = Clustered()
@@ -518,29 +516,51 @@ def clustered_consensus(
                                 "; one" if _root(root, a) == _root(root, b) else "; apart",
                             ),
                         )
-        var merged = List[List[Int]]()
-        var made_merged = List[List[UInt8]]()
-        var joined_merged = List[Bool]()
+        var num_roots = 0
         for k in range(len(groups)):
-            if _root(root, k) != k:
-                continue
-            var members = List[Int]()
-            var parts = 0
-            for j in range(len(groups)):
-                if _root(root, j) == k:
-                    members.extend(groups[j].copy())
-                    parts += 1
-            var whole = joined[k]
-            made_merged.append(
-                made[k].copy() if parts
-                == 1 else _consensus_of(scratch, seqs, members, build_anchor, strand_of, options, homopolymers, whole)
-            )
-            joined_merged.append(whole)
-            merged.append(members^)
-        if len(groups) <= 1 or len(merged) <= 1:
+            if _root(root, k) == k:
+                num_roots += 1
+        if len(groups) <= 1 or num_roots <= 1:
             groups = [builders.copy()]
             made = _made(scratch, seqs, groups, build_anchor, strand_of, options, homopolymers, joined)
         else:
+            var merged = List[List[Int]]()
+            var merged_parts = List[Int]()
+            var merged_src = List[Int]()
+            var rebuild_groups = List[List[Int]]()
+            var rebuild_slot = List[Int]()
+            for k in range(len(groups)):
+                if _root(root, k) != k:
+                    continue
+                var members = List[Int]()
+                var parts = 0
+                for j in range(len(groups)):
+                    if _root(root, j) == k:
+                        members.extend(groups[j].copy())
+                        parts += 1
+                var m_idx = len(merged)
+                merged_parts.append(parts)
+                merged_src.append(k)
+                if parts > 1:
+                    rebuild_groups.append(members.copy())
+                    rebuild_slot.append(m_idx)
+                merged.append(members^)
+            var made_merged = List[List[UInt8]](length=len(merged), fill=List[UInt8]())
+            var joined_merged = List[Bool](length=len(merged), fill=True)
+            for m_idx in range(len(merged)):
+                if merged_parts[m_idx] == 1:
+                    var src = merged_src[m_idx]
+                    made_merged[m_idx] = made[src].copy()
+                    joined_merged[m_idx] = joined[src]
+            if len(rebuild_groups) > 0:
+                var rebuilt_joined = List[Bool]()
+                var rebuilt = _made(
+                    scratch, seqs, rebuild_groups, build_anchor, strand_of, options, homopolymers, rebuilt_joined
+                )
+                for r_idx in range(len(rebuild_slot)):
+                    var m_idx = rebuild_slot[r_idx]
+                    made_merged[m_idx] = rebuilt[r_idx].copy()
+                    joined_merged[m_idx] = rebuilt_joined[r_idx]
             groups = merged^
             made = made_merged^
             joined = joined_merged^

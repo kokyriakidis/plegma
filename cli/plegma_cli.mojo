@@ -19,7 +19,7 @@ from plegma.clusters import cluster_rows
 from plegma.consensus import ConsensusScratch, polished
 from plegma.graph import GAP, Graph
 from plegma.homopolymer import STRAND_UNKNOWN
-from plegma.kernel import BOTH, Topology
+from plegma.kernel import BOTH
 from plegma.poa import poa_with_scratch
 from plegma.polish import polish
 from plegma.reference import on_reference
@@ -57,7 +57,7 @@ struct Aligned(Movable):
         self.polished = List[List[UInt8]]()
 
 
-def _poa(mut scratch: ConsensusScratch, mut records: Records, options: Options) raises -> Aligned:
+def _poa(mut scratch: ConsensusScratch, mut records: Records, options: Options, run_threads: Int) raises -> Aligned:
     """`plegma poa`: `plegma.poa_with_scratch` with the command's options, each record anchored as its header says; the
     consensus `-r 0` writes as `plegma.consensus` makes it (`polished`), unless `-d` or `-a` asks for another."""
     if options.max_consensus > 1 or options.consensus_rule != 0:
@@ -74,17 +74,20 @@ def _poa(mut scratch: ConsensusScratch, mut records: Records, options: Options) 
         for r in range(len(msa)):
             rows.append(String(unsafe_from_utf8=upper(msa.seq(r))))
         start = Graph.from_msa(msa.names, rows)
+    var cons_opts = options.consensus.copy()
+    cons_opts.poa.threads = run_threads
     var made = poa_with_scratch(
-        records.names, records.seqs, records.anchors, options.consensus.poa, start^, scratch.poa, scratch.aligner
+        records.names, records.seqs, records.anchors, cons_opts.poa, start^, scratch.poa, scratch.aligner
     )
     var strands = records.strands.copy() if options.homopolymers.loaded() else List[Int]()
     var assembled = len(made.consensus) > 0
+    var built_anchors = made.anchors.copy()
     var polished_parts = List[List[UInt8]]()
     if (options.result == 0 or options.result == 2) and (
         assembled or (options.max_consensus == 1 and options.consensus_rule == 0)
     ):
         polished_parts = polished(
-            scratch, made, records.seqs, records.anchors, strands, options.consensus, options.homopolymers
+            scratch, made, records.seqs, records.anchors, strands, cons_opts, options.homopolymers
         )
     # A read `-s` reverse-complemented is on the other strand to the consensus now (for -d's consensus sequences).
     for r in made.reversed:
@@ -104,13 +107,13 @@ def _poa(mut scratch: ConsensusScratch, mut records: Records, options: Options) 
                 f += 1
                 continue
             out.polish_with.append(r)
-        out.anchors = records.anchors.copy()
+        out.anchors = built_anchors^ if len(built_anchors) == len(records) else records.anchors.copy()
     else:
         out.polish_with = spanning^
     return out^
 
 
-def _ref(records: Records, options: Options) raises -> Aligned:
+def _ref(records: Records, options: Options, run_threads: Int) raises -> Aligned:
     """`plegma ref`: `on_reference` at minimap2's asm5 scores as costs (match 1, mismatch 19, gap opens 39 and 81,
     extensions 3 and 1, made costs), the truth's convention (on chr20 its graphs genotype better than at pgrealign's
     scores: structural F1 0.709 against 0.658); reads past asm5's divergence, which it would delete and insert again,
@@ -126,7 +129,7 @@ def _ref(records: Records, options: Options) raises -> Aligned:
     var bytes = on_reference(
         records.seqs,
         Costs.two_piece(40, 78, 7, 162, 3),
-        options.threads,
+        run_threads,
         Costs.two_piece(24, 16, 12, 96, 5),
         flanks,
     )
@@ -155,22 +158,40 @@ def _most_frequent(rows: List[String]) -> String:
         return String()
     var width = rows[0].byte_length()
     var counts = List[Int](length=256, fill=0)
+    var touched = List[Int](capacity=8)
     for c in range(width):
-        for b in range(256):
-            counts[b] = 0
+        touched.clear()
         for r in rows:
-            counts[Int(r.as_bytes()[c])] += 1
+            var b = Int(r.as_bytes()[c])
+            if counts[b] == 0:
+                touched.append(b)
+            counts[b] += 1
+        for a in range(1, len(touched)):
+            var key = touched[a]
+            var j = a
+            while j > 0 and touched[j - 1] > key:
+                touched[j] = touched[j - 1]
+                j -= 1
+            touched[j] = key
         var best = Int(GAP)
-        for b in range(256):
+        for b in touched:
             if counts[b] > counts[best]:
                 best = b
+        for b in touched:
+            counts[b] = 0
         if best != Int(GAP):
             out.append(UInt8(best))
     return String(unsafe_from_utf8=out)
 
 
 def _consensus(
-    aligned: Aligned, rows: List[String], members: List[Int], seqs: List[List[UInt8]], options: Options
+    aligned: Aligned,
+    rows: List[String],
+    members: List[Int],
+    seqs: List[List[UInt8]],
+    options: Options,
+    run_threads: Int,
+    order: List[Int],
 ) raises -> String:
     """The consensus of the paths `members` (indices into `shown` and `rows`), polished against their sequences."""
     var consensus: String
@@ -184,7 +205,7 @@ def _consensus(
         for m in members:
             paths.append(aligned.shown[m])
         var letters = List[UInt8]()
-        for node in aligned.graph.heaviest_path(Topology(aligned.graph).order, paths):
+        for node in aligned.graph.heaviest_path(order, paths):
             letters.append(aligned.graph.bases[node])
         consensus = String(unsafe_from_utf8=letters)
     if not options.polishing():
@@ -205,17 +226,18 @@ def _consensus(
         likely_rounds=options.consensus.likely_rounds,
         homopolymers=options.homopolymers,
         strands=aligned.strands,
-        threads=options.threads,
+        threads=run_threads,
     )
     return String(unsafe_from_utf8=polished)
 
 
-def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) raises -> String:
+def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options, run_threads: Int) raises -> String:
     """The outputs `-r` asks for: consensus FASTA (one per cluster with `-d`), MSA FASTA, GFA."""
     var result = options.result
     var text = String()
     var need_rows = result == 1 or result == 2 or options.consensus_rule == 1 or options.max_consensus > 1
-    var rows = aligned.rows.copy()
+    var rows = List[String]()
+    swap(rows, aligned.rows)
     if need_rows and len(rows) == 0:
         var by_path = aligned.graph.msa()
         for p in aligned.shown:
@@ -225,6 +247,15 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
         everyone.append(m)
     # A starting MSA's rows come first in `shown`; past them, record r is at first + r.
     var first = len(aligned.shown) - len(seqs)
+    var graph_order = List[Int]()
+    var need_order = (
+        (result == 0 or result == 2) and len(aligned.polished) == 0 and options.consensus_rule == 0
+    ) or result == 4
+    if need_order and len(aligned.graph) > 0:
+        var rank = aligned.graph.node_order()
+        graph_order.resize(len(rank), 0)
+        for node in range(len(rank)):
+            graph_order[rank[node]] = node
     if (result == 0 or result == 2) and len(aligned.polished) > 0:
         # The library's consensus: one sequence, or the two sides of an assembly that could not be joined.
         if len(aligned.polished) == 1:
@@ -234,17 +265,19 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
             text.write(">Consensus_sequence_right\n", StringSlice(unsafe_from_utf8=Span(aligned.polished[1])), "\n")
     elif result == 0 or result == 2:
         var clusters = cluster_rows(
-            rows, options.max_consensus, options.min_freq, options.threads
+            rows, options.max_consensus, options.min_freq, run_threads
         ) if options.max_consensus > 1 else (List[List[Int]]())
         if len(clusters) <= 1:
-            text.write(">Consensus_sequence\n", _consensus(aligned, rows, everyone, seqs, options), "\n")
+            text.write(
+                ">Consensus_sequence\n",
+                _consensus(aligned, rows, everyone, seqs, options, run_threads, graph_order),
+                "\n",
+            )
         else:
             var cons_list = List[String](length=len(clusters), fill=String())
-            var workers = thread_count(options.threads, len(clusters))
+            var workers = thread_count(run_threads, len(clusters))
             if workers > 1 and len(clusters) >= 2:
-                var sub_options = options.copy()
-                sub_options.threads = max(1, options.threads // workers)
-                sub_options.consensus.poa.threads = sub_options.threads
+                var sub_threads = max(1, run_threads // workers)
                 var failed = List[Bool](length=len(clusters), fill=False)
                 var cons_p = cons_list.unsafe_ptr()
                 var failed_p = failed.unsafe_ptr()
@@ -260,7 +293,9 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
                     imm rows,
                     imm clusters,
                     imm seqs,
-                    imm sub_options,
+                    imm options,
+                    imm sub_threads,
+                    imm graph_order,
                     imm cons_p,
                     imm failed_p,
                 }:
@@ -269,17 +304,19 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
                         if k >= n_clusters:
                             return
                         try:
-                            cons_p[unsafe_offset=k] = _consensus(aligned, rows, clusters[k], seqs, sub_options)
+                            cons_p[unsafe_offset=k] = _consensus(
+                                aligned, rows, clusters[k], seqs, options, sub_threads, graph_order
+                            )
                         except:
                             failed_p[unsafe_offset=k] = True
 
                 spread(polish_cluster, workers, workers)
                 for k in range(len(clusters)):
                     if failed[k]:
-                        cons_list[k] = _consensus(aligned, rows, clusters[k], seqs, options)
+                        cons_list[k] = _consensus(aligned, rows, clusters[k], seqs, options, run_threads, graph_order)
             else:
                 for k in range(len(clusters)):
-                    cons_list[k] = _consensus(aligned, rows, clusters[k], seqs, options)
+                    cons_list[k] = _consensus(aligned, rows, clusters[k], seqs, options, run_threads, graph_order)
             for k in range(len(clusters)):
                 var ids = String()
                 for i in range(len(clusters[k])):
@@ -294,7 +331,7 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
         var consensus_path = List[Int]()
         if result == 4 and len(aligned.assembled) == 0:
             # The graph's consensus path is the heaviest bundle, whichever consensus the FASTA output used.
-            consensus_path = aligned.graph.heaviest_path(Topology(aligned.graph).order, aligned.shown)
+            consensus_path = aligned.graph.heaviest_path(graph_order, aligned.shown)
         elif result == 4:
             # Reads anchored at one end: the bundle between the spanning reads' ends; with none, the assembled
             # sequence the reads were aligned to (its path the graph's first, not shown).
@@ -303,7 +340,7 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
                 if len(aligned.anchors) == 0 or aligned.anchors[r] == BOTH:
                     spanning.append(aligned.shown[first + r])
             if len(spanning) > 0:
-                consensus_path = aligned.graph.heaviest_path_spanning(Topology(aligned.graph).order, spanning)
+                consensus_path = aligned.graph.heaviest_path_spanning(graph_order, spanning)
             elif len(aligned.graph.paths) > 0:
                 for node in aligned.graph.paths[0]:
                     consensus_path.append(Int(node))
@@ -311,24 +348,37 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options) rais
     return text^
 
 
-def _run(mut scratch: ConsensusScratch, input: String, options: Options) raises -> String:
+def _run(mut scratch: ConsensusScratch, input: String, options: Options, run_threads: Int) raises -> String:
     """One file through the command `options` names, as its outputs."""
     var t0 = perf_counter_ns()
-    var records = Records(input)
+    var records = Records(input, parse_headers=not options.reference)
     var t1 = perf_counter_ns()
     if len(records) == 0:
         return String(">Consensus_sequence\n\n") if options.result == 0 or options.result == 2 else String()
-    var aligned = _ref(records, options) if options.reference else _poa(scratch, records, options)
+    var aligned = _ref(records, options, run_threads) if options.reference else _poa(
+        scratch, records, options, run_threads
+    )
     var nodes = len(aligned.graph)
     var t2 = perf_counter_ns()
-    var text = _write(aligned^, records.seqs, options)
+    var text = _write(aligned^, records.seqs, options, run_threads)
     if options.verbose:
         var t3 = perf_counter_ns()
-        print(
-            t"plegma: {input}: {len(records)} sequences, {nodes} nodes; read {Float64(t1 - t0) / 1e9} s,",
-            t" align {Float64(t2 - t1) / 1e9} s, write {Float64(t3 - t2) / 1e9} s",
-            file=stderr,
+        var msg = String(
+            "plegma: ",
+            input,
+            ": ",
+            len(records),
+            " sequences, ",
+            nodes,
+            " nodes; read ",
+            Float64(t1 - t0) / 1e9,
+            " s, align ",
+            Float64(t2 - t1) / 1e9,
+            " s, write ",
+            Float64(t3 - t2) / 1e9,
+            " s",
         )
+        print(msg, file=stderr)
     return text^
 
 
@@ -369,27 +419,26 @@ def _main() raises:
         print(USAGE, file=stderr)
         exit(1)
     var paths = _inputs(options)
-    var text = String()
+    var outputs = List[String](length=len(paths), fill=String())
     var workers = thread_count(options.threads, len(paths))
     if workers > 1 and len(paths) >= 2:
-        var sub_options = options.copy()
-        sub_options.threads = max(1, options.threads // workers)
-        sub_options.consensus.poa.threads = sub_options.threads
-        var outputs = List[String](length=len(paths), fill=String())
+        var sub_threads = max(1, options.threads // workers)
         var failed = List[Bool](length=len(paths), fill=False)
         var outputs_p = outputs.unsafe_ptr()
         var failed_p = failed.unsafe_ptr()
         var taken = Atomic[Int64](0)
         var n_paths = len(paths)
 
-        def run_file(slot: Int) {mut taken, imm n_paths, imm paths, imm sub_options, imm outputs_p, imm failed_p}:
+        def run_file(
+            slot: Int,
+        ) {mut taken, imm n_paths, imm paths, imm options, imm sub_threads, imm outputs_p, imm failed_p}:
             var local_scratch = ConsensusScratch()
             while True:
                 var idx = Int(taken.fetch_add(1))
                 if idx >= n_paths:
                     return
                 try:
-                    outputs_p[unsafe_offset=idx] = _run(local_scratch, paths[idx], sub_options)
+                    outputs_p[unsafe_offset=idx] = _run(local_scratch, paths[idx], options, sub_threads)
                 except:
                     failed_p[unsafe_offset=idx] = True
 
@@ -397,18 +446,18 @@ def _main() raises:
         var scratch = ConsensusScratch()
         for idx in range(len(paths)):
             if failed[idx]:
-                text += _run(scratch, paths[idx], options)
-            else:
-                text += outputs[idx]
+                outputs[idx] = _run(scratch, paths[idx], options, options.threads)
     else:
         var scratch = ConsensusScratch()
-        for path in paths:
-            text += _run(scratch, path, options)
+        for idx in range(len(paths)):
+            outputs[idx] = _run(scratch, paths[idx], options, options.threads)
     if options.output.byte_length() > 0:
         with open(options.output, "w") as f:
-            f.write(text)
+            for idx in range(len(outputs)):
+                f.write(outputs[idx])
     else:
-        print(text, end="")
+        for idx in range(len(outputs)):
+            print(outputs[idx], end="")
 
 
 def main():

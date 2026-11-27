@@ -1,18 +1,20 @@
 """Tests for `ConsensusScratch` reuse and bit-exact parallel determinism across every major plegma API."""
 
-from std.testing import TestSuite, assert_equal, assert_true
+from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 
 from karan import Costs
 
 from plegma.clustered import clustered_consensus, clustered_consensus_batch
 from plegma.consensus import ConsensusOptions, ConsensusScratch, consensus, consensus_batch
 from plegma.graph import Graph
+from plegma.homopolymer import FLANK_UNKNOWN, STRAND_UNKNOWN, HomopolymerModel
 from plegma.kernel import BOTH, INSIDE, LEFT, RIGHT, Scoring, Topology, Workspace
 from plegma.phased import phased_consensus, phased_consensus_batch
 from plegma.pinned import WindowScratch, align_pinned
-from plegma.poa import PoaOptions, poa
+from plegma.poa import LONGEST_FIRST, PoaOptions, _longest_first, poa
 from plegma.polish import PolishScratch, polish, polish_with_scratch
 from plegma.reference import on_reference
+from plegma.runs import _best_length
 
 
 def _rng_seq(seed: UInt64, length: Int) -> List[UInt8]:
@@ -295,6 +297,72 @@ def test_multi_locus_batch_apis_bit_exact() raises:
         for k in range(2):
             assert_equal(phb4[i].consensus[k], phb1[i].consensus[k])
             assert_equal(phb4[i].members[k], phb1[i].members[k])
+
+
+def test_audit_fixes_and_flattened_polish_bit_exact() raises:
+    # 1. `_longest_first` must never sort empty reads before non-empty reads.
+    var mixed: List[List[UInt8]] = [List[UInt8](), List[UInt8]("ACGTACGT".as_bytes()), List[UInt8]("AC".as_bytes())]
+    var lf = _longest_first(mixed, [0, 1, 2])
+    assert_equal(lf[0], 1)
+    assert_equal(lf[1], 2)
+    assert_equal(lf[2], 0)
+
+    # 2. Flattened `(active_seg, read_k)` edit + likelihood polishing with duplicate reads & 2..4 segments: 1T == 8T.
+    var truth = _rng_seq(404, 420)
+    var bad = truth.copy()
+    bad[80] = UInt8(ord("A")) if bad[80] != UInt8(ord("A")) else UInt8(ord("T"))
+    bad[240] = UInt8(ord("G")) if bad[240] != UInt8(ord("G")) else UInt8(ord("C"))
+    bad[350] = UInt8(ord("C")) if bad[350] != UInt8(ord("C")) else UInt8(ord("A"))
+    var reads = List[List[UInt8]]()
+    var members = List[Int]()
+    for r in range(24):
+        var seq = truth.copy() if r % 3 == 0 else _mutate(truth, UInt64(5000 + r // 2), 2)
+        reads.append(seq^)
+        members.append(r)
+    var p1 = polish(bad, reads, members, 20, likely_rounds=10, threads=1)
+    var p8 = polish(bad, reads, members, 20, likely_rounds=10, threads=8)
+    assert_equal(p8, p1)
+    assert_equal(p1, truth)
+
+    # 3. `HomopolymerModel.most_likely` with `STRAND_UNKNOWN` uses precomputed SIMD slice & matches bounds safety.
+    var csv = String("base,strand,left,right,n,m,count,probability,logProbabilityDb\n")
+    for base_ch in ["A", "C", "G", "T"]:
+        for strand in range(2):
+            for n in range(2, 5):
+                for m in range(5):
+                    var lp = -0.5 if m == n else -15.0
+                    csv += String(base_ch, ",", strand, ",*,*,", n, ",", m, ",100,0.5,", lp, "\n")
+    var model = HomopolymerModel.parse(csv)
+    assert_equal(
+        model.most_likely(0, FLANK_UNKNOWN, FLANK_UNKNOWN, [3, 3, 3, 4], [STRAND_UNKNOWN, 0, 1, STRAND_UNKNOWN]), 3
+    )
+    assert_equal(model.most_likely(4, FLANK_UNKNOWN, FLANK_UNKNOWN, [3], [0]), -1)
+    # `_best_length` with 1 valid read on uncovered `n` must return -1 (not accept -Float64.MAX tie).
+    var sc = 0.0
+    assert_equal(_best_length(model, 0, FLANK_UNKNOWN, FLANK_UNKNOWN, [3], [0], [0], 10, 12, sc), -1)
+
+    # 4. `clustered_consensus` & `phased_consensus` validate options even on empty input, and odd threads match 1T.
+    var bad_opts = ConsensusOptions()
+    bad_opts.poa.threads = 0
+    with assert_raises():
+        _ = clustered_consensus(List[List[UInt8]](), options=bad_opts)
+    with assert_raises():
+        _ = phased_consensus(List[List[UInt8]](), List[Int](), options=bad_opts)
+    var o3 = ConsensusOptions()
+    o3.poa.seeded = False
+    o3.poa.threads = 3
+    var o1 = ConsensusOptions()
+    o1.poa.seeded = False
+    o1.poa.threads = 1
+    var haps = List[Int](capacity=len(reads))
+    for r in range(len(reads)):
+        haps.append(0 if r < 16 else (1 if r < 20 else -1))
+    var ph1 = phased_consensus(reads.copy(), haps, options=o1)
+    var ph3 = phased_consensus(reads.copy(), haps, options=o3)
+    assert_equal(ph3.consensus[0], ph1.consensus[0])
+    assert_equal(ph3.consensus[1], ph1.consensus[1])
+    assert_equal(ph3.members[0], ph1.members[0])
+    assert_equal(ph3.members[1], ph1.members[1])
 
 
 def main() raises:

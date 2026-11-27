@@ -203,6 +203,12 @@ class ClusteredTest(unittest.TestCase):
             plegma.phased_consensus(self.reads, [0, 1])
         with self.assertRaises(TypeError):
             plegma.clustered_consensus(self.reads, no_such=1)
+        with self.assertRaises(ValueError):
+            plegma.clustered_consensus(self.reads, max_clusters=2**32)
+        sc = plegma.Scratch()
+        sc.close()
+        with self.assertRaises(ValueError):
+            plegma.consensus(self.reads, scratch=sc)
 
 
 if __name__ == "__main__":

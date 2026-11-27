@@ -106,10 +106,15 @@ def _fits_16_bits(scoring: Scoring, m: Int, n: Int) -> Bool:
 def _rebased_fits(scoring: Scoring, reach: Int) -> Bool:
     """Whether a banded row of `2 reach + 1` cells kept relative to a base of its own fits 16-bit lanes under
     `scoring`: a reachable cell is within a gap across the row (and a step's mismatch) of the row's best, which is
-    within `REBASE` of the base. Scores scaled up a hundredfold break this at abPOA's band; the defaults do not at
-    `REBASED_SPAN`."""
-    var spread = Int(scoring.gap(2 * reach + 1)) + Int(scoring.mismatch) + Int(scoring.match_score)
-    return 2 * reach + 1 <= REBASED_SPAN and spread + 2 * REBASE < Int(-_neg[DType.int16]()) // 2 - 500
+    within `REBASE` of the base, and `e_index1`/`letters_on` stay below 16-bit limits."""
+    var span = 2 * reach + 1
+    var spread = Int(scoring.gap(span)) + Int(scoring.mismatch) + Int(scoring.match_score)
+    var index_peak = Int(max(max(scoring.extend1, scoring.extend2), scoring.match_score)) * span
+    return (
+        span <= REBASED_SPAN
+        and spread + 2 * REBASE < Int(-_neg[DType.int16]()) // 2 - 500
+        and index_peak < 30000 - REBASE - Int(scoring.match_score)
+    )
 
 
 struct Scoring(ImplicitlyCopyable):
@@ -198,7 +203,7 @@ struct Workspace(Movable):
     var left_best: List[Int]
     var right_best: List[Int]
     var trace: List[UInt8]
-    var choices: List[UInt8]
+    var choices: List[UInt16]
     var pool: List[List[UInt8]]
     var slot_of: List[Int]
     var waiting: List[Int]
@@ -224,7 +229,7 @@ struct Workspace(Movable):
         self.left_best = List[Int]()
         self.right_best = List[Int]()
         self.trace = List[UInt8]()
-        self.choices = List[UInt8]()
+        self.choices = List[UInt16]()
         self.pool = List[List[UInt8]]()
         self.slot_of = List[Int]()
         self.waiting = List[Int]()
@@ -266,9 +271,22 @@ struct Workspace(Movable):
         # 16-bit lanes when every score fits them, or, banded, when the band is narrow enough that a row's scores
         # kept relative to a base of its own fit them however long the alignment (`REBASED_SPAN`).
         var found: GraphAlignment
-        if _fits_16_bits(scoring, m, len(nodes)) or (banded and _rebased_fits(scoring, reach)):
+        var fits_16 = _fits_16_bits(scoring, m, len(nodes))
+        if fits_16 or (banded and _rebased_fits(scoring, reach)):
             found = self._align[DType.int16](
-                graph, topology, nodes, left, right, query, scoring, row_of, mode, band_b, band_f, band_max, banded
+                graph,
+                topology,
+                nodes,
+                left,
+                right,
+                query,
+                scoring,
+                row_of,
+                mode,
+                band_b,
+                band_f,
+                band_max,
+                banded and not fits_16,
             )
             if found.cells < 0:
                 found = self._align[DType.int32](
@@ -428,8 +446,9 @@ struct Workspace(Movable):
 
         # The best end so far: its absolute score, and whether it is a cell some alignment reaches (above half the
         # sentinel, as the row stores it). Reached ends beat unreached ones, then the higher score.
-        var best = 0 if local else Int(NEG)
-        var best_ok = local
+        var empty_free = n == 0 and (mode == PREFIX or mode == EXTENSION)
+        var best = 0 if (local or empty_free) else Int(NEG)
+        var best_ok = local or empty_free
         var best_row = 0
         var best_col = 0
         var cells = self.hi[0] + 1
@@ -528,28 +547,42 @@ struct Workspace(Movable):
             self.slot_of[r] = slot
             var row = self.pool[slot].unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
             var multi = len(self.preds) > 1
-            if multi:
-                _fill[dt](row, 3 * stride)
-            else:
-                for third in range(3):
-                    _fill[dt](row.unsafe_offset(third * stride), V)
-                    _fill[dt](row.unsafe_offset(third * stride + V + span), V)
-            var lanes = span + V  # a vector of slack: the last vector of a row runs whole
-            self.aux.resize(unsafe_uninit_length=BYTES * 6 * lanes)
-            var flags = self.aux.unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
             var h = row.unsafe_offset(V)
             var d1 = row.unsafe_offset(stride + V)
             var d2 = row.unsafe_offset(2 * stride + V)
-            var x1 = flags
-            var x2 = flags.unsafe_offset(lanes)
-            var pick_h = flags.unsafe_offset(2 * lanes)
-            var pick_d1 = flags.unsafe_offset(3 * lanes)
-            var pick_d2 = flags.unsafe_offset(4 * lanes)
-            var source_of = flags.unsafe_offset(5 * lanes)
             var letters = profile.unsafe_offset(Int(encode_base(graph.bases[node])) * width)
             var one = Vec(1)
             var nothing = Vec(0)
+            var zero = S(max(Int(NEG), min(-base_r, 30000)))
+            var tbase = len(self.trace)
+            self.trace_at[r] = tbase
+            self.trace.resize(unsafe_uninit_length=tbase + span + V)
+            var bytes = self.trace.unsafe_ptr().unsafe_offset(tbase)
+            var best_lanes = Vec(NEG)
+            var reach_lanes = Vec(NEG)
+            var per_letter = S(Int(scoring.match_score))
+            var lane = iota[dt, V]()
+            var first_lane = lane.eq(0)
+            var opened1 = gap1 - e1
+            var opened2 = gap2 - e2
+            var carry1 = Vec(NEG)
+            var carry2 = Vec(NEG)
+            var cell = lane
+            var e_index1 = Vec(e1) * lane
+            var e_index2 = Vec(e2) * lane
+            var letters_on = Vec(per_letter) * lane
+            var ends = Vec(S(span))
             if multi:
+                _fill[dt](row, 3 * stride)
+                var lanes = span + V  # a vector of slack: the last vector of a row runs whole
+                self.aux.resize(unsafe_uninit_length=BYTES * 6 * lanes)
+                var flags = self.aux.unsafe_ptr().unsafe_bitcast[S]().unsafe_origin_cast[MutUntrackedOrigin]()
+                var x1 = flags
+                var x2 = flags.unsafe_offset(lanes)
+                var pick_h = flags.unsafe_offset(2 * lanes)
+                var pick_d1 = flags.unsafe_offset(3 * lanes)
+                var pick_d2 = flags.unsafe_offset(4 * lanes)
+                var source_of = flags.unsafe_offset(5 * lanes)
                 _zero[dt](flags, 5 * lanes)
                 for k in range(len(self.preds)):
                     var p = self.preds[k]
@@ -589,8 +622,7 @@ struct Workspace(Movable):
                             x1.unsafe_store(
                                 at, better1.select(extend1.gt(open1).select(one, nothing), x1.unsafe_load[width=V](at))
                             )
-                            if multi:
-                                pick_d1.unsafe_store(at, better1.select(which, pick_d1.unsafe_load[width=V](at)))
+                            pick_d1.unsafe_store(at, better1.select(which, pick_d1.unsafe_load[width=V](at)))
                             if convex:
                                 var open2 = from_h - gap2
                                 var extend2 = pd2.unsafe_load[width=V](pat) - e2
@@ -602,8 +634,7 @@ struct Workspace(Movable):
                                     at,
                                     better2.select(extend2.gt(open2).select(one, nothing), x2.unsafe_load[width=V](at)),
                                 )
-                                if multi:
-                                    pick_d2.unsafe_store(at, better2.select(which, pick_d2.unsafe_load[width=V](at)))
+                                pick_d2.unsafe_store(at, better2.select(which, pick_d2.unsafe_load[width=V](at)))
                             j += V
                             continue
                         var from_h = ph[unsafe_offset=pat]
@@ -634,8 +665,7 @@ struct Workspace(Movable):
                             var cur = h.unsafe_load[width=V](at)
                             var better = cand.gt(cur)
                             h.unsafe_store(at, better.select(cand, cur))
-                            if multi:
-                                pick_h.unsafe_store(at, better.select(which, pick_h.unsafe_load[width=V](at)))
+                            pick_h.unsafe_store(at, better.select(which, pick_h.unsafe_load[width=V](at)))
                             j += V
                             continue
                         var cand = _floor(ph[unsafe_offset=pat] + letters[unsafe_offset=j])
@@ -663,9 +693,68 @@ struct Workspace(Movable):
                         at, source | (x1.unsafe_load[width=V](at) << 3) | (x2.unsafe_load[width=V](at) << 4)
                     )
                     at += V
-
+                if free_start and low == 0 and h[unsafe_offset=0] < zero:
+                    # The alignment may start at this node: the graph before it skipped free.
+                    h[unsafe_offset=0] = zero
+                    source_of[unsafe_offset=0] = (source_of[unsafe_offset=0] & S(~7)) | S(_START)
+                at = 0
+                while at < span:
+                    var here = h.unsafe_load[width=V](at)
+                    var reach1 = max(_prefix_max(here + e_index1), carry1)
+                    var inserted1 = _floor(reach1 - opened1 - e_index1)
+                    if at == 0:
+                        inserted1 = first_lane.select(Vec(NEG), inserted1)
+                    var extends1 = (inserted1 - e1).gt(here - gap1).select(one, nothing)
+                    carry1 = _last(reach1)
+                    var inserted2 = Vec(NEG)
+                    var extends2 = nothing
+                    if convex:
+                        var reach2 = max(_prefix_max(here + e_index2), carry2)
+                        inserted2 = _floor(reach2 - opened2 - e_index2)
+                        if at == 0:
+                            inserted2 = first_lane.select(Vec(NEG), inserted2)
+                        extends2 = (inserted2 - e2).gt(here - gap2).select(one, nothing)
+                        carry2 = _last(reach2)
+                    var value = here
+                    var packed = source_of.unsafe_load[width=V](at)
+                    var source = packed & Vec(S(7))
+                    var take1 = inserted1.gt(value) | (inserted1.eq(value) & source.eq(Vec(S(_DELETION2))))
+                    value = take1.select(inserted1, value)
+                    source = take1.select(Vec(S(_INSERTION1)), source)
+                    var take2 = inserted2.gt(value)
+                    value = take2.select(inserted2, value)
+                    source = take2.select(Vec(S(_INSERTION2)), source)
+                    if local:
+                        var below = value.lt(Vec(0))
+                        value = below.select(Vec(0), value)
+                        source = below.select(Vec(S(_START)), source)
+                    var byte = source | (packed & Vec(S(~7))) | (extends1 << 5) | (extends2 << 6)
+                    h.unsafe_store(at, value)
+                    bytes.unsafe_store(at, byte.cast[DType.uint8]())
+                    var inside = cell.lt(ends)
+                    best_lanes = max(best_lanes, inside.select(value, Vec(NEG)))
+                    if stopping:
+                        var reachable = inside & value.gt(Vec(NEG))
+                        reach_lanes = max(reach_lanes, reachable.select(value - letters_on, Vec(NEG)))
+                    cell += S(V)
+                    e_index1 += e1 * S(V)
+                    e_index2 += e2 * S(V)
+                    letters_on += per_letter * S(V)
+                    at += V
+                var cbase = len(self.choices)
+                self.choice_at[r] = cbase
+                self.choices.resize(unsafe_uninit_length=cbase + 3 * span)
+                var c = self.choices.unsafe_ptr().unsafe_offset(cbase)
+                for at in range(span):
+                    c[unsafe_offset=3 * at] = UInt16(pick_h[unsafe_offset=at])
+                    c[unsafe_offset=3 * at + 1] = UInt16(pick_d1[unsafe_offset=at])
+                    c[unsafe_offset=3 * at + 2] = UInt16(pick_d2[unsafe_offset=at])
             else:
-                # One predecessor: the diagonal, both deletions and the better of them in one pass.
+                # One predecessor (~90% of nodes): fuse diagonal/deletions and insertion scan in one pass so `here`
+                # and `packed` stay in SIMD registers with zero `self.aux` traffic.
+                for third in range(3):
+                    _fill[dt](row.unsafe_offset(third * stride), V)
+                    _fill[dt](row.unsafe_offset(third * stride + V + span), V)
                 var p = self.preds[0]
                 var pstride = self.hi[p] - self.lo[p] + 1 + 2 * V
                 var prow = (
@@ -682,109 +771,67 @@ struct Workspace(Movable):
                     var open1 = from_h - gap1
                     var extend1 = pd1.unsafe_load[width=V](pat) - e1
                     var deleted1 = _floor(max(open1, extend1))
-                    var value = _floor(ph.unsafe_load[width=V](pat - 1) + letters.unsafe_load[width=V](low + at))
-                    var take1 = deleted1.gt(value)
-                    var source = take1.select(Vec(S(_DELETION1)), Vec(0))
-                    value = take1.select(deleted1, value)
+                    var here = _floor(ph.unsafe_load[width=V](pat - 1) + letters.unsafe_load[width=V](low + at))
+                    var take_d1 = deleted1.gt(here)
+                    var source = take_d1.select(Vec(S(_DELETION1)), Vec(0))
+                    here = take_d1.select(deleted1, here)
                     d1.unsafe_store(at, deleted1)
-                    # The deletions' extend flags packed with the move, as the traceback byte holds them.
-                    var flags = extend1.gt(open1).select(one, nothing) << 3
+                    var dflags = extend1.gt(open1).select(one, nothing) << 3
                     if convex:
                         var open2 = from_h - gap2
                         var extend2 = pd2.unsafe_load[width=V](pat) - e2
                         var deleted2 = _floor(max(open2, extend2))
-                        var take2 = deleted2.gt(value)
-                        source = take2.select(Vec(S(_DELETION2)), source)
-                        value = take2.select(deleted2, value)
+                        var take_d2 = deleted2.gt(here)
+                        source = take_d2.select(Vec(S(_DELETION2)), source)
+                        here = take_d2.select(deleted2, here)
                         d2.unsafe_store(at, deleted2)
-                        flags = flags | (extend2.gt(open2).select(one, nothing) << 4)
+                        dflags = dflags | (extend2.gt(open2).select(one, nothing) << 4)
                     else:
                         d2.unsafe_store(at, Vec(NEG))
-                    h.unsafe_store(at, value)
-                    source_of.unsafe_store(at, source | flags)
-                    at += V
-            # Score 0, absolute, in the row's frame.
-            var zero = S(max(Int(NEG), min(-base_r, 30000)))
-            if free_start and low == 0 and h[unsafe_offset=0] < zero:
-                # The alignment may start at this node: the graph before it skipped free.
-                h[unsafe_offset=0] = zero
-                source_of[unsafe_offset=0] = (source_of[unsafe_offset=0] & S(~7)) | S(_START)
-            # One pass over the row: both gap pieces' insertion scores, then each cell's score, its traceback byte
-            # and the row's best. Gaps along the query, left to right, from the scores so far (`h`, before
-            # insertions): a gap opened after another never beats one longer gap (with E1 >= E2), so the insertion
-            # states need not see each other. As running maxima: F[k] = max over t < k of (H[t] + e t) - (o + e) -
-            # e (k - 1), a prefix maximum in lane shifts, carried from block to block; a cell extends when its left
-            # neighbour's gap, less e, beats opening from its left neighbour. The two pieces in one loop run side
-            # by side (their chains are independent) and share the loads and the left neighbours.
-            var tbase = len(self.trace)
-            self.trace_at[r] = tbase
-            self.trace.resize(unsafe_uninit_length=tbase + span + V)
-            var bytes = self.trace.unsafe_ptr().unsafe_offset(tbase)
-            var best_lanes = Vec(NEG)
-            var reach_lanes = Vec(NEG)
-            var per_letter = S(Int(scoring.match_score))
-            var lane = iota[dt, V]()
-            var first_lane = lane.eq(0)
-            var opened1 = gap1 - e1
-            var opened2 = gap2 - e2
-            # The largest h[t] + e t of the cells before the block, in every lane (no scalar goes back into a vector).
-            var carry1 = Vec(NEG)
-            var carry2 = Vec(NEG)
-            # Each lane's cell, and it times e1, e2 and a match, a block on at a time.
-            var cell = lane
-            var e_index1 = Vec(e1) * lane
-            var e_index2 = Vec(e2) * lane
-            var letters_on = Vec(per_letter) * lane
-            var ends = Vec(S(span))
-            var at = 0
-            while at < span:
-                # The maximum over t <= k, not t < k: t = k adds a gap of no letters, h[k] - open, below h[k], so it
-                # never takes a cell, nor (as h[k] - open - e = h[k] - gap) turns a flag; it saves a lane shift.
-                # Each cell's flag says whether the next cell's gap extends its own, as both come from its scores: the
-                # traceback reads it there (`_F1_EXTENDS`), and no score moves a lane.
-                var here = h.unsafe_load[width=V](at)
-                var reach1 = max(_prefix_max(here + e_index1), carry1)
-                var inserted1 = _floor(reach1 - opened1 - e_index1)
-                if at == 0:
-                    inserted1 = first_lane.select(Vec(NEG), inserted1)
-                var extends1 = (inserted1 - e1).gt(here - gap1).select(one, nothing)
-                carry1 = _last(reach1)
-                var inserted2 = Vec(NEG)
-                var extends2 = nothing
-                if convex:
-                    var reach2 = max(_prefix_max(here + e_index2), carry2)
-                    inserted2 = _floor(reach2 - opened2 - e_index2)
+                    var packed = source | dflags
+                    if at == 0 and free_start and low == 0 and here[0] < zero:
+                        here[0] = zero
+                        packed[0] = (packed[0] & S(~7)) | S(_START)
+                    var reach1 = max(_prefix_max(here + e_index1), carry1)
+                    var inserted1 = _floor(reach1 - opened1 - e_index1)
                     if at == 0:
-                        inserted2 = first_lane.select(Vec(NEG), inserted2)
-                    extends2 = (inserted2 - e2).gt(here - gap2).select(one, nothing)
-                    carry2 = _last(reach2)
-                var value = here
-                var packed = source_of.unsafe_load[width=V](at)
-                var source = packed & Vec(S(7))
-                # KSW2's order among gaps (diagonal, D1, I1, D2, I2): the first piece's insertion also takes over
-                # from the second piece's deletion it ties.
-                var take1 = inserted1.gt(value) | (inserted1.eq(value) & source.eq(Vec(S(_DELETION2))))
-                value = take1.select(inserted1, value)
-                source = take1.select(Vec(S(_INSERTION1)), source)
-                var take2 = inserted2.gt(value)
-                value = take2.select(inserted2, value)
-                source = take2.select(Vec(S(_INSERTION2)), source)
-                if local:
-                    var below = value.lt(Vec(0))
-                    value = below.select(Vec(0), value)
-                    source = below.select(Vec(S(_START)), source)
-                var byte = source | (packed & Vec(S(~7))) | (extends1 << 5) | (extends2 << 6)
-                h.unsafe_store(at, value)
-                bytes.unsafe_store(at, byte.cast[DType.uint8]())
-                var inside = cell.lt(ends)
-                best_lanes = max(best_lanes, inside.select(value, Vec(NEG)))
-                if stopping:
-                    reach_lanes = max(reach_lanes, inside.select(value - letters_on, Vec(NEG)))
-                cell += S(V)
-                e_index1 += e1 * S(V)
-                e_index2 += e2 * S(V)
-                letters_on += per_letter * S(V)
-                at += V
+                        inserted1 = first_lane.select(Vec(NEG), inserted1)
+                    var extends1 = (inserted1 - e1).gt(here - gap1).select(one, nothing)
+                    carry1 = _last(reach1)
+                    var inserted2 = Vec(NEG)
+                    var extends2 = nothing
+                    if convex:
+                        var reach2 = max(_prefix_max(here + e_index2), carry2)
+                        inserted2 = _floor(reach2 - opened2 - e_index2)
+                        if at == 0:
+                            inserted2 = first_lane.select(Vec(NEG), inserted2)
+                        extends2 = (inserted2 - e2).gt(here - gap2).select(one, nothing)
+                        carry2 = _last(reach2)
+                    var value = here
+                    var src = packed & Vec(S(7))
+                    var take1 = inserted1.gt(value) | (inserted1.eq(value) & src.eq(Vec(S(_DELETION2))))
+                    value = take1.select(inserted1, value)
+                    src = take1.select(Vec(S(_INSERTION1)), src)
+                    var take2 = inserted2.gt(value)
+                    value = take2.select(inserted2, value)
+                    src = take2.select(Vec(S(_INSERTION2)), src)
+                    if local:
+                        var below = value.lt(Vec(0))
+                        value = below.select(Vec(0), value)
+                        src = below.select(Vec(S(_START)), src)
+                    var byte = src | (packed & Vec(S(~7))) | (extends1 << 5) | (extends2 << 6)
+                    h.unsafe_store(at, value)
+                    bytes.unsafe_store(at, byte.cast[DType.uint8]())
+                    var inside = cell.lt(ends)
+                    best_lanes = max(best_lanes, inside.select(value, Vec(NEG)))
+                    if stopping:
+                        var reachable = inside & value.gt(Vec(NEG))
+                        reach_lanes = max(reach_lanes, reachable.select(value - letters_on, Vec(NEG)))
+                    cell += S(V)
+                    e_index1 += e1 * S(V)
+                    e_index2 += e2 * S(V)
+                    letters_on += per_letter * S(V)
+                    at += V
             var row_best = best_lanes.reduce_max()
             # The last vector ran into the right padding: back to sentinels for the successors.
             _fill[dt](h.unsafe_offset(span), V)
@@ -795,15 +842,6 @@ struct Workspace(Movable):
             var row_right = low + _last_equal[dt](h, span, row_best)
             self.left_best[r] = row_left
             self.right_best[r] = row_right
-            if multi:
-                var cbase = len(self.choices)
-                self.choice_at[r] = cbase
-                self.choices.resize(unsafe_uninit_length=cbase + 3 * span)
-                var c = self.choices.unsafe_ptr().unsafe_offset(cbase)
-                for at in range(span):
-                    c[unsafe_offset=3 * at] = UInt8(pick_h[unsafe_offset=at])
-                    c[unsafe_offset=3 * at + 1] = UInt8(pick_d1[unsafe_offset=at])
-                    c[unsafe_offset=3 * at + 2] = UInt8(pick_d2[unsafe_offset=at])
             if mode == LOCAL or mode == EXTENSION:
                 if _beats(Int(row_best), base_r, best, best_ok, Int(NEG)):
                     best = Int(row_best) + base_r
@@ -835,7 +873,7 @@ struct Workspace(Movable):
                 _rebased[dt](d1, span, S(shift))
                 _rebased[dt](d2, span, S(shift))
             self.base_of[r] = base_r + shift
-            peak = max(peak, live_bytes + self.trace.capacity() + self.choices.capacity() + self.aux.capacity())
+            peak = max(peak, live_bytes + self.trace.capacity() + 2 * self.choices.capacity() + self.aux.capacity())
             # Rows no successor still needs give their memory back.
             for p in self.preds:
                 self.waiting[p] -= 1
@@ -876,7 +914,18 @@ struct Workspace(Movable):
                 if banded and w < width:
                     # Wider, and uncapped: the band missed the end.
                     return self.align(
-                        graph, topology, nodes, left, right, query, scoring, row_of, mode, 2 * band_b + 10, 2 * band_f
+                        graph,
+                        topology,
+                        nodes,
+                        left,
+                        right,
+                        query,
+                        scoring,
+                        row_of,
+                        mode,
+                        2 * band_b + 10,
+                        2 * band_f,
+                        retry=False,
                     )
                 raise Error("no alignment reaches the graph's end")
 

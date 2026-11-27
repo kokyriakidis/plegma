@@ -95,6 +95,7 @@ struct WindowScratch(Movable):
         self.workers = List[_PinnedWorker]()
 
     def clear_precomp(mut self):
+        self.hp_letters.clear()
         self.precomp_letters.clear()
         self.precomp_anchors.clear()
 

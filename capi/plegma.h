@@ -72,6 +72,7 @@ typedef struct plegma_options {
 } plegma_options;
 
 void plegma_options_init(plegma_options* options);
+void plegma_options_init_sized(plegma_options* options, size_t struct_size);
 
 typedef struct plegma_model plegma_model;
 typedef struct plegma_result plegma_result;

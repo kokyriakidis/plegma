@@ -45,6 +45,17 @@ def test_guide_order_parallel_matches_serial_and_is_permutation() raises:
         assert_true(not seen[x])
         seen[x] = True
 
+    # Duplicate-sequence tie-breaking must not depend on input order.
+    var s_dup = _rng_seq(99, 200)
+    var s_a = _rng_seq(100, 200)
+    var s_b = _rng_seq(101, 200)
+    var fwd: List[List[UInt8]] = [s_dup.copy(), s_b.copy(), s_dup.copy(), s_a.copy()]
+    var rev: List[List[UInt8]] = [s_a.copy(), s_dup.copy(), s_b.copy(), s_dup.copy()]
+    var ofwd = guide_order(fwd, threads=1)
+    var orev = guide_order(rev, threads=1)
+    for i in range(4):
+        assert_equal(fwd[ofwd[i]], rev[orev[i]])
+
 
 def test_cluster_rows_parallel_matches_serial() raises:
     var rows = List[String]()

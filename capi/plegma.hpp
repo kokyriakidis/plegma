@@ -48,7 +48,7 @@ inline std::string version() { return plegma_version(); }
 // the adaptive band (-b -f -B). Default: plegma poa's. A value out of range fails the consensus call.
 struct Options {
     plegma_options values;
-    Options() { plegma_options_init(&values); }
+    Options() { plegma_options_init_sized(&values, sizeof(values)); }
     Options& polishRounds(std::int32_t rounds) { values.polish_rounds = rounds; return *this; }
     Options& likelyRounds(std::int32_t rounds) { values.likely_rounds = rounds; return *this; }
     Options& pinned(bool pinned) { values.pinned = pinned ? 1 : 0; return *this; }
@@ -158,7 +158,11 @@ inline std::vector<std::string> consensus(const std::vector<Read>& reads, const 
     for (std::size_t part = 0; part < plegma_result_parts(result.get()); part++) {
         std::size_t length = 0;
         const std::uint8_t* letters = plegma_result_sequence(result.get(), part, &length);
-        parts.emplace_back(reinterpret_cast<const char*>(letters), length);
+        if (length > 0 && letters) {
+            parts.emplace_back(reinterpret_cast<const char*>(letters), length);
+        } else {
+            parts.emplace_back();
+        }
     }
     return parts;
 }
@@ -191,10 +195,18 @@ inline Clustering clustering(plegma_result* raw, std::size_t count)
     for (std::size_t part = 0; part < plegma_result_parts(result.get()); part++) {
         std::size_t length = 0;
         const std::uint8_t* letters = plegma_result_sequence(result.get(), part, &length);
-        out.consensus.emplace_back(reinterpret_cast<const char*>(letters), length);
+        if (length > 0 && letters) {
+            out.consensus.emplace_back(reinterpret_cast<const char*>(letters), length);
+        } else {
+            out.consensus.emplace_back();
+        }
         const std::int32_t* ids = nullptr;
         std::size_t n = plegma_result_members(result.get(), part, &ids);
-        out.members.emplace_back(ids, ids + n);
+        if (n > 0 && ids) {
+            out.members.emplace_back(ids, ids + n);
+        } else {
+            out.members.emplace_back();
+        }
     }
     for (std::size_t r = 0; r < count; r++) {
         plegma_placement held{};
@@ -228,6 +240,10 @@ inline Clustering clusteredConsensus(const std::vector<Read>& reads, const Model
     std::vector<std::size_t> lengths;
     std::vector<std::int32_t> anchors;
     std::vector<std::int32_t> strands;
+    sequences.reserve(reads.size());
+    lengths.reserve(reads.size());
+    anchors.reserve(reads.size());
+    strands.reserve(reads.size());
     for (const Read& read : reads) {
         sequences.push_back(reinterpret_cast<const std::uint8_t*>(read.sequence.data()));
         lengths.push_back(read.sequence.size());
@@ -251,6 +267,11 @@ inline Clustering phasedConsensus(const std::vector<Read>& reads, const std::vec
     std::vector<const std::uint8_t*> sequences;
     std::vector<std::size_t> lengths;
     std::vector<std::int32_t> anchors, strands, haps;
+    sequences.reserve(reads.size());
+    lengths.reserve(reads.size());
+    anchors.reserve(reads.size());
+    strands.reserve(reads.size());
+    haps.reserve(reads.size());
     for (std::size_t r = 0; r < reads.size(); r++) {
         sequences.push_back(reinterpret_cast<const std::uint8_t*>(reads[r].sequence.data()));
         lengths.push_back(reads[r].sequence.size());
@@ -266,47 +287,66 @@ inline Clustering phasedConsensus(const std::vector<Read>& reads, const std::vec
 }
 
 namespace detail {
+struct ResultBatchGuard {
+    std::vector<plegma_result*> raw;
+    explicit ResultBatchGuard(std::size_t n) : raw(n, nullptr) {}
+    ~ResultBatchGuard()
+    {
+        for (plegma_result* r : raw) {
+            if (r) plegma_result_free(r);
+        }
+    }
+    plegma_result* take(std::size_t i)
+    {
+        plegma_result* r = raw[i];
+        raw[i] = nullptr;
+        return r;
+    }
+};
+
 struct PackedBatch {
-    std::vector<std::vector<const std::uint8_t*>> sequences;
-    std::vector<std::vector<std::size_t>> lengths;
-    std::vector<std::vector<std::int32_t>> anchors;
-    std::vector<std::vector<std::int32_t>> strands;
-    std::vector<std::vector<std::int32_t>> haps;
+    std::vector<const std::uint8_t*> sequences;
+    std::vector<std::size_t> lengths;
+    std::vector<std::int32_t> anchors;
+    std::vector<std::int32_t> strands;
+    std::vector<std::int32_t> haps;
     std::vector<plegma_locus> loci;
 
     explicit PackedBatch(const std::vector<std::vector<Read>>& batch,
                          const std::vector<std::vector<int>>* haplotypesBatch = nullptr)
     {
         const std::size_t n = batch.size();
-        sequences.resize(n);
-        lengths.resize(n);
-        anchors.resize(n);
-        strands.resize(n);
-        if (haplotypesBatch) haps.resize(n);
-        loci.resize(n);
+        std::size_t total = 0;
         for (std::size_t i = 0; i < n; i++) {
-            const auto& reads = batch[i];
-            if (haplotypesBatch && (*haplotypesBatch)[i].size() != reads.size()) {
+            if (haplotypesBatch && (*haplotypesBatch)[i].size() != batch[i].size()) {
                 throw std::runtime_error("plegma: one haplotype per read");
             }
-            sequences[i].reserve(reads.size());
-            lengths[i].reserve(reads.size());
-            anchors[i].reserve(reads.size());
-            strands[i].reserve(reads.size());
-            if (haplotypesBatch) haps[i].reserve(reads.size());
+            total += batch[i].size();
+        }
+        sequences.reserve(total);
+        lengths.reserve(total);
+        anchors.reserve(total);
+        strands.reserve(total);
+        if (haplotypesBatch) haps.reserve(total);
+        loci.resize(n);
+        std::size_t offset = 0;
+        for (std::size_t i = 0; i < n; i++) {
+            const auto& reads = batch[i];
             for (std::size_t r = 0; r < reads.size(); r++) {
-                sequences[i].push_back(reinterpret_cast<const std::uint8_t*>(reads[r].sequence.data()));
-                lengths[i].push_back(reads[r].sequence.size());
-                anchors[i].push_back(static_cast<std::int32_t>(reads[r].anchor));
-                strands[i].push_back(static_cast<std::int32_t>(reads[r].strand));
-                if (haplotypesBatch) haps[i].push_back(static_cast<std::int32_t>((*haplotypesBatch)[i][r]));
+                sequences.push_back(reinterpret_cast<const std::uint8_t*>(reads[r].sequence.data()));
+                lengths.push_back(reads[r].sequence.size());
+                anchors.push_back(static_cast<std::int32_t>(reads[r].anchor));
+                strands.push_back(static_cast<std::int32_t>(reads[r].strand));
+                if (haplotypesBatch) haps.push_back(static_cast<std::int32_t>((*haplotypesBatch)[i][r]));
             }
+            const bool any = !reads.empty();
             loci[i] = {reads.size(),
-                       sequences[i].data(),
-                       lengths[i].data(),
-                       anchors[i].data(),
-                       strands[i].data(),
-                       haplotypesBatch ? haps[i].data() : nullptr};
+                       any ? sequences.data() + offset : nullptr,
+                       any ? lengths.data() + offset : nullptr,
+                       any ? anchors.data() + offset : nullptr,
+                       any ? strands.data() + offset : nullptr,
+                       (any && haplotypesBatch) ? haps.data() + offset : nullptr};
+            offset += reads.size();
         }
     }
 };
@@ -319,29 +359,28 @@ inline std::vector<std::vector<std::string>> consensusBatch(const std::vector<st
 {
     if (batch.empty()) return {};
     detail::PackedBatch packed(batch);
-    std::vector<plegma_result*> raw(batch.size(), nullptr);
+    detail::ResultBatchGuard guard(batch.size());
     plegma_consensus_batch(batch.size(), packed.loci.data(), model ? model->get() : nullptr, &options.values,
-                           raw.data());
+                           guard.raw.data());
     std::vector<std::vector<std::string>> out;
     out.reserve(batch.size());
-    std::string firstError;
     for (std::size_t i = 0; i < batch.size(); i++) {
-        std::unique_ptr<plegma_result, void (*)(plegma_result*)> result(raw[i], plegma_result_free);
-        if (firstError.empty()) {
-            if (const char* error = plegma_result_error(result.get())) {
-                firstError = std::string("plegma: ") + error;
+        plegma_result* res = guard.raw[i];
+        if (const char* error = plegma_result_error(res)) {
+            throw std::runtime_error(std::string("plegma: ") + error);
+        }
+        std::vector<std::string> parts;
+        for (std::size_t part = 0; part < plegma_result_parts(res); part++) {
+            std::size_t length = 0;
+            const std::uint8_t* letters = plegma_result_sequence(res, part, &length);
+            if (length > 0 && letters) {
+                parts.emplace_back(reinterpret_cast<const char*>(letters), length);
             } else {
-                std::vector<std::string> parts;
-                for (std::size_t part = 0; part < plegma_result_parts(result.get()); part++) {
-                    std::size_t length = 0;
-                    const std::uint8_t* letters = plegma_result_sequence(result.get(), part, &length);
-                    parts.emplace_back(reinterpret_cast<const char*>(letters), length);
-                }
-                out.push_back(std::move(parts));
+                parts.emplace_back();
             }
         }
+        out.push_back(std::move(parts));
     }
-    if (!firstError.empty()) throw std::runtime_error(firstError);
     return out;
 }
 
@@ -353,24 +392,14 @@ inline std::vector<Clustering> clusteredConsensusBatch(const std::vector<std::ve
 {
     if (batch.empty()) return {};
     detail::PackedBatch packed(batch);
-    std::vector<plegma_result*> raw(batch.size(), nullptr);
+    detail::ResultBatchGuard guard(batch.size());
     plegma_clustered_consensus_batch(batch.size(), packed.loci.data(), model ? model->get() : nullptr, &options.values,
-                                     maxClusters, minFreq, raw.data());
+                                     maxClusters, minFreq, guard.raw.data());
     std::vector<Clustering> out;
     out.reserve(batch.size());
-    std::string firstError;
     for (std::size_t i = 0; i < batch.size(); i++) {
-        if (firstError.empty()) {
-            try {
-                out.push_back(detail::clustering(raw[i], batch[i].size()));
-            } catch (const std::runtime_error& e) {
-                firstError = e.what();
-            }
-        } else {
-            plegma_result_free(raw[i]);
-        }
+        out.push_back(detail::clustering(guard.take(i), batch[i].size()));
     }
-    if (!firstError.empty()) throw std::runtime_error(firstError);
     return out;
 }
 
@@ -382,24 +411,14 @@ inline std::vector<Clustering> phasedConsensusBatch(const std::vector<std::vecto
     if (haplotypesBatch.size() != batch.size()) throw std::runtime_error("plegma: one haplotype list per locus");
     if (batch.empty()) return {};
     detail::PackedBatch packed(batch, &haplotypesBatch);
-    std::vector<plegma_result*> raw(batch.size(), nullptr);
+    detail::ResultBatchGuard guard(batch.size());
     plegma_phased_consensus_batch(batch.size(), packed.loci.data(), model ? model->get() : nullptr, &options.values,
-                                  raw.data());
+                                  guard.raw.data());
     std::vector<Clustering> out;
     out.reserve(batch.size());
-    std::string firstError;
     for (std::size_t i = 0; i < batch.size(); i++) {
-        if (firstError.empty()) {
-            try {
-                out.push_back(detail::clustering(raw[i], batch[i].size()));
-            } catch (const std::runtime_error& e) {
-                firstError = e.what();
-            }
-        } else {
-            plegma_result_free(raw[i]);
-        }
+        out.push_back(detail::clustering(guard.take(i), batch[i].size()));
     }
-    if (!firstError.empty()) throw std::runtime_error(firstError);
     return out;
 }
 

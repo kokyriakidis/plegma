@@ -117,9 +117,11 @@ def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10, threads: Int 
                     var either = len(keys[i]) + len(keys[j]) - both
                     var value = Float64(both) / Float64(either) if either > 0 else 0.0
                     sim_p[unsafe_offset=i * n + j] = value
-                    sim_p[unsafe_offset=j * n + i] = value
 
         spread(pairwise, workers, workers)
+        for i in range(n):
+            for j in range(i + 1, n):
+                similar[j * n + i] = similar[i * n + j]
     else:
         for i in range(n):
             for j in range(i + 1, n):
@@ -142,9 +144,7 @@ def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10, threads: Int 
             var a = i if ahead(i, j) else j
             var b = j if a == i else i
             # As similar: the pair whose first goes before the other pair's first, then whose second does.
-            if value > best or (
-                value == best and (ahead(a, first) and a != first or (a == first and b != second and ahead(b, second)))
-            ):
+            if value > best or (value == best and (ahead(a, first) or (not ahead(first, a) and ahead(b, second)))):
                 best = value
                 first = a
                 second = b

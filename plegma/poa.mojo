@@ -103,6 +103,8 @@ struct PoaOptions(Copyable, Movable):
         var s = self.scoring
         if s.match_score < 0 or s.mismatch < 0 or s.open1 < 0 or s.open2 < 0 or s.extend1 <= 0 or s.extend2 < 0:
             raise Error("scoring: match, mismatch and gap opens must be 0 or more, the first gap extension more than 0")
+        if s.convex() and s.extend1 < s.extend2:
+            raise Error("scoring: gap_extend1 must be at least gap_extend2 for two-piece gaps")
         if not isfinite(self.band_f) or self.band_f < 0:
             raise Error(t"band_f {self.band_f}: must be 0 or more")
         if self.order != INPUT_ORDER and self.order != GUIDE_ORDER and self.order != LONGEST_FIRST:
@@ -178,7 +180,7 @@ struct PoaScratch(Movable):
         self.bfs_work = List[Int]()
 
     def order_of(mut self, graph: Graph) raises -> ref[self.topology.order] List[Int]:
-        self.topology.compute(graph, self.topo_in, self.topo_ready)
+        self.topology.compute_order(graph, self.topo_in, self.topo_ready)
         return self.topology.order
 
     def _ensure_full_topology(mut self, graph: Graph, mut topo_ver: Int, mut weight_ver: Int) raises:
@@ -753,21 +755,33 @@ def poa_with_scratch(
         var sp_p = side_parts.unsafe_ptr()
         var sr_p = side_reaches.unsafe_ptr()
         var sf_p = side_failed.unsafe_ptr()
-        var side_options = options.copy()
-        side_options.threads = max(1, options.threads // 2)
+        var total_t = options.threads
+        var left_bases = 0
+        for r in left:
+            left_bases += len(seqs[r])
+        var right_bases = 0
+        for r in right:
+            right_bases += len(seqs[r])
+        var total_b = max(1, left_bases + right_bases)
+        var t_left = max(1, min(total_t - 1, (total_t * left_bases + total_b // 2) // total_b))
+        var t_right = total_t - t_left
+        var left_options = options.copy()
+        left_options.threads = t_left
+        var right_options = options.copy()
+        right_options.threads = t_right
 
         def build_side(
             which: Int,
-        ) {imm names, imm seqs, imm left, imm right, imm side_options, imm sp_p, imm sr_p, imm sf_p}:
+        ) {imm names, imm seqs, imm left, imm right, imm left_options, imm right_options, imm sp_p, imm sr_p, imm sf_p}:
             var local_aligner = PoaScratch()
             try:
                 if which == 0:
-                    var side = _one_side(names, seqs, left, side_options, PREFIX, local_aligner)
+                    var side = _one_side(names, seqs, left, left_options, PREFIX, local_aligner)
                     var path = side[0].heaviest_path(local_aligner.order_of(side[0]), side[1], ANCHOR_SPREAD)
                     sp_p[unsafe_offset=0] = _letters(side[0], path)
                     sr_p[unsafe_offset=0] = read_reach(side[0], path, side[1], True)
                 else:
-                    var side = _one_side(names, seqs, right, side_options, SUFFIX, local_aligner)
+                    var side = _one_side(names, seqs, right, right_options, SUFFIX, local_aligner)
                     var path = side[0].heaviest_path_backward(local_aligner.order_of(side[0]), side[1], ANCHOR_SPREAD)
                     sp_p[unsafe_offset=1] = _letters(side[0], path)
                     sr_p[unsafe_offset=1] = read_reach(side[0], path, side[1], False)
@@ -800,6 +814,14 @@ def poa_with_scratch(
             var path = side[0].heaviest_path_backward(aligner.order_of(side[0]), side[1], ANCHOR_SPREAD)
             parts.append(_letters(side[0], path))
             right_reach = read_reach(side[0], path, side[1], False)
+    if len(parts) == 0:
+        _add_strays(graph, names, seqs, strays, options, path_of, aligner)
+        for r in range(len(seqs)):
+            shown.append(path_of[r])
+        var out = Poa(graph^, shown^, spanning^)
+        out.foreign = strays.copy()
+        out.anchors = as_built(anchor_of)
+        return out^
     if len(parts) == 2:
         var joined = join_sides(karan_aligner, parts[0], parts[1], left_reach, right_reach, options.threads)
         trace.line(
@@ -884,10 +906,16 @@ def _maybe_prefetch(
     order: List[Int],
     idx: Int,
     options: PoaOptions,
+    mode: Int,
     mut prev_consensus: List[UInt8],
 ):
     """Triggers a parallel speculative pin prefetch over `order[idx + 1:]` once the consensus path stabilizes."""
-    if not options.seeded or options.threads <= 1 or options.batch_size > 1:
+    if (
+        not options.seeded
+        or options.threads <= 1
+        or options.batch_size > 1
+        or not (mode == GLOBAL or mode == PREFIX or mode == SUFFIX)
+    ):
         return
     if len(aligner.scratch.hp_letters) == 0:
         return
@@ -919,14 +947,17 @@ def _add_spanning(
     aligner.scratch.clear_precomp()
 
     var seq_limit = len(order) if options.batch_size <= 1 else min(_BATCH_WARMUP, len(order))
-    for idx in range(seq_limit):
-        var r = order[idx]
+    var pos = 0
+    while pos < len(order) and (pos < seq_limit or len(graph) == 0):
+        var r = order[pos]
         if len(graph) == 0:
             path_of[r] = graph.add(names[r], Span(seqs[r]))
             if not options.strand:
                 seen[String(unsafe_from_utf8=seqs[r])] = r
+            pos += 1
             continue
         if not options.strand and _twin(graph, names, seqs, r, seen, path_of):
+            pos += 1
             continue
         var found = aligner._align_tracked(
             graph, seqs[r], options, options.mode, empty_anchors, r, topo_ver, weight_ver
@@ -946,9 +977,9 @@ def _add_spanning(
         path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
         if not options.strand:
             seen[String(unsafe_from_utf8=seqs[r])] = r
-        _maybe_prefetch(aligner, seqs, order, idx, options, prev_consensus)
+        _maybe_prefetch(aligner, seqs, order, pos, options, options.mode, prev_consensus)
+        pos += 1
 
-    var pos = seq_limit
     while pos < len(order):
         var end = min(pos + options.batch_size, len(order))
         var unique_reads = List[Int]()
@@ -1038,7 +1069,7 @@ def _add_anchored(
             var found = aligner._align_tracked(graph, seqs[r], options, mode, anchors, r, topo_ver, weight_ver)
             path_of[r] = graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes)
             seen[String(unsafe_from_utf8=seqs[r])] = r
-            _maybe_prefetch(aligner, seqs, order, idx, options, prev_consensus)
+            _maybe_prefetch(aligner, seqs, order, idx, options, mode, prev_consensus)
         return
 
     var pos = 0
@@ -1124,16 +1155,18 @@ def _one_side(
     aligner.scratch.clear_precomp()
 
     var seq_limit = len(order) if options.batch_size <= 1 else min(_BATCH_WARMUP, len(order))
-    for k in range(seq_limit):
-        var r = order[k]
-        if k == 0:
+    var pos = 0
+    while pos < len(order) and (pos < seq_limit or len(graph) == 0):
+        var r = order[pos]
+        if len(graph) == 0:
             paths.append(graph.add(names[r], Span(seqs[r])))
+            pos += 1
             continue
         var found = aligner._align_tracked(graph, seqs[r], options, mode, empty_anchors, r, topo_ver, weight_ver)
         paths.append(graph.fuse_nodes(names[r], Span(seqs[r]), found.nodes))
-        _maybe_prefetch(aligner, seqs, order, k, options, prev_consensus)
+        _maybe_prefetch(aligner, seqs, order, pos, options, mode, prev_consensus)
+        pos += 1
 
-    var pos = seq_limit
     while pos < len(order):
         var end = min(pos + options.batch_size, len(order))
         var batch_reads = List[Int](capacity=end - pos)
@@ -1171,7 +1204,8 @@ def _longest_first(seqs: List[List[UInt8]], reads: List[Int]) -> List[Int]:
     """`reads` longest first, input order among equals."""
     var keys = List[UInt64]()
     for r in reads:
-        keys.append((UInt64((1 << 32) - len(seqs[r])) << 32) | UInt64(r))
+        var inv_len = UInt64(0xFFFFFFFF - min(len(seqs[r]), 0xFFFFFFFF))
+        keys.append((inv_len << 32) | UInt64(r))
     sort(keys)
     var out = List[Int](capacity=len(keys))
     for key in keys:

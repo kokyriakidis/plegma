@@ -293,6 +293,11 @@ def _align_group_reads(
     var out = List[Alignment](capacity=n)
     var workers = thread_count(threads, n)
     if workers > 1 and n >= 2:
+        var order = List[UInt64](capacity=n)
+        for k in range(n):
+            order.append((UInt64(len(seqs[reads[k]])) << 32) | UInt64(k))
+        sort(order)
+        order.reverse()
         var results = List[Optional[Alignment]](length=n, fill=None)
         var failed = List[Bool](length=n, fill=False)
         var results_p = results.unsafe_ptr()
@@ -301,12 +306,13 @@ def _align_group_reads(
 
         def align_worker(
             slot: Int,
-        ) {mut taken, imm n, imm consensus, imm seqs, imm reads, imm anchors, imm results_p, imm failed_p}:
+        ) {mut taken, imm order, imm consensus, imm seqs, imm reads, imm anchors, imm results_p, imm failed_p}:
             var local_aligner = Aligner(warm=False)
             while True:
-                var k = Int(taken.fetch_add(1))
-                if k >= n:
+                var pos = Int(taken.fetch_add(1))
+                if pos >= len(order):
                     return
+                var k = Int(order[pos] & 0xFFFFFFFF)
                 var r = reads[k]
                 try:
                     results_p[unsafe_offset=k] = local_aligner.align(
@@ -382,11 +388,17 @@ def _two_lengths_from(
         shorter = min(run_length[0], run_length[1])
         longer = max(run_length[0], run_length[1])
         return Float64.MAX if longer - shorter > 1 else -Float64.MAX
+    var n_len = len(lengths)
+    var n_span = high - low + 1
+    var lp = List[Float64](length=n_span * n_len, fill=0.0)
     var one = -Float64.MAX
     for n in range(low, high + 1):
+        var row = (n - low) * n_len
         var total = 0.0
-        for k in range(len(lengths)):
-            total += model.log_probability(base, lefts[k], rights[k], n, lengths[k], on[k])
+        for k in range(n_len):
+            var v = model.log_probability(base, lefts[k], rights[k], n, lengths[k], on[k])
+            lp[row + k] = v
+            total += v
         if total >= one:
             one = total
             single = n
@@ -394,11 +406,13 @@ def _two_lengths_from(
     shorter = run_length[0]
     longer = run_length[0] + 1
     for n1 in range(low, high + 1):
+        var row1 = (n1 - low) * n_len
         for n2 in range(n1 + 1, high + 1):
+            var row2 = (n2 - low) * n_len
             var total = 0.0
-            for k in range(len(lengths)):
-                var x = model.log_probability(base, lefts[k], rights[k], n1, lengths[k], on[k])
-                var y = model.log_probability(base, lefts[k], rights[k], n2, lengths[k], on[k])
+            for k in range(n_len):
+                var x = lp[row1 + k]
+                var y = lp[row2 + k]
                 var top = max(x, y)
                 total += top + 10.0 * log10(0.5 * 10.0 ** ((x - top) / 10.0) + 0.5 * 10.0 ** ((y - top) / 10.0))
             if total > two:
@@ -510,6 +524,8 @@ def _best_length(
     var best = -1
     score = -Float64.MAX
     for n in range(low, high + 1):
+        if not model.covers(base, n):
+            continue
         var total = 0.0
         var any = False
         for k in range(len(reads)):
@@ -541,6 +557,8 @@ def _best_shared_length(
     var best = -1
     score = -Float64.MAX
     for n in range(low, high + 1):
+        if not model.covers(base, n):
+            continue
         var total = 0.0
         var any = False
         for k in range(len(reads0)):

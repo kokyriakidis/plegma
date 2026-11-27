@@ -185,30 +185,56 @@ def plegma_options_init(settings: Settings) abi("C"):
     """`settings` filled with the defaults (nothing for a null pointer)."""
     if not settings:
         return
-    _options_init(settings.value())
+    _options_init_sized(settings.value(), _OPTIONS_SIZE)
 
 
-def _options_init(settings: Bytes):
+@export
+def plegma_options_init_sized(settings: Settings, struct_size: Int) abi("C"):
+    """`settings` filled with the defaults for all fields fitting within `struct_size` bytes."""
+    if not settings or struct_size < 4:
+        return
+    _options_init_sized(settings.value(), struct_size)
+
+
+def _options_init_sized(settings: Bytes, struct_size: Int):
     var defaults = ConsensusOptions()
-    settings.unsafe_bitcast[UInt32]()[] = UInt32(_OPTIONS_SIZE)
-    _set_int(settings, _POLISH_ROUNDS, defaults.polish_rounds)
-    _set_int(settings, _LIKELY_ROUNDS, defaults.likely_rounds)
-    _set_int(settings, _PINNED, 1 if defaults.poa.seeded else 0)
-    _set_int(settings, _MIN_COVER, defaults.poa.min_cover)
+    var written = min(struct_size, _OPTIONS_SIZE)
+    settings.unsafe_bitcast[UInt32]()[] = UInt32(written)
+    if _POLISH_ROUNDS.offset + 4 <= written:
+        _set_int(settings, _POLISH_ROUNDS, defaults.polish_rounds)
+    if _LIKELY_ROUNDS.offset + 4 <= written:
+        _set_int(settings, _LIKELY_ROUNDS, defaults.likely_rounds)
+    if _PINNED.offset + 4 <= written:
+        _set_int(settings, _PINNED, 1 if defaults.poa.seeded else 0)
+    if _MIN_COVER.offset + 4 <= written:
+        _set_int(settings, _MIN_COVER, defaults.poa.min_cover)
     ref scoring = defaults.poa.scoring
-    _set_int(settings, _MATCH, Int(scoring.match_score))
-    _set_int(settings, _MISMATCH, Int(scoring.mismatch))
-    _set_int(settings, _GAP_OPEN1, Int(scoring.open1))
-    _set_int(settings, _GAP_EXTEND1, Int(scoring.extend1))
-    _set_int(settings, _GAP_OPEN2, Int(scoring.open2))
-    _set_int(settings, _GAP_EXTEND2, Int(scoring.extend2))
-    _set_int(settings, _BAND_B, defaults.poa.band_b)
-    settings.unsafe_offset(_BAND_F.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.poa.band_f)
-    _set_int(settings, _BAND_MAX, defaults.poa.band_max)
-    _set_int(settings, _NOISE_RUN, defaults.noise_run)
-    settings.unsafe_offset(_TWO_LENGTHS_DB.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.two_lengths_db)
-    _set_int(settings, _THREADS, defaults.poa.threads)
-    _set_int(settings, _BATCH_SIZE, defaults.poa.batch_size)
+    if _MATCH.offset + 4 <= written:
+        _set_int(settings, _MATCH, Int(scoring.match_score))
+    if _MISMATCH.offset + 4 <= written:
+        _set_int(settings, _MISMATCH, Int(scoring.mismatch))
+    if _GAP_OPEN1.offset + 4 <= written:
+        _set_int(settings, _GAP_OPEN1, Int(scoring.open1))
+    if _GAP_EXTEND1.offset + 4 <= written:
+        _set_int(settings, _GAP_EXTEND1, Int(scoring.extend1))
+    if _GAP_OPEN2.offset + 4 <= written:
+        _set_int(settings, _GAP_OPEN2, Int(scoring.open2))
+    if _GAP_EXTEND2.offset + 4 <= written:
+        _set_int(settings, _GAP_EXTEND2, Int(scoring.extend2))
+    if _BAND_B.offset + 4 <= written:
+        _set_int(settings, _BAND_B, defaults.poa.band_b)
+    if _BAND_F.offset + 4 <= written:
+        settings.unsafe_offset(_BAND_F.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.poa.band_f)
+    if _BAND_MAX.offset + 4 <= written:
+        _set_int(settings, _BAND_MAX, defaults.poa.band_max)
+    if _NOISE_RUN.offset + 4 <= written:
+        _set_int(settings, _NOISE_RUN, defaults.noise_run)
+    if _TWO_LENGTHS_DB.offset + 4 <= written:
+        settings.unsafe_offset(_TWO_LENGTHS_DB.offset).unsafe_bitcast[Float32]()[] = Float32(defaults.two_lengths_db)
+    if _THREADS.offset + 4 <= written:
+        _set_int(settings, _THREADS, defaults.poa.threads)
+    if _BATCH_SIZE.offset + 4 <= written:
+        _set_int(settings, _BATCH_SIZE, defaults.poa.batch_size)
 
 
 @export
@@ -232,11 +258,14 @@ def plegma_model_parse(
     error: OptionalPointer[UInt8, MutUntrackedOrigin],
     error_size: Int,
 ) abi("C") -> OptionalPointer[HomopolymerModel, MutUntrackedOrigin]:
+    if length < 0 or length >= _TOO_MANY:
+        _write_error("plegma_model_parse: length out of range", error, error_size)
+        return None
     if not text and length > 0:
         _write_error("plegma_model_parse: no text", error, error_size)
         return None
     try:
-        return _box(HomopolymerModel.parse(_text(text.value(), length) if text else String()))
+        return _box(HomopolymerModel.parse(_text(text.value(), length) if text and length > 0 else String()))
     except e:
         _write_error(String(e), error, error_size)
         return None
@@ -601,7 +630,7 @@ def _run_batch(
     results: ResultOut,
 ):
     """Shared parallel batch dispatcher for `kind` 0 (consensus), 1 (clustered), 2 (phased)."""
-    if batch_size <= 0 or not results:
+    if batch_size <= 0 or batch_size >= _TOO_MANY or not results:
         return
     var out_p = results.value()
     if not loci:
@@ -777,6 +806,13 @@ def plegma_result_sequence(
     ref parts = result.value()[].parts
     if length:
         length.value()[] = len(parts[part])
+    if len(parts[part]) == 0:
+        return (
+            _VERSION.ptr()
+            .unsafe_offset(_VERSION.byte_length() - 1)
+            .unsafe_mut_cast[True]()
+            .unsafe_origin_cast[MutUntrackedOrigin]()
+        )
     return parts[part].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
 

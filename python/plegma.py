@@ -72,6 +72,7 @@ class _Options(ctypes.Structure):
 
 
 _OPTION_NAMES = [name for name, _ in _Options._fields_ if name != "size"]
+_INT_OPTION_NAMES = {name for name, ctype in _Options._fields_ if ctype is ctypes.c_int32}
 
 
 class _Placement(ctypes.Structure):
@@ -110,6 +111,8 @@ def _library():
     lib.plegma_version.argtypes = []
     lib.plegma_options_init.restype = None
     lib.plegma_options_init.argtypes = [ctypes.POINTER(_Options)]
+    lib.plegma_options_init_sized.restype = None
+    lib.plegma_options_init_sized.argtypes = [ctypes.POINTER(_Options), ctypes.c_size_t]
     lib.plegma_model_load.restype = p
     lib.plegma_model_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
     lib.plegma_model_parse.restype = p
@@ -217,9 +220,9 @@ class Model:
         return cls(handle)
 
     def close(self):
-        if self._handle:
-            self._free(self._handle)
-            self._handle = None
+        handle, self._handle = self._handle, None
+        if handle:
+            self._free(handle)
 
     def __enter__(self):
         return self
@@ -239,9 +242,9 @@ class Scratch:
         self._free = _lib.plegma_scratch_free
 
     def close(self):
-        if self._handle:
-            self._free(self._handle)
-            self._handle = None
+        handle, self._handle = self._handle, None
+        if handle:
+            self._free(handle)
 
     def __enter__(self):
         return self
@@ -272,30 +275,43 @@ def _int32s(values, what):
     return (ctypes.c_int32 * len(values))(*[_int32(int(v), what) for v in values])
 
 
+def _handle_of(obj, what):
+    if obj is None:
+        return None
+    if obj._handle is None:
+        raise ValueError(f"{what} is closed")
+    return obj._handle
+
+
+def _build_settings(options, caller):
+    settings = _Options()
+    _lib.plegma_options_init_sized(ctypes.byref(settings), ctypes.sizeof(settings))
+    for name, value in options.items():
+        if name not in _OPTION_NAMES:
+            raise TypeError(f"{caller}() got an unexpected option {name!r}")
+        value = int(value) if name == "pinned" else value
+        if name in _INT_OPTION_NAMES and isinstance(value, int):
+            _int32(value, name)
+        setattr(settings, name, value)
+    return settings
+
+
 class _Reads:
     """The arguments every consensus call takes, as the C API takes them (kept alive while the call runs)."""
 
-    def __init__(self, reads, anchors, strands, model, options, caller):
+    def __init__(self, reads, anchors, strands, model, options, caller, build_settings=True):
         letters = [r.encode() if isinstance(r, str) else bytes(r) for r in reads]
         self.count = len(letters)
         if anchors is not None and len(anchors) != self.count:
             raise ValueError(f"{len(anchors)} anchors for {self.count} reads")
         if strands is not None and len(strands) != self.count:
             raise ValueError(f"{len(strands)} strands for {self.count} reads")
-        self.settings = _Options()
-        _lib.plegma_options_init(ctypes.byref(self.settings))
-        for name, value in options.items():
-            if name not in _OPTION_NAMES:
-                raise TypeError(f"{caller}() got an unexpected option {name!r}")
-            value = int(value) if name == "pinned" else value
-            if isinstance(value, int):
-                _int32(value, name)
-            setattr(self.settings, name, value)
+        self.settings = _build_settings(options, caller) if build_settings else None
         self.sequences = (ctypes.c_char_p * self.count)(*letters)
         self.lengths = (ctypes.c_size_t * self.count)(*[len(s) for s in letters])
         self.anchors = None if anchors is None else _int32s([_anchor(a) for a in anchors], "anchor")
         self.strands = None if strands is None else _int32s([UNKNOWN if s is None else int(s) for s in strands], "strand")
-        self.model = model._handle if model is not None else None
+        self.model = _handle_of(model, "Model")
 
     def head(self):
         return (self.count, self.sequences, self.lengths, self.anchors, self.strands)
@@ -321,10 +337,10 @@ def consensus(reads, anchors=None, strands=None, model=None, scratch=None, **opt
     or None (unknown), for the homopolymer model; None: all unknown. model: a Model. scratch: an optional Scratch
     reused across calls. options: plegma_options' fields by name (polish_rounds, likely_rounds, pinned, min_cover,
     match, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2, band_b, band_f, band_max, noise_run,
-    two_lengths_db, threads; see capi/plegma.h), plegma poa's defaults otherwise.
+    two_lengths_db, threads, batch_size; see capi/plegma.h), plegma poa's defaults otherwise.
     """
     given = _Reads(reads, anchors, strands, model, options, "consensus")
-    scratch_h = scratch._handle if scratch is not None else None
+    scratch_h = _handle_of(scratch, "Scratch")
     result = _lib.plegma_consensus_with_scratch(scratch_h, *given.head(), given.model, ctypes.byref(given.settings))
     try:
         return _parts(result)
@@ -364,11 +380,13 @@ class Clustered:
         for part in range(len(self.consensus)):
             ids = ctypes.POINTER(ctypes.c_int32)()
             n = _lib.plegma_result_members(result, part, ctypes.byref(ids))
-            self.members.append([ids[i] for i in range(n)])
+            self.members.append(list(ids[:n]) if n > 0 else [])
         self.placements = []
         for read in range(count):
             raw = _Placement()
             cigar = _lib.plegma_result_cigar(result, read, ctypes.byref(raw))
+            if not cigar:
+                raw.cluster = -1
             self.placements.append(Placement(raw, cigar.decode() if cigar else ""))
 
     def __repr__(self):
@@ -382,10 +400,11 @@ def clustered_consensus(
     `max_clusters`, each the consensus of the reads nearest it, a cluster with under `min_freq` of the reads joining
     another. Reads, anchors (also "inside": a read on neither anchor, aligned within a cluster's consensus), strands,
     model, scratch and options as `consensus` takes them. A Clustered."""
+    max_c = _int32(int(max_clusters), "max_clusters")
     given = _Reads(reads, anchors, strands, model, options, "clustered_consensus")
-    scratch_h = scratch._handle if scratch is not None else None
+    scratch_h = _handle_of(scratch, "Scratch")
     result = _lib.plegma_clustered_consensus_with_scratch(
-        scratch_h, *given.head(), given.model, ctypes.byref(given.settings), int(max_clusters), float(min_freq)
+        scratch_h, *given.head(), given.model, ctypes.byref(given.settings), max_c, float(min_freq)
     )
     try:
         return Clustered(result, given.count)
@@ -404,7 +423,7 @@ def phased_consensus(reads, haplotypes, anchors=None, strands=None, model=None, 
     if len(haplotypes) != given.count:
         raise ValueError(f"{len(haplotypes)} haplotypes for {given.count} reads")
     haps = _int32s([-1 if h is None else int(h) for h in haplotypes], "haplotype")
-    scratch_h = scratch._handle if scratch is not None else None
+    scratch_h = _handle_of(scratch, "Scratch")
     result = _lib.plegma_phased_consensus_with_scratch(
         scratch_h, *given.head(), haps, given.model, ctypes.byref(given.settings)
     )
@@ -422,21 +441,14 @@ def _pack_batch(reads_batch, anchors_batch, strands_batch, haplotypes_batch, mod
         raise ValueError(f"{len(strands_batch)} strand lists for {n} loci")
     if haplotypes_batch is not None and len(haplotypes_batch) != n:
         raise ValueError(f"{len(haplotypes_batch)} haplotype lists for {n} loci")
-    settings = _Options()
-    _lib.plegma_options_init(ctypes.byref(settings))
-    for name, value in options.items():
-        if name not in _OPTION_NAMES:
-            raise TypeError(f"{caller}() got an unexpected option {name!r}")
-        value = int(value) if name == "pinned" else value
-        if isinstance(value, int):
-            _int32(value, name)
-        setattr(settings, name, value)
+    model_h = _handle_of(model, "Model")
+    settings = _build_settings(options, caller)
     kept = []
     loci = (_Locus * n)()
     for i in range(n):
         anc = None if anchors_batch is None else anchors_batch[i]
         st = None if strands_batch is None else strands_batch[i]
-        g = _Reads(reads_batch[i], anc, st, model, {}, caller)
+        g = _Reads(reads_batch[i], anc, st, model, {}, caller, build_settings=False)
         haps = None
         if haplotypes_batch is not None:
             if len(haplotypes_batch[i]) != g.count:
@@ -444,7 +456,6 @@ def _pack_batch(reads_batch, anchors_batch, strands_batch, haplotypes_batch, mod
             haps = _int32s([-1 if h is None else int(h) for h in haplotypes_batch[i]], "haplotype")
         kept.append((g, haps))
         loci[i] = _Locus(g.count, g.sequences, g.lengths, g.anchors, g.strands, haps)
-    model_h = model._handle if model is not None else None
     return n, loci, kept, model_h, settings
 
 
@@ -469,6 +480,7 @@ def clustered_consensus_batch(
     reads_batch, anchors_batch=None, strands_batch=None, model=None, max_clusters=2, min_freq=0.25, **options
 ):
     """Runs `clustered_consensus` across multiple independent loci in parallel over `threads`."""
+    max_c = _int32(int(max_clusters), "max_clusters")
     n, loci, kept, model_h, settings = _pack_batch(
         reads_batch, anchors_batch, strands_batch, None, model, options, "clustered_consensus_batch"
     )
@@ -476,7 +488,7 @@ def clustered_consensus_batch(
         return []
     raw = (ctypes.c_void_p * n)()
     _lib.plegma_clustered_consensus_batch(
-        n, loci, model_h, ctypes.byref(settings), int(max_clusters), float(min_freq), raw
+        n, loci, model_h, ctypes.byref(settings), max_c, float(min_freq), raw
     )
     try:
         return [Clustered(raw[i], kept[i][0].count) for i in range(n)]

@@ -44,6 +44,7 @@ poa options:
                 letters or more takes its most likely length given the reads' lengths there (shasta2's msa1 repair),
                 each read on the strand its header says: strand=0 (as the consensus runs) or strand=1 (reverse-
                 complemented to it); both weighed alike without
+    --batch INT snapshot mini-batch size for parallel single-locus POA [1 = strict sequential]
 
 ref options:
     -F FILE     the reference's flanks (FASTA: left, then right): each alignment to the reference pinned as minimap2
@@ -52,7 +53,6 @@ ref options:
 
 Output options (both):
     -t INT      threads for parallel alignment, polishing, and listed files (-l) [1]
-    --batch INT snapshot mini-batch size for parallel single-locus POA [1 = strict sequential]
     -r INT      output [0]: 0 consensus FASTA, 1 MSA FASTA, 2 both, 3 GFA, 4 GFA with the consensus path
     -a INT      consensus [0]: 0 heaviest path, 1 most frequent letter per column
     -d INT      at most INT consensus sequences [1]; at 2 or more the sequences are clustered on the MSA's
@@ -136,15 +136,21 @@ def _float(args: List[String], i: Int) raises -> Float64:
         raise Error(t"{args[i]} takes a number, not '{text}'")
 
 
-def _pair(args: List[String], i: Int) raises -> Tuple[Int, Int]:
-    """`INT` or `INT,INT`; the second -1 when absent."""
+def _int32(args: List[String], i: Int, value: Int) raises -> Int32:
+    if value < -(1 << 31) or value >= (1 << 31):
+        raise Error(t"{args[i]} value {value}: out of 32-bit integer range")
+    return Int32(value)
+
+
+def _pair(args: List[String], i: Int) raises -> Tuple[Int, Bool, Int]:
+    """`INT` or `INT,INT`; second boolean says whether the second integer was given."""
     var text = _value(args, i)
     try:
         var parts = text.split(",")
         if len(parts) == 1:
-            return (Int(parts[0]), -1)
+            return (Int(parts[0]), False, 0)
         if len(parts) == 2:
-            return (Int(parts[0]), Int(parts[1]))
+            return (Int(parts[0]), True, Int(parts[1]))
     except:
         pass
     raise Error(t"{args[i]} takes INT or INT,INT, not '{text}'")
@@ -160,7 +166,7 @@ def _check(options: Options) raises:
         raise Error(t"-a {options.consensus_rule}: the consensus rules are 0 and 1")
     if options.max_consensus < 1:
         raise Error(t"-d {options.max_consensus}: at least one consensus sequence")
-    if options.min_freq < 0 or options.min_freq > 1:
+    if not (options.min_freq >= 0.0 and options.min_freq <= 1.0):
         raise Error(t"-q {options.min_freq}: a share between 0 and 1")
     if options.threads < 1:
         raise Error(t"-t {options.threads}: at least one thread")
@@ -182,19 +188,19 @@ def parse(args: List[String]) raises -> Options:
         if a == "-m" and not reference:
             poa.mode = _int(args, i)
         elif a == "-M" and not reference:
-            poa.scoring.match_score = Int32(_int(args, i))
+            poa.scoring.match_score = _int32(args, i, _int(args, i))
         elif a == "-X" and not reference:
-            poa.scoring.mismatch = Int32(_int(args, i))
+            poa.scoring.mismatch = _int32(args, i, _int(args, i))
         elif a == "-O" and not reference:
             var o = _pair(args, i)
-            poa.scoring.open1 = Int32(o[0])
-            if o[1] >= 0:
-                poa.scoring.open2 = Int32(o[1])
+            poa.scoring.open1 = _int32(args, i, o[0])
+            if o[1]:
+                poa.scoring.open2 = _int32(args, i, o[2])
         elif a == "-E" and not reference:
             var e = _pair(args, i)
-            poa.scoring.extend1 = Int32(e[0])
-            if e[1] >= 0:
-                poa.scoring.extend2 = Int32(e[1])
+            poa.scoring.extend1 = _int32(args, i, e[0])
+            if e[1]:
+                poa.scoring.extend2 = _int32(args, i, e[2])
         elif a == "-b" and not reference:
             poa.band_b = _int(args, i)
         elif a == "-f" and not reference:
@@ -225,8 +231,8 @@ def parse(args: List[String]) raises -> Options:
         elif a == "-P":
             var both = _pair(args, i)
             options.consensus.polish_rounds = both[0]
-            if both[1] >= 0:
-                options.consensus.likely_rounds = both[1]
+            if both[1]:
+                options.consensus.likely_rounds = both[2]
         elif a == "-d":
             options.max_consensus = _int(args, i)
         elif a == "-q":

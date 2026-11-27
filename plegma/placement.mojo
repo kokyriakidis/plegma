@@ -165,8 +165,10 @@ def _placed(
     var workers = thread_count(threads, n)
     if workers > 1 and n >= 2:
         var order = List[UInt64](capacity=n)
+        var n_clusters = max(1, len(out.consensus))
         for r in range(n):
-            order.append((UInt64(len(seqs[r])) << 32) | UInt64(r))
+            var weight_r = len(seqs[r]) * (n_clusters if cluster_of[r] < 0 else 1)
+            order.append((UInt64(weight_r) << 32) | UInt64(r))
         sort(order)
         order.reverse()
         var placements = List[Placement](length=n, fill=Placement(0, String(), 0, 0, 0, 0, 0, 0))

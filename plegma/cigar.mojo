@@ -38,6 +38,8 @@ def cigar_runs(cigar: StringSlice) raises -> Runs:
         runs.ops.append(c)
         runs.counts.append(length)
         length = 0
+    if length != 0:
+        raise Error(t"trailing length without an operation in {cigar}")
     return runs^
 
 

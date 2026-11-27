@@ -127,7 +127,16 @@ def _pairings(
         var whole_ref = _concat3(flanks[0], reference, flanks[1])
         var ref_index = ReferenceIndex(whole_ref)
         var workers = thread_count(threads, len(order))
-        var inner_threads = max(1, threads // max(1, workers))
+        if workers <= 1:
+            # Single sequence or single thread: let `pinned_pairing_with_index` parallelize its windows directly.
+            var aligner = Aligner(warm=False)
+            for k in range(len(order)):
+                var d = Int(order[k] & 0xFFFFFFFF)
+                partner[d] = pinned_pairing_with_index(
+                    aligner, ref_index, reference, seqs[distinct[d]], flanks[0], flanks[1], costs, threads
+                )
+            return partner^
+        # Multiple distinct sequences: keep inner_threads = 1 to avoid nested `spread` oversubscription/deadlock.
         var out = partner.unsafe_ptr()
         var failed = List[Bool](length=len(distinct), fill=False)
         var flags = failed.unsafe_ptr()
@@ -135,18 +144,7 @@ def _pairings(
 
         def pair_pinned(
             slot: Int,
-        ) {
-            mut taken,
-            imm order,
-            imm seqs,
-            imm distinct,
-            imm ref_index,
-            imm flanks,
-            imm costs,
-            imm inner_threads,
-            imm out,
-            imm flags,
-        }:
+        ) {mut taken, imm order, imm seqs, imm distinct, imm ref_index, imm flanks, imm costs, imm out, imm flags,}:
             var aligner = Aligner(warm=False)
             while True:
                 var k = Int(taken.fetch_add(1))
@@ -162,7 +160,7 @@ def _pairings(
                         flanks[0],
                         flanks[1],
                         costs,
-                        inner_threads,
+                        1,
                     )
                 except:
                     flags[unsafe_offset=d] = True
@@ -249,20 +247,21 @@ def _fall_back(
                 ),
             )
         return
-    trace.line(
-        REFERENCE,
-        String(
-            "fallback costs for ",
-            len(replaced),
-            " of ",
-            len(distinct) - 1,
-            " (stretches replaced, ",
-            inserted,
-            " of ",
-            letters,
-            " letters inserted)",
-        ),
-    )
+    if trace.on(REFERENCE):
+        trace.line(
+            REFERENCE,
+            String(
+                "fallback costs for ",
+                len(replaced),
+                " of ",
+                len(distinct) - 1,
+                " (stretches replaced, ",
+                inserted,
+                " of ",
+                letters,
+                " letters inserted)",
+            ),
+        )
     var workers = thread_count(threads, len(replaced))
     if workers > 1 and len(replaced) >= 2:
         var order = List[UInt64](capacity=len(replaced))
@@ -447,7 +446,7 @@ def _on_reference_columns(
     var n_jobs = len(jobs)
     var slot_workers = thread_count(threads, n_jobs)
     if slot_workers > 1 and n_jobs >= 2:
-        var sub_threads = max(1, threads // slot_workers)
+        var sub_threads = 1
         var subs = List[List[List[UInt8]]](length=n_jobs, fill=List[List[UInt8]]())
         var failed = List[Bool](length=n_jobs, fill=False)
         var subs_p = subs.unsafe_ptr()

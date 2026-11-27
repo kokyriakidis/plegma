@@ -81,9 +81,11 @@ def _score_edit_read(
     mut ahead: List[Int32],
     mut gains: List[Int32],
     mut block_gain: List[Int32],
+    gain_base: Int = 0,
+    block_base: Int = 0,
 ):
     """Scores one unique read `k` across segment `s..e`, accumulating weighted edit-distance gains into `gains` and
-    `block_gain`."""
+    `block_gain` (at `gain_base` / `block_base`)."""
     if paths.span_end[k] <= s or paths.span_start[k] >= e:
         return
     var columns = e - s + 1
@@ -100,7 +102,7 @@ def _score_edit_read(
             var i = s + c
             if i >= top or not site[i]:
                 continue
-            var row = c * SLOTS
+            var row = gain_base + c * SLOTS
             for x in range(4):
                 gains[row + x] -= wk
             if i < e:
@@ -109,7 +111,7 @@ def _score_edit_read(
                 for x in range(4):
                     gains[row + 5 + x] -= Int32(0) if x == own else wk
         for b in range(len(block_at)):
-            block_gain[b] -= wk * Int32(block_period[b])
+            block_gain[block_base + b] -= wk * Int32(block_period[b])
         return
     bands.fill(paths, k, s, e, first, last)
     forward.resize(bands.start[columns], INF)
@@ -173,7 +175,7 @@ def _score_edit_read(
             unread = min(unread, f + backward[at + first - lo])
             if i < e:
                 unread_next = min(unread_next, f + bands.at(backward, c + 1, first))
-        var row = c * SLOTS
+        var row = gain_base + c * SLOTS
         for x in range(4):
             gains[row + x] += wk * (base - min(min(kept + 1, unread), min(inserted + 1, inserted_by[x])))
         if i < e:
@@ -199,7 +201,9 @@ def _score_edit_read(
                 var letter = current[s + c - p + t]
                 for j in range(lo, wide + 1):
                     var v = copied[j - lo] + 1
-                    if free_end and j == last:
+                    if free_start and j == first:
+                        v = 0
+                    elif free_end and j == last:
                         v = copied[j - lo]
                     if j > lo:
                         v = min(v, copied[j - 1 - lo] + Int32(1 if seq[j - 1] != letter else 0))
@@ -208,7 +212,7 @@ def _score_edit_read(
                 swap(copied, ahead)
             for j in range(lo, hi + 1):
                 best = min(best, copied[j - lo] + backward[bands.start[c] + j - lo])
-        block_gain[b] += wk * (base - min(best, base + Int32(p)))
+        block_gain[block_base + b] += wk * (base - min(best, base + Int32(p)))
 
 
 def _pick_segment_edits(
@@ -220,19 +224,27 @@ def _pick_segment_edits(
     block_period: List[Int],
     block_copy: List[Bool],
     block_gain: List[Int32],
+    gain_base: Int = 0,
+    gain_len: Int = -1,
+    block_base: Int = 0,
 ) -> _SegmentEdits:
     """Selects the best non-overlapping (`APART` apart, or single if `alone`) edits for segment starting at `s`."""
     comptime LETTERS = "ACGT"
+    var n_gains = len(gains) if gain_len < 0 else gain_len
+    var cur_len = len(current)
     var keys = List[UInt64]()
-    for x in range(len(gains)):
+    for x in range(n_gains):
+        var gx = gains[gain_base + x]
         var slot = x % SLOTS
-        if gains[x] <= 0 or (slot >= 5 and _code(current[s + x // SLOTS]) == slot - 5):
+        var pos = s + x // SLOTS
+        if gx <= 0 or (slot >= 4 and pos >= cur_len) or (slot >= 5 and _code(current[pos]) == slot - 5):
             continue
-        keys.append((UInt64((1 << 24) - min(Int(gains[x]), (1 << 24) - 1)) << 32) | UInt64(x))
+        keys.append((UInt64((1 << 24) - min(Int(gx), (1 << 24) - 1)) << 32) | UInt64(x))
     for b in range(len(block_at)):
-        if block_gain[b] > 0:
-            var x = len(gains) + b
-            keys.append((UInt64((1 << 24) - min(Int(block_gain[b]), (1 << 24) - 1)) << 32) | UInt64(x))
+        var bg = block_gain[block_base + b]
+        if bg > 0:
+            var x = n_gains + b
+            keys.append((UInt64((1 << 24) - min(Int(bg), (1 << 24) - 1)) << 32) | UInt64(x))
     sort(keys)
     var out = _SegmentEdits()
     var chosen = List[Int]()
@@ -241,7 +253,7 @@ def _pick_segment_edits(
         var start: Int
         var end: Int
         var text = List[UInt8]()
-        if x < len(gains):
+        if x < n_gains:
             var slot = x % SLOTS
             start = s + x // SLOTS
             end = start if slot < 4 else start + 1
@@ -250,7 +262,7 @@ def _pick_segment_edits(
             elif slot > 4:
                 text.append(LETTERS.as_bytes()[slot - 5])
         else:
-            var b = x - len(gains)
+            var b = x - n_gains
             var i = block_at[b]
             var p = block_period[b]
             if block_copy[b]:
@@ -397,19 +409,20 @@ def polish_with_scratch(
         paths.fill(aligner, realigned, current, sequences, unique, anchors, weight, threads=threads)
         unchecked = False
         if paths.total >= previous_total:
-            trace.line(
-                POLISH,
-                String(
-                    "round ",
-                    round,
-                    ": edit distance ",
-                    paths.total,
-                    ", not under ",
-                    previous_total,
-                    "; the round reverted, ",
-                    "done" if one_each else "next one edit a segment",
-                ),
-            )
+            if trace.on(POLISH):
+                trace.line(
+                    POLISH,
+                    String(
+                        "round ",
+                        round,
+                        ": edit distance ",
+                        paths.total,
+                        ", not under ",
+                        previous_total,
+                        "; the round reverted, ",
+                        "done" if one_each else "next one edit a segment",
+                    ),
+                )
             current = previous^
             previous = List[UInt8]()
             if one_each:
@@ -441,12 +454,19 @@ def polish_with_scratch(
         var edit_start = List[Int]()
         var edit_end = List[Int]()
         var edit_text = List[List[UInt8]]()
-        var seg_workers = thread_count(threads, len(active))
-        if seg_workers > 1 and len(active) >= 2:
-            # Parallel across independent segments, reusing pooled worker DP buffers.
+        var n_active = len(active)
+        if threads > 1 and n_active >= 2 * threads:
+            # Plenty of independent segments to saturate all cores without cross-worker reduction.
+            var seg_workers = thread_count(threads, n_active)
             while len(scratch.edit_workers) < seg_workers:
                 scratch.edit_workers.append(_EditWorker())
-            var seg_edits = List[_SegmentEdits](length=len(active), fill=_SegmentEdits())
+            var seg_order = List[UInt64](capacity=n_active)
+            for idx in range(n_active):
+                var g = active[idx]
+                seg_order.append((UInt64(bounds[g + 1] - bounds[g]) << 32) | UInt64(idx))
+            sort(seg_order)
+            seg_order.reverse()
+            var seg_edits = List[_SegmentEdits](length=n_active, fill=_SegmentEdits())
             var seg_edits_p = seg_edits.unsafe_ptr()
             var pool_p = scratch.edit_workers.unsafe_ptr()
             var taken = Atomic[Int64](0)
@@ -455,6 +475,7 @@ def polish_with_scratch(
                 slot: Int,
             ) {
                 mut taken,
+                imm seg_order,
                 imm active,
                 imm bounds,
                 imm length,
@@ -472,9 +493,10 @@ def polish_with_scratch(
             }:
                 ref w = pool_p[unsafe_offset=slot]
                 while True:
-                    var idx = Int(taken.fetch_add(1))
-                    if idx >= len(active):
+                    var pos = Int(taken.fetch_add(1))
+                    if pos >= len(seg_order):
                         return
+                    var idx = Int(seg_order[pos] & 0xFFFFFFFF)
                     var g = active[idx]
                     var s = bounds[g]
                     var e = bounds[g + 1]
@@ -526,8 +548,162 @@ def polish_with_scratch(
                     )
 
             spread(score_edit_segments, seg_workers, seg_workers)
-            for idx in range(len(active)):
+            for idx in range(n_active):
                 ref se = seg_edits[idx]
+                for t in range(len(se.starts)):
+                    edit_start.append(se.starts[t])
+                    edit_end.append(se.ends[t])
+                    edit_text.append(se.texts[t].copy())
+        elif threads > 1 and n_active >= 1 and n_active * count >= 4:
+            # Flatten `(active_seg, read_k)` across all workers so 1..2*threads-1 active segments (including long
+            # tandem-repeat stragglers) saturate every core. Exact Int32 reduction is 100% bit-exact.
+            var total_tasks = n_active * count
+            var flat_workers = thread_count(threads, total_tasks)
+            while len(scratch.edit_workers) < flat_workers:
+                scratch.edit_workers.append(_EditWorker())
+            var seg_s = List[Int](capacity=n_active)
+            var seg_e = List[Int](capacity=n_active)
+            var seg_top = List[Int](capacity=n_active)
+            var gain_off = List[Int](capacity=n_active + 1)
+            var block_off = List[Int](capacity=n_active + 1)
+            var seg_block_at = List[List[Int]](capacity=n_active)
+            var seg_block_period = List[List[Int]](capacity=n_active)
+            var seg_block_copy = List[List[Bool]](capacity=n_active)
+            gain_off.append(0)
+            block_off.append(0)
+            for idx in range(n_active):
+                var g = active[idx]
+                var s = bounds[g]
+                var e = bounds[g + 1]
+                var top = e + 1 if e == length else e
+                seg_s.append(s)
+                seg_e.append(e)
+                seg_top.append(top)
+                gain_off.append(gain_off[idx] + (top - s) * SLOTS)
+                var bat = List[Int]()
+                var bper = List[Int]()
+                var bcop = List[Bool]()
+                for i in range(s, top):
+                    if site[i]:
+                        _periods(current, i, s, periods)
+                        for p in periods:
+                            for copy in range(2):
+                                bat.append(i)
+                                bper.append(p)
+                                bcop.append(copy == 1)
+                block_off.append(block_off[idx] + len(bat))
+                seg_block_at.append(bat^)
+                seg_block_period.append(bper^)
+                seg_block_copy.append(bcop^)
+            var total_gains = gain_off[n_active]
+            var total_blocks = block_off[n_active]
+            # Order segments longest-first so repeat stragglers launch first across all workers.
+            var seg_order = List[UInt64](capacity=n_active)
+            for idx in range(n_active):
+                seg_order.append((UInt64(seg_e[idx] - seg_s[idx]) << 32) | UInt64(idx))
+            sort(seg_order)
+            seg_order.reverse()
+            var seg_rank = List[Int](capacity=n_active)
+            for pos in range(n_active):
+                seg_rank.append(Int(seg_order[pos] & 0xFFFFFFFF))
+            var pool_p = scratch.edit_workers.unsafe_ptr()
+            var taken = Atomic[Int64](0)
+
+            def score_edit_flat(
+                slot: Int,
+            ) {
+                mut taken,
+                imm total_tasks,
+                imm count,
+                imm seg_rank,
+                imm seg_s,
+                imm seg_e,
+                imm seg_top,
+                imm gain_off,
+                imm block_off,
+                imm seg_block_at,
+                imm seg_block_period,
+                imm seg_block_copy,
+                imm total_gains,
+                imm total_blocks,
+                imm paths,
+                imm sequences,
+                imm unique,
+                imm weight,
+                imm current,
+                imm length,
+                imm site,
+                imm pool_p,
+            }:
+                ref w = pool_p[unsafe_offset=slot]
+                w.gains.resize(total_gains, 0)
+                for x in range(total_gains):
+                    w.gains[x] = 0
+                w.block_gain.resize(total_blocks, 0)
+                for b in range(total_blocks):
+                    w.block_gain[b] = 0
+                while True:
+                    var task = Int(taken.fetch_add(1))
+                    if task >= total_tasks:
+                        return
+                    var idx = seg_rank[task // count]
+                    var k = task % count
+                    _score_edit_read(
+                        paths,
+                        sequences,
+                        unique,
+                        weight,
+                        current,
+                        seg_s[idx],
+                        seg_e[idx],
+                        seg_top[idx],
+                        length,
+                        site,
+                        seg_block_at[idx],
+                        seg_block_period[idx],
+                        seg_block_copy[idx],
+                        k,
+                        w.bands,
+                        w.forward,
+                        w.backward,
+                        w.copied,
+                        w.ahead,
+                        w.gains,
+                        w.block_gain,
+                        gain_off[idx],
+                        block_off[idx],
+                    )
+
+            spread(score_edit_flat, flat_workers, flat_workers)
+            gains.resize(total_gains, 0)
+            for x in range(total_gains):
+                gains[x] = 0
+            block_gain.resize(total_blocks, 0)
+            for b in range(total_blocks):
+                block_gain[b] = 0
+            for slot in range(flat_workers):
+                ref w = scratch.edit_workers[slot]
+                for x in range(total_gains):
+                    gains[x] += w.gains[x]
+                for b in range(total_blocks):
+                    block_gain[b] += w.block_gain[b]
+            for idx in range(n_active):
+                var s = seg_s[idx]
+                var e = seg_e[idx]
+                var alone = one_each or mask.covers(s, e)
+                var se = _pick_segment_edits(
+                    current,
+                    s,
+                    alone,
+                    gains,
+                    seg_block_at[idx],
+                    seg_block_period[idx],
+                    seg_block_copy[idx],
+                    block_gain,
+                    gain_off[idx],
+                    gain_off[idx + 1] - gain_off[idx],
+                    block_off[idx],
+                )
                 for t in range(len(se.starts)):
                     edit_start.append(se.starts[t])
                     edit_end.append(se.ends[t])
@@ -554,118 +730,30 @@ def polish_with_scratch(
                 block_gain.resize(len(block_at), 0)
                 for b in range(len(block_gain)):
                     block_gain[b] = 0
-                var read_workers = thread_count(threads, count)
-                if read_workers > 1 and count >= 4:
-                    # Parallel across reads within a single active segment; Int32 sums are associative & exact.
-                    while len(scratch.edit_workers) < read_workers:
-                        scratch.edit_workers.append(_EditWorker())
-                    var n_gains = len(gains)
-                    var n_blocks = len(block_at)
-                    var w_gains_all = List[Int32](length=read_workers * n_gains, fill=0)
-                    var w_blocks_all = List[Int32](length=read_workers * n_blocks, fill=0)
-                    var pool_p = scratch.edit_workers.unsafe_ptr()
-                    var wga_p = w_gains_all.unsafe_ptr()
-                    var wba_p = w_blocks_all.unsafe_ptr()
-                    var taken = Atomic[Int64](0)
-
-                    def score_edit_reads(
-                        slot: Int,
-                    ) {
-                        mut taken,
-                        imm count,
-                        imm paths,
-                        imm sequences,
-                        imm unique,
-                        imm weight,
-                        imm current,
-                        imm s,
-                        imm e,
-                        imm top,
-                        imm length,
-                        imm site,
-                        imm block_at,
-                        imm block_period,
-                        imm block_copy,
-                        imm n_gains,
-                        imm n_blocks,
-                        imm pool_p,
-                        imm wga_p,
-                        imm wba_p,
-                    }:
-                        ref w = pool_p[unsafe_offset=slot]
-                        w.gains.resize(n_gains, 0)
-                        for x in range(n_gains):
-                            w.gains[x] = 0
-                        w.block_gain.resize(n_blocks, 0)
-                        for b in range(n_blocks):
-                            w.block_gain[b] = 0
-                        while True:
-                            var k = Int(taken.fetch_add(1))
-                            if k >= count:
-                                break
-                            _score_edit_read(
-                                paths,
-                                sequences,
-                                unique,
-                                weight,
-                                current,
-                                s,
-                                e,
-                                top,
-                                length,
-                                site,
-                                block_at,
-                                block_period,
-                                block_copy,
-                                k,
-                                w.bands,
-                                w.forward,
-                                w.backward,
-                                w.copied,
-                                w.ahead,
-                                w.gains,
-                                w.block_gain,
-                            )
-                        var gbase = slot * n_gains
-                        for x in range(n_gains):
-                            wga_p[unsafe_offset=gbase + x] = w.gains[x]
-                        var bbase = slot * n_blocks
-                        for b in range(n_blocks):
-                            wba_p[unsafe_offset=bbase + b] = w.block_gain[b]
-
-                    spread(score_edit_reads, read_workers, read_workers)
-                    for w in range(read_workers):
-                        var gbase = w * n_gains
-                        for x in range(n_gains):
-                            gains[x] += w_gains_all[gbase + x]
-                        var bbase = w * n_blocks
-                        for b in range(n_blocks):
-                            block_gain[b] += w_blocks_all[bbase + b]
-                else:
-                    for k in range(count):
-                        _score_edit_read(
-                            paths,
-                            sequences,
-                            unique,
-                            weight,
-                            current,
-                            s,
-                            e,
-                            top,
-                            length,
-                            site,
-                            block_at,
-                            block_period,
-                            block_copy,
-                            k,
-                            bands,
-                            forward,
-                            backward,
-                            copied,
-                            ahead,
-                            gains,
-                            block_gain,
-                        )
+                for k in range(count):
+                    _score_edit_read(
+                        paths,
+                        sequences,
+                        unique,
+                        weight,
+                        current,
+                        s,
+                        e,
+                        top,
+                        length,
+                        site,
+                        block_at,
+                        block_period,
+                        block_copy,
+                        k,
+                        bands,
+                        forward,
+                        backward,
+                        copied,
+                        ahead,
+                        gains,
+                        block_gain,
+                    )
                 var alone = one_each or mask.covers(s, e)
                 var se = _pick_segment_edits(current, s, alone, gains, block_at, block_period, block_copy, block_gain)
                 for t in range(len(se.starts)):
@@ -673,10 +761,11 @@ def polish_with_scratch(
                     edit_end.append(se.ends[t])
                     edit_text.append(se.texts[t].copy())
 
-        trace.line(
-            POLISH,
-            String("round ", round, ": edit distance ", paths.total, ", ", len(edit_start), " edits taken"),
-        )
+        if trace.on(POLISH):
+            trace.line(
+                POLISH,
+                String("round ", round, ": edit distance ", paths.total, ", ", len(edit_start), " edits taken"),
+            )
         if len(edit_start) == 0:
             break
         var order = List[UInt64]()
@@ -711,7 +800,8 @@ def polish_with_scratch(
         current = _lengthen_ties(
             aligner, current^, sequences, unique, anchors, weight, realigned, scratch, threads=threads
         )
-    trace.line(POLISH, String("edit distance stage: ", len(current), " letters"))
+    if trace.on(POLISH):
+        trace.line(POLISH, String("edit distance stage: ", len(current), " letters"))
     var out = _likely(
         aligner,
         current^,
@@ -725,10 +815,12 @@ def polish_with_scratch(
         scratch,
         threads=threads,
     )
-    trace.line(POLISH, String("likelihood stage: ", len(out), " letters"))
+    if trace.on(POLISH):
+        trace.line(POLISH, String("likelihood stage: ", len(out), " letters"))
     if homopolymers.loaded():
         out = _runs(
             aligner, out^, sequences, voters, anchors, homopolymers, strands, realigned, scratch, threads=threads
         )
-        trace.line(POLISH, String("homopolymer stage: ", len(out), " letters"))
+        if trace.on(POLISH):
+            trace.line(POLISH, String("homopolymer stage: ", len(out), " letters"))
     return out^

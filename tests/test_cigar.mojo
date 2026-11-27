@@ -32,6 +32,8 @@ def test_cigar_runs_parses_and_rejects_missing_length() raises:
     assert_equal(runs.counts[4], 4)
     with assert_raises():
         _ = cigar_runs("=3X")
+    with assert_raises():
+        _ = cigar_runs("3=5")
 
 
 def test_pairing_from_cigar_with_offset() raises:

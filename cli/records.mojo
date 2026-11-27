@@ -30,7 +30,7 @@ struct Records(Movable, Sized):
     var anchors: List[Int]
     var strands: List[Int]
 
-    def __init__(out self, path: String) raises:
+    def __init__(out self, path: String, parse_headers: Bool = True) raises:
         var bytes = read_file(path)
         var records = parse_sequences(Span(bytes))
         self.names = records.names.copy()
@@ -39,9 +39,13 @@ struct Records(Movable, Sized):
             self.seqs.append(upper(records.seq(r)))
         self.anchors = List[Int](length=len(records), fill=BOTH)
         self.strands = List[Int](length=len(records), fill=STRAND_UNKNOWN)
+        if not parse_headers:
+            return
         var headers = _headers(Span(bytes))
         for r in range(min(len(headers), len(records))):
-            for word in headers[r].split():
+            var words = headers[r].split()
+            for wi in range(1, len(words)):
+                var word = words[wi]
                 if word == "anchor=left":
                     self.anchors[r] = LEFT
                 elif word == "anchor=right":
@@ -77,16 +81,18 @@ def _headers(bytes: Span[UInt8, _]) -> List[String]:
             break
     var i = 0
     while i < len(bytes):
-        var c = bytes[i]
-        if fastq and (c == _NEWLINE or c == _RETURN):
-            i += 1
-            continue
         var end = _line_end(bytes, i)
+        var start = i
+        while start < end and (bytes[start] == _SPACE or bytes[start] == _TAB or bytes[start] == _RETURN):
+            start += 1
+        if fastq and start == end:
+            i = end + 1
+            continue
         var trimmed = end
-        if trimmed > i and bytes[trimmed - 1] == _RETURN:
+        if trimmed > start and bytes[trimmed - 1] == _RETURN:
             trimmed -= 1
-        if fastq or c == UInt8(ord(">")):
-            out.append(String(StringSlice(unsafe_from_utf8=bytes[i + 1 : max(trimmed, i + 1)])))
+        if fastq or (start < trimmed and bytes[start] == UInt8(ord(">"))):
+            out.append(String(StringSlice(unsafe_from_utf8=bytes[start + 1 : max(trimmed, start + 1)])))
         if fastq:
             # The sequence, '+' and quality lines.
             for _ in range(3):

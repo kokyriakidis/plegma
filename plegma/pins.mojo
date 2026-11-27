@@ -299,6 +299,12 @@ def _align_pinned_windows(
     var workers = thread_count(threads, num_windows)
     var out = List[Int](capacity=len(query))
     if workers > 1 and num_windows >= 2 and len(query) >= 1024:
+        var win_order = List[UInt64](capacity=num_windows)
+        for m in range(num_windows):
+            var span_m = max(points_r[m + 1] - points_r[m], points_q[m + 1] - points_q[m])
+            win_order.append((UInt64(span_m) << 32) | UInt64(m))
+        sort(win_order)
+        win_order.reverse()
         var parts = List[List[Int]](length=num_windows, fill=List[Int]())
         var failed = List[Bool](length=num_windows, fill=False)
         var parts_p = parts.unsafe_ptr()
@@ -309,7 +315,7 @@ def _align_pinned_windows(
             slot: Int,
         ) {
             mut taken,
-            imm num_windows,
+            imm win_order,
             imm points_r,
             imm points_q,
             imm reference,
@@ -320,9 +326,10 @@ def _align_pinned_windows(
         }:
             var local_aligner = Aligner(warm=False)
             while True:
-                var m = Int(taken.fetch_add(1))
-                if m >= num_windows:
+                var pos = Int(taken.fetch_add(1))
+                if pos >= len(win_order):
                     return
+                var m = Int(win_order[pos] & 0xFFFFFFFF)
                 var r0 = points_r[m]
                 var r1 = points_r[m + 1]
                 var q0 = points_q[m]

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <random>
@@ -467,6 +468,26 @@ int main(int argc, char** argv)
         auto b1 = plegma::consensusBatch(batchReads, &toy, plegma::Options().pinned(false).threads(1));
         auto b4 = plegma::consensusBatch(batchReads, &toy, plegma::Options().pinned(false).threads(4));
         check(b4 == b1, "consensusBatch threads=4 matches threads=1 bit-exact");
+
+        // plegma_options_init_sized must never write past struct_size (64-byte ABI canary test).
+        struct CanaryOpts {
+            unsigned char head[64];
+            unsigned char guard[16];
+        };
+        CanaryOpts co;
+        std::memset(co.head, 0xAA, sizeof co.head);
+        std::memset(co.guard, 0x5A, sizeof co.guard);
+        plegma_options_init_sized(reinterpret_cast<plegma_options*>(co.head), 64);
+        bool guardClean = true;
+        for (unsigned char b : co.guard) guardClean = guardClean && (b == 0x5A);
+        std::uint32_t writtenSize = 0;
+        std::memcpy(&writtenSize, co.head, sizeof writtenSize);
+        check(guardClean && writtenSize == 64, "plegma_options_init_sized respects 64-byte struct size");
+
+        // plegma_model_parse must reject SIZE_MAX length cleanly.
+        char errBuf[256] = {0};
+        plegma_model* badModel = plegma_model_parse("abc", static_cast<std::size_t>(-1), errBuf, sizeof errBuf);
+        check(badModel == nullptr && errBuf[0] != '\0', "plegma_model_parse rejects SIZE_MAX length");
 
         std::vector<std::vector<plegma::Read>> dipBatch = {reads, reads, reads};
         std::vector<std::vector<int>> hapBatch = {haps, haps, haps};

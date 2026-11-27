@@ -16,13 +16,17 @@ struct Topology(Movable):
         self.rank = List[Int]()
         self.remaining = List[Int]()
 
-    def compute(mut self, graph: Graph, mut incoming: List[Int32], mut ready: List[Int]) raises:
-        """Recomputes topological order, rank, and remaining path lengths in-place."""
+    def compute_order(mut self, graph: Graph, mut incoming: List[Int32], mut ready: List[Int]) raises:
+        """Recomputes topological `order` and `rank` in-place without computing `remaining`."""
         graph.node_order_into(self.rank, incoming, ready)
         var n = len(self.rank)
         self.order.resize(n, 0)
         for node in range(n):
             self.order[self.rank[node]] = node
+
+    def compute(mut self, graph: Graph, mut incoming: List[Int32], mut ready: List[Int]) raises:
+        """Recomputes topological order, rank, and remaining path lengths in-place."""
+        self.compute_order(graph, incoming, ready)
         self.recompute_remaining(graph)
 
     def recompute_remaining(mut self, graph: Graph):

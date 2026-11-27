@@ -16,7 +16,7 @@ a read of unknown strand (`STRAND_UNKNOWN`) weighs the two strands' probabilitie
 possible where both strands have its row.
 """
 
-from std.math import log10
+from std.math import isfinite, log10
 from std.sys import simd_width_of
 
 comptime HEADER = "base,strand,left,right,n,m,count,probability,logProbabilityDb"
@@ -25,6 +25,7 @@ comptime STRAND_UNKNOWN = 2
 comptime FLANK_UNKNOWN = 4
 """A run's flank at the consensus's end, or not a letter of ACGT."""
 comptime _STRANDS = 2
+comptime _BY_N_STRANDS = 3
 comptime _FLANKS = 5
 comptime MAX_RUN = 1000
 """The longest run length (n or m) a model's line may give: shasta2's models stop near 100; the table is n times m."""
@@ -255,7 +256,7 @@ struct HomopolymerModel(Copyable, Movable):
             var value = fields.decimal(at)
             if fields.at != line_end:
                 raise Error(t"homopolymer model {path}: line {line_number}: 9 fields expected")
-            if base == FLANK_UNKNOWN or strand > 1 or n < 2 or not (value <= 0.0):
+            if base == FLANK_UNKNOWN or strand > 1 or n < 2 or not isfinite(value) or value > 0.0:
                 raise Error(t"homopolymer model {path}: line {line_number}: out of range")
             if n > MAX_RUN or m > MAX_RUN:
                 raise Error(t"homopolymer model {path}: line {line_number}: a run past {MAX_RUN} letters")
@@ -320,11 +321,18 @@ struct HomopolymerModel(Copyable, Movable):
         model._resolve()
         return model^
 
+    @staticmethod
+    def _avg_db(a: Float64, b: Float64) -> Float64:
+        if min(a, b) < -3000.0:
+            var top = max(a, b)
+            return top + 10.0 * log10(0.5 * (10.0 ** ((a - top) / 10.0) + 10.0 ** ((b - top) / 10.0)))
+        return 10.0 * log10(0.5 * (10.0 ** (a / 10.0) + 10.0 ** (b / 10.0)))
+
     def _resolve(mut self):
-        """`by_n` and `start` from `table`, `present` and `log_prior`."""
+        """`by_n` (strands 0, 1, and `STRAND_UNKNOWN`) and `start` from `table`, `present` and `log_prior`."""
         comptime W = simd_width_of[DType.float64]()
         self.n_pad = (self.n_count + W - 1) // W * W
-        self.by_n = List[Float64](length=4 * 2 * _FLANKS * _FLANKS * self.m_count * self.n_pad, fill=0.0)
+        self.by_n = List[Float64](length=4 * _BY_N_STRANDS * _FLANKS * _FLANKS * self.m_count * self.n_pad, fill=0.0)
         self.start = List[Float64](length=4 * _FLANKS * _FLANKS * self.n_pad, fill=-Float64.MAX)
         for base in range(4):
             for left in range(_FLANKS):
@@ -340,9 +348,14 @@ struct HomopolymerModel(Copyable, Movable):
                                 continue
                             for m in range(self.m_count):
                                 self.by_n[self._by_n(base, strand, left, right, m) + n] = self.table[at + m]
+                        if at0 >= 0 and at1 >= 0:
+                            for m in range(self.m_count):
+                                self.by_n[self._by_n(base, STRAND_UNKNOWN, left, right, m) + n] = Self._avg_db(
+                                    self.table[at0 + m], self.table[at1 + m]
+                                )
 
     def _by_n(self, base: Int, strand: Int, left: Int, right: Int, m: Int) -> Int:
-        return ((((base * 2 + strand) * _FLANKS + left) * _FLANKS + right) * self.m_count + m) * self.n_pad
+        return ((((base * _BY_N_STRANDS + strand) * _FLANKS + left) * _FLANKS + right) * self.m_count + m) * self.n_pad
 
     def loaded(self) -> Bool:
         return self.n_count > 0
@@ -374,7 +387,16 @@ struct HomopolymerModel(Copyable, Movable):
         """10 log10 P(m | n): a read on `strand` (0, 1 or `STRAND_UNKNOWN`, the two strands' probabilities
         half each) reporting a run of `base` between `left` and `right` m long where it is n long (the flanks' row,
         else the `*` row); -Float64.MAX when n is not in the model."""
-        if n < 0 or n >= self.n_count:
+        if (
+            base < 0
+            or base > 3
+            or left < 0
+            or left >= _FLANKS
+            or right < 0
+            or right >= _FLANKS
+            or n < 0
+            or n >= self.n_count
+        ):
             return -Float64.MAX
         var at0 = self._offset(base, 0, left, right, n)
         var at1 = self._offset(base, 1, left, right, n)
@@ -385,65 +407,36 @@ struct HomopolymerModel(Copyable, Movable):
             return self.table[at0 + k]
         if strand == 1:
             return self.table[at1 + k]
-        return 10.0 * log10(0.5 * (10.0 ** (self.table[at0 + k] / 10.0) + 10.0 ** (self.table[at1 + k] / 10.0)))
+        return Self._avg_db(self.table[at0 + k], self.table[at1 + k])
 
     def most_likely(self, base: Int, left: Int, right: Int, lengths: List[Int], strands: List[Int]) -> Int:
         """The run length n most likely given the reads' lengths `lengths` (each on `strands`' strand: 0, 1 or
         `STRAND_UNKNOWN`), `base` between `left` and `right` (0..3, or `FLANK_UNKNOWN`): the n that maximizes
         log P(n) plus the sum of log P(m | n, ...), the shorter on ties; -1 when no n is in the model."""
-        var known = len(strands) == len(lengths)
-        for strand in strands:
-            known = known and (strand == 0 or strand == 1)
-        if known:
-            # Every n at once, a vector at a time; each n's sum in the reads' order, as below.
-            comptime W = simd_width_of[DType.float64]()
-            var first = ((base * _FLANKS + left) * _FLANKS + right) * self.n_pad
-            var scores = List[Float64](capacity=self.n_pad)
-            for n in range(self.n_pad):
-                scores.append(self.start[first + n])
-            var out = scores.unsafe_ptr()
-            var rows = self.by_n.unsafe_ptr()
-            for k in range(len(lengths)):
-                var row = rows.unsafe_offset(
-                    self._by_n(base, strands[k], left, right, min(max(lengths[k], 0), self.m_count - 1))
-                )
-                var n = 0
-                while n < self.n_pad:
-                    out.unsafe_store(n, out.unsafe_load[width=W](n) + row.unsafe_load[width=W](n))
-                    n += W
-            var best_n = -1
-            var best_value = -Float64.MAX
-            for n in range(self.n_count):
-                if self.start[first + n] == -Float64.MAX:
-                    continue
-                if scores[n] > best_value:
-                    best_n = n
-                    best_value = scores[n]
-            return best_n
-        var best = -1
-        var best_score = -Float64.MAX
+        if self.n_count == 0 or base < 0 or base > 3 or left < 0 or left >= _FLANKS or right < 0 or right >= _FLANKS:
+            return -1
+        # Every n at once, a vector at a time, for strands 0, 1, and STRAND_UNKNOWN alike.
+        comptime W = simd_width_of[DType.float64]()
+        var first = ((base * _FLANKS + left) * _FLANKS + right) * self.n_pad
+        var scores = List[Float64](capacity=self.n_pad)
+        for n in range(self.n_pad):
+            scores.append(self.start[first + n])
+        var out = scores.unsafe_ptr()
+        var rows = self.by_n.unsafe_ptr()
+        for k in range(len(lengths)):
+            var raw_s = strands[k] if k < len(strands) else STRAND_UNKNOWN
+            var s = raw_s if (raw_s == 0 or raw_s == 1) else STRAND_UNKNOWN
+            var row = rows.unsafe_offset(self._by_n(base, s, left, right, min(max(lengths[k], 0), self.m_count - 1)))
+            var n = 0
+            while n < self.n_pad:
+                out.unsafe_store(n, out.unsafe_load[width=W](n) + row.unsafe_load[width=W](n))
+                n += W
+        var best_n = -1
+        var best_value = -Float64.MAX
         for n in range(self.n_count):
-            var score = self.log_prior[n]
-            if score == -Float64.MAX:
+            if self.start[first + n] == -Float64.MAX:
                 continue
-            var at0 = self._offset(base, 0, left, right, n)
-            var at1 = self._offset(base, 1, left, right, n)
-            if at0 < 0 or at1 < 0:
-                continue
-            for k in range(len(lengths)):
-                var m = min(max(lengths[k], 0), self.m_count - 1)
-                # A read without a strand (`strands` shorter than `lengths`) is on either.
-                var strand = strands[k] if k < len(strands) else STRAND_UNKNOWN
-                if strand == 0:
-                    score += self.table[at0 + m]
-                elif strand == 1:
-                    score += self.table[at1 + m]
-                else:
-                    # Either strand, half each.
-                    score += 10.0 * log10(
-                        0.5 * (10.0 ** (self.table[at0 + m] / 10.0) + 10.0 ** (self.table[at1 + m] / 10.0))
-                    )
-            if score > best_score:
-                best = n
-                best_score = score
-        return best
+            if scores[n] > best_value:
+                best_n = n
+                best_value = scores[n]
+        return best_n

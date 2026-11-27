@@ -3,6 +3,7 @@ HMM (`_likely`), the matrices filled in the same bands as the edit distance's.""
 
 from std.atomic import Atomic
 from std.math import log
+from std.sys import simd_width_of
 
 from karan import Aligner
 from karan.common import spread, thread_count
@@ -157,17 +158,51 @@ def _score_likely_read(
         var nlo = bands.low[c + 1]
         var nhi = bands.high[c + 1]
         var nat = bands.start[c + 1]
+        comptime W = simd_width_of[DType.float64]()
+        var fwd_p = forward.unsafe_ptr()
+        var sl_p = slotted.unsafe_ptr()
+        var seq_p = seq.unsafe_ptr()
+        var v_pd = SIMD[DType.float64, W](pd)
+        var v_kept = SIMD[DType.float64, W](kept)
+        var v_right = SIMD[DType.float64, W](right)
+        var v_wrong = SIMD[DType.float64, W](wrong)
+        var core_lo = max(nlo, lo + 1)
+        var core_hi = min(nhi, hi)
         var most = 0.0
-        for j in range(nlo, nhi + 1):
-            var v = slotted[at + j - lo] * pd if j >= lo and j <= hi else 0.0
+        var most_v = SIMD[DType.float64, W](0.0)
+        var j = nlo
+        while j <= nhi:
+            if j >= core_lo and j + W - 1 <= core_hi:
+                var match_v = seq_p.unsafe_load[width=W](j - 1).eq(letter).select(v_right, v_wrong)
+                var v = (
+                    sl_p.unsafe_load[width=W](at + j - lo) * v_pd
+                    + (sl_p.unsafe_load[width=W](at + j - 1 - lo) * v_kept) * match_v
+                )
+                fwd_p.unsafe_store(nat + j - nlo, v)
+                most_v = max(most_v, v)
+                j += W
+                continue
+            var v = sl_p[unsafe_offset=at + j - lo] * pd if j >= lo and j <= hi else 0.0
             if j - 1 >= lo and j - 1 <= hi:
-                v += slotted[at + j - 1 - lo] * kept * (right if seq[j - 1] == letter else wrong)
-            forward[nat + j - nlo] = v
+                v += (
+                    sl_p[unsafe_offset=at + j - 1 - lo]
+                    * kept
+                    * (right if seq_p[unsafe_offset=j - 1] == letter else wrong)
+                )
+            fwd_p[unsafe_offset=nat + j - nlo] = v
             most = max(most, v)
+            j += 1
+        most = max(most, most_v.reduce_max())
         if most <= 0:
             most = 1e-300
-        for j in range(nlo, nhi + 1):
-            forward[nat + j - nlo] /= most
+        var v_most = SIMD[DType.float64, W](most)
+        j = nlo
+        while j + W - 1 <= nhi:
+            fwd_p.unsafe_store(nat + j - nlo, fwd_p.unsafe_load[width=W](nat + j - nlo) / v_most)
+            j += W
+        while j <= nhi:
+            fwd_p[unsafe_offset=nat + j - nlo] /= most
+            j += 1
         forward_scale[c + 1] = forward_scale[c] + log(most)
     var lo_last = bands.low[c_last]
     var at_last = bands.start[c_last]
@@ -196,8 +231,16 @@ def _score_likely_read(
             most = max(most, b)
         if most <= 0:
             most = 1e-300
-        for j in range(lo, hi + 1):
-            backward[at + j - lo] /= most
+        comptime WB = simd_width_of[DType.float64]()
+        var bwd_p = backward.unsafe_ptr()
+        var v_bmost = SIMD[DType.float64, WB](most)
+        var bj = lo
+        while bj + WB - 1 <= hi:
+            bwd_p.unsafe_store(at + bj - lo, bwd_p.unsafe_load[width=WB](at + bj - lo) / v_bmost)
+            bj += WB
+        while bj <= hi:
+            bwd_p[unsafe_offset=at + bj - lo] /= most
+            bj += 1
         backward_scale[c] = backward_scale[c + 1] + log(most)
     var base = _log(backward[bands.start[0] + first - bands.low[0]]) + backward_scale[0]
     for c in range(columns):
@@ -422,16 +465,37 @@ def _likely(
             if not partial:
                 active.append(g)
 
+        # Deduplicate identical members (same letters and anchor via `realigned.same_as`) so pair-HMM DP runs once
+        # per distinct read and accumulates in exact ascending member order (100% Float64 bit-exact).
+        var uniq_k = List[Int](capacity=count)
+        var member_to_uniq = List[Int](length=count, fill=0)
+        var seen_first = List[Int](length=len(sequences), fill=-1)
+        for k in range(count):
+            var first = realigned.same_as[members[k]]
+            var u = seen_first[first]
+            if u < 0:
+                u = len(uniq_k)
+                seen_first[first] = u
+                uniq_k.append(k)
+            member_to_uniq[k] = u
+        var u_count = len(uniq_k)
+
         var edit_start = List[Int]()
         var edit_end = List[Int]()
         var edit_text = List[List[UInt8]]()
-        var seg_workers = thread_count(threads, len(active))
-        if seg_workers > 1 and len(active) >= 2:
-            # Parallel across independent segments (bit-exact: each segment runs its reads in 0..count-1 order),
-            # reusing pooled worker DP buffers.
+        var n_active = len(active)
+        if threads > 1 and n_active >= 2 * threads:
+            # Plenty of active segments: segment-level dispatch with per-segment unique-read deduplication.
+            var seg_workers = thread_count(threads, n_active)
             while len(scratch.likely_workers) < seg_workers:
                 scratch.likely_workers.append(_LikelyWorker())
-            var seg_edits = List[_LikelyEdit](length=len(active), fill=_LikelyEdit())
+            var seg_order = List[UInt64](capacity=n_active)
+            for idx in range(n_active):
+                var g = active[idx]
+                seg_order.append((UInt64(bounds[g + 1] - bounds[g]) << 32) | UInt64(idx))
+            sort(seg_order)
+            seg_order.reverse()
+            var seg_edits = List[_LikelyEdit](length=n_active, fill=_LikelyEdit())
             var seg_edits_p = seg_edits.unsafe_ptr()
             var pool_p = scratch.likely_workers.unsafe_ptr()
             var taken = Atomic[Int64](0)
@@ -440,6 +504,7 @@ def _likely(
                 slot: Int,
             ) {
                 mut taken,
+                imm seg_order,
                 imm active,
                 imm bounds,
                 imm length,
@@ -449,6 +514,9 @@ def _likely(
                 imm sequences,
                 imm members,
                 imm count,
+                imm uniq_k,
+                imm member_to_uniq,
+                imm u_count,
                 imm rates,
                 imm run_gain,
                 imm pool_p,
@@ -456,15 +524,17 @@ def _likely(
             }:
                 ref w = pool_p[unsafe_offset=slot]
                 while True:
-                    var idx = Int(taken.fetch_add(1))
-                    if idx >= len(active):
+                    var pos = Int(taken.fetch_add(1))
+                    if pos >= len(seg_order):
                         return
+                    var idx = Int(seg_order[pos] & 0xFFFFFFFF)
                     var g = active[idx]
                     var s = bounds[g]
                     var e = bounds[g + 1]
                     var top = e + 1 if e == length else e
-                    w.gains.resize((top - s) * SLOTS, 0.0)
-                    for x in range(len(w.gains)):
+                    var n_gains = (top - s) * SLOTS
+                    w.gains.resize(n_gains, 0.0)
+                    for x in range(n_gains):
                         w.gains[x] = 0.0
                     w.block_at.clear()
                     w.block_period.clear()
@@ -477,126 +547,24 @@ def _likely(
                                     w.block_at.append(i)
                                     w.block_period.append(p)
                                     w.block_copy.append(copy == 1)
-                    w.block_gain.resize(len(w.block_at), 0.0)
-                    for b in range(len(w.block_gain)):
+                    var n_blocks = len(w.block_at)
+                    w.block_gain.resize(n_blocks, 0.0)
+                    for b in range(n_blocks):
                         w.block_gain[b] = 0.0
-                    for k in range(count):
-                        _score_likely_read(
-                            paths,
-                            sequences,
-                            members,
-                            current,
-                            s,
-                            e,
-                            top,
-                            length,
-                            site,
-                            w.block_at,
-                            w.block_period,
-                            w.block_copy,
-                            rates,
-                            k,
-                            w.bands,
-                            w.forward,
-                            w.slotted,
-                            w.backward,
-                            w.forward_scale,
-                            w.backward_scale,
-                            w.copied,
-                            w.ahead,
-                            w.gains,
-                            w.block_gain,
-                        )
-                    seg_edits_p[unsafe_offset=idx] = _pick_likely_edit(
-                        current, s, length, run_gain, w.gains, w.block_at, w.block_period, w.block_copy, w.block_gain
-                    )
-
-            spread(score_segments, seg_workers, seg_workers)
-            for idx in range(len(active)):
-                if seg_edits[idx].has_edit:
-                    edit_start.append(seg_edits[idx].start)
-                    edit_end.append(seg_edits[idx].end)
-                    edit_text.append(seg_edits[idx].text.copy())
-        else:
-            for g in active:
-                var s = bounds[g]
-                var e = bounds[g + 1]
-                var top = e + 1 if e == length else e
-                gains.resize((top - s) * SLOTS, 0.0)
-                for x in range(len(gains)):
-                    gains[x] = 0.0
-                block_at.clear()
-                block_period.clear()
-                block_copy.clear()
-                for i in range(s, top):
-                    if site[i]:
-                        _periods(current, i, s, periods)
-                        for p in periods:
-                            for copy in range(2):
-                                block_at.append(i)
-                                block_period.append(p)
-                                block_copy.append(copy == 1)
-                block_gain.resize(len(block_at), 0.0)
-                for b in range(len(block_gain)):
-                    block_gain[b] = 0.0
-                var read_workers = thread_count(threads, count)
-                if read_workers > 1 and count >= 4:
-                    # Parallel across reads, storing each read's own active-site/block deltas and summing in ascending
-                    # read order so Float64 accumulation is bit-exact with serial execution.
-                    while len(scratch.likely_workers) < read_workers:
-                        scratch.likely_workers.append(_LikelyWorker())
-                    var active_cols = List[Int]()
-                    for c in range(e - s + 1):
-                        if s + c < top and site[s + c]:
-                            active_cols.append(c)
-                    var gain_stride = len(active_cols) * SLOTS
-                    var block_stride = len(block_at)
-                    var per_read_gains = List[Float64](length=count * gain_stride, fill=0.0)
-                    var per_read_blocks = List[Float64](length=count * block_stride, fill=0.0)
-                    var pool_p = scratch.likely_workers.unsafe_ptr()
-                    var prg_p = per_read_gains.unsafe_ptr()
-                    var prb_p = per_read_blocks.unsafe_ptr()
-                    var taken = Atomic[Int64](0)
-                    var n_gains = (top - s) * SLOTS
-
-                    def score_reads(
-                        slot: Int,
-                    ) {
-                        mut taken,
-                        imm count,
-                        imm paths,
-                        imm sequences,
-                        imm members,
-                        imm current,
-                        imm s,
-                        imm e,
-                        imm top,
-                        imm length,
-                        imm site,
-                        imm block_at,
-                        imm block_period,
-                        imm block_copy,
-                        imm rates,
-                        imm active_cols,
-                        imm n_gains,
-                        imm gain_stride,
-                        imm block_stride,
-                        imm pool_p,
-                        imm prg_p,
-                        imm prb_p,
-                    }:
-                        ref w = pool_p[unsafe_offset=slot]
-                        w.gains.resize(n_gains, 0.0)
-                        w.block_gain.resize(block_stride, 0.0)
-                        while True:
-                            var k = Int(taken.fetch_add(1))
-                            if k >= count:
-                                return
-                            for a_idx in range(len(active_cols)):
-                                var row = active_cols[a_idx] * SLOTS
-                                for slot_i in range(SLOTS):
-                                    w.gains[row + slot_i] = 0.0
-                            for b in range(block_stride):
+                    if u_count < count:
+                        var active_cols = List[Int]()
+                        for c in range(e - s + 1):
+                            if s + c < top and site[s + c]:
+                                active_cols.append(c)
+                        var gstride = len(active_cols) * SLOTS
+                        var u_gains = List[Float64](length=u_count * gstride, fill=0.0)
+                        var u_blocks = List[Float64](length=u_count * n_blocks, fill=0.0)
+                        for u in range(u_count):
+                            for a_i in range(len(active_cols)):
+                                var row = active_cols[a_i] * SLOTS
+                                for si in range(SLOTS):
+                                    w.gains[row + si] = 0.0
+                            for b in range(n_blocks):
                                 w.block_gain[b] = 0.0
                             _score_likely_read(
                                 paths,
@@ -608,9 +576,61 @@ def _likely(
                                 top,
                                 length,
                                 site,
-                                block_at,
-                                block_period,
-                                block_copy,
+                                w.block_at,
+                                w.block_period,
+                                w.block_copy,
+                                rates,
+                                uniq_k[u],
+                                w.bands,
+                                w.forward,
+                                w.slotted,
+                                w.backward,
+                                w.forward_scale,
+                                w.backward_scale,
+                                w.copied,
+                                w.ahead,
+                                w.gains,
+                                w.block_gain,
+                            )
+                            var gb = u * gstride
+                            for a_i in range(len(active_cols)):
+                                var row = active_cols[a_i] * SLOTS
+                                for si in range(SLOTS):
+                                    u_gains[gb + a_i * SLOTS + si] = w.gains[row + si]
+                            var bb = u * n_blocks
+                            for b in range(n_blocks):
+                                u_blocks[bb + b] = w.block_gain[b]
+                        for a_i in range(len(active_cols)):
+                            var row = active_cols[a_i] * SLOTS
+                            for si in range(SLOTS):
+                                w.gains[row + si] = 0.0
+                        for b in range(n_blocks):
+                            w.block_gain[b] = 0.0
+                        for k in range(count):
+                            var u = member_to_uniq[k]
+                            var gb = u * gstride
+                            for a_i in range(len(active_cols)):
+                                var row = active_cols[a_i] * SLOTS
+                                for si in range(SLOTS):
+                                    w.gains[row + si] += u_gains[gb + a_i * SLOTS + si]
+                            var bb = u * n_blocks
+                            for b in range(n_blocks):
+                                w.block_gain[b] += u_blocks[bb + b]
+                    else:
+                        for k in range(count):
+                            _score_likely_read(
+                                paths,
+                                sequences,
+                                members,
+                                current,
+                                s,
+                                e,
+                                top,
+                                length,
+                                site,
+                                w.block_at,
+                                w.block_period,
+                                w.block_copy,
                                 rates,
                                 k,
                                 w.bands,
@@ -624,25 +644,300 @@ def _likely(
                                 w.gains,
                                 w.block_gain,
                             )
-                            var gbase = k * gain_stride
-                            for a_idx in range(len(active_cols)):
-                                var row = active_cols[a_idx] * SLOTS
-                                for slot_i in range(SLOTS):
-                                    prg_p[unsafe_offset=gbase + a_idx * SLOTS + slot_i] = w.gains[row + slot_i]
-                            var bbase = k * block_stride
-                            for b in range(block_stride):
-                                prb_p[unsafe_offset=bbase + b] = w.block_gain[b]
+                    seg_edits_p[unsafe_offset=idx] = _pick_likely_edit(
+                        current, s, length, run_gain, w.gains, w.block_at, w.block_period, w.block_copy, w.block_gain
+                    )
 
-                    spread(score_reads, read_workers, read_workers)
+            spread(score_segments, seg_workers, seg_workers)
+            for idx in range(n_active):
+                if seg_edits[idx].has_edit:
+                    edit_start.append(seg_edits[idx].start)
+                    edit_end.append(seg_edits[idx].end)
+                    edit_text.append(seg_edits[idx].text.copy())
+        elif threads > 1 and n_active >= 1 and n_active * u_count >= 4:
+            # Flatten `(active_seg, unique_read)` across all workers so 1..2*threads-1 active segments (including long
+            # repeat stragglers) saturate every core. Each segment reduces in exact `0..count-1` member order (bit-exact).
+            var total_tasks = n_active * u_count
+            var flat_workers = thread_count(threads, total_tasks)
+            while len(scratch.likely_workers) < flat_workers:
+                scratch.likely_workers.append(_LikelyWorker())
+            var seg_s = List[Int](capacity=n_active)
+            var seg_e = List[Int](capacity=n_active)
+            var seg_top = List[Int](capacity=n_active)
+            var seg_cols = List[List[Int]](capacity=n_active)
+            var seg_block_at = List[List[Int]](capacity=n_active)
+            var seg_block_period = List[List[Int]](capacity=n_active)
+            var seg_block_copy = List[List[Bool]](capacity=n_active)
+            var seg_gstride = List[Int](capacity=n_active)
+            var seg_bstride = List[Int](capacity=n_active)
+            var seg_goff = List[Int](capacity=n_active + 1)
+            var seg_boff = List[Int](capacity=n_active + 1)
+            seg_goff.append(0)
+            seg_boff.append(0)
+            for idx in range(n_active):
+                var g = active[idx]
+                var s = bounds[g]
+                var e = bounds[g + 1]
+                var top = e + 1 if e == length else e
+                seg_s.append(s)
+                seg_e.append(e)
+                seg_top.append(top)
+                var cols = List[Int]()
+                for c in range(e - s + 1):
+                    if s + c < top and site[s + c]:
+                        cols.append(c)
+                var bat = List[Int]()
+                var bper = List[Int]()
+                var bcop = List[Bool]()
+                for i in range(s, top):
+                    if site[i]:
+                        _periods(current, i, s, periods)
+                        for p in periods:
+                            for copy in range(2):
+                                bat.append(i)
+                                bper.append(p)
+                                bcop.append(copy == 1)
+                var gs = len(cols) * SLOTS
+                var bs = len(bat)
+                seg_gstride.append(gs)
+                seg_bstride.append(bs)
+                seg_goff.append(seg_goff[idx] + u_count * gs)
+                seg_boff.append(seg_boff[idx] + u_count * bs)
+                seg_cols.append(cols^)
+                seg_block_at.append(bat^)
+                seg_block_period.append(bper^)
+                seg_block_copy.append(bcop^)
+            var seg_order = List[UInt64](capacity=n_active)
+            for idx in range(n_active):
+                seg_order.append((UInt64(seg_e[idx] - seg_s[idx]) << 32) | UInt64(idx))
+            sort(seg_order)
+            seg_order.reverse()
+            var seg_rank = List[Int](capacity=n_active)
+            for pos in range(n_active):
+                seg_rank.append(Int(seg_order[pos] & 0xFFFFFFFF))
+            var per_read_gains = List[Float64](length=seg_goff[n_active], fill=0.0)
+            var per_read_blocks = List[Float64](length=seg_boff[n_active], fill=0.0)
+            var pool_p = scratch.likely_workers.unsafe_ptr()
+            var prg_p = per_read_gains.unsafe_ptr()
+            var prb_p = per_read_blocks.unsafe_ptr()
+            var taken = Atomic[Int64](0)
+
+            def score_likely_flat(
+                slot: Int,
+            ) {
+                mut taken,
+                imm total_tasks,
+                imm u_count,
+                imm uniq_k,
+                imm seg_rank,
+                imm seg_s,
+                imm seg_e,
+                imm seg_top,
+                imm seg_cols,
+                imm seg_block_at,
+                imm seg_block_period,
+                imm seg_block_copy,
+                imm seg_gstride,
+                imm seg_bstride,
+                imm seg_goff,
+                imm seg_boff,
+                imm paths,
+                imm sequences,
+                imm members,
+                imm current,
+                imm length,
+                imm site,
+                imm rates,
+                imm pool_p,
+                imm prg_p,
+                imm prb_p,
+            }:
+                ref w = pool_p[unsafe_offset=slot]
+                while True:
+                    var task = Int(taken.fetch_add(1))
+                    if task >= total_tasks:
+                        return
+                    var idx = seg_rank[task // u_count]
+                    var u = task % u_count
+                    var s = seg_s[idx]
+                    var e = seg_e[idx]
+                    var top = seg_top[idx]
+                    var n_gains = (top - s) * SLOTS
+                    var bs = seg_bstride[idx]
+                    w.gains.resize(n_gains, 0.0)
+                    w.block_gain.resize(bs, 0.0)
+                    ref cols = seg_cols[idx]
+                    for a_i in range(len(cols)):
+                        var row = cols[a_i] * SLOTS
+                        for si in range(SLOTS):
+                            w.gains[row + si] = 0.0
+                    for b in range(bs):
+                        w.block_gain[b] = 0.0
+                    _score_likely_read(
+                        paths,
+                        sequences,
+                        members,
+                        current,
+                        s,
+                        e,
+                        top,
+                        length,
+                        site,
+                        seg_block_at[idx],
+                        seg_block_period[idx],
+                        seg_block_copy[idx],
+                        rates,
+                        uniq_k[u],
+                        w.bands,
+                        w.forward,
+                        w.slotted,
+                        w.backward,
+                        w.forward_scale,
+                        w.backward_scale,
+                        w.copied,
+                        w.ahead,
+                        w.gains,
+                        w.block_gain,
+                    )
+                    var gbase = seg_goff[idx] + u * seg_gstride[idx]
+                    for a_i in range(len(cols)):
+                        var row = cols[a_i] * SLOTS
+                        for si in range(SLOTS):
+                            prg_p[unsafe_offset=gbase + a_i * SLOTS + si] = w.gains[row + si]
+                    var bbase = seg_boff[idx] + u * bs
+                    for b in range(bs):
+                        prb_p[unsafe_offset=bbase + b] = w.block_gain[b]
+
+            spread(score_likely_flat, flat_workers, flat_workers)
+            for idx in range(n_active):
+                var s = seg_s[idx]
+                var top = seg_top[idx]
+                var n_gains = (top - s) * SLOTS
+                var bs = seg_bstride[idx]
+                var gs = seg_gstride[idx]
+                var goff = seg_goff[idx]
+                var boff = seg_boff[idx]
+                ref cols = seg_cols[idx]
+                gains.resize(n_gains, 0.0)
+                for x in range(n_gains):
+                    gains[x] = 0.0
+                block_gain.resize(bs, 0.0)
+                for b in range(bs):
+                    block_gain[b] = 0.0
+                for k in range(count):
+                    var u = member_to_uniq[k]
+                    var gbase = goff + u * gs
+                    for a_i in range(len(cols)):
+                        var row = cols[a_i] * SLOTS
+                        for si in range(SLOTS):
+                            gains[row + si] += per_read_gains[gbase + a_i * SLOTS + si]
+                    var bbase = boff + u * bs
+                    for b in range(bs):
+                        block_gain[b] += per_read_blocks[bbase + b]
+                var chosen = _pick_likely_edit(
+                    current,
+                    s,
+                    length,
+                    run_gain,
+                    gains,
+                    seg_block_at[idx],
+                    seg_block_period[idx],
+                    seg_block_copy[idx],
+                    block_gain,
+                )
+                if chosen.has_edit:
+                    edit_start.append(chosen.start)
+                    edit_end.append(chosen.end)
+                    edit_text.append(chosen.text.copy())
+        else:
+            for g in active:
+                var s = bounds[g]
+                var e = bounds[g + 1]
+                var top = e + 1 if e == length else e
+                var n_gains = (top - s) * SLOTS
+                gains.resize(n_gains, 0.0)
+                for x in range(n_gains):
+                    gains[x] = 0.0
+                block_at.clear()
+                block_period.clear()
+                block_copy.clear()
+                for i in range(s, top):
+                    if site[i]:
+                        _periods(current, i, s, periods)
+                        for p in periods:
+                            for copy in range(2):
+                                block_at.append(i)
+                                block_period.append(p)
+                                block_copy.append(copy == 1)
+                var n_blocks = len(block_at)
+                block_gain.resize(n_blocks, 0.0)
+                for b in range(n_blocks):
+                    block_gain[b] = 0.0
+                if u_count < count:
+                    var active_cols = List[Int]()
+                    for c in range(e - s + 1):
+                        if s + c < top and site[s + c]:
+                            active_cols.append(c)
+                    var gstride = len(active_cols) * SLOTS
+                    var u_gains = List[Float64](length=u_count * gstride, fill=0.0)
+                    var u_blocks = List[Float64](length=u_count * n_blocks, fill=0.0)
+                    for u in range(u_count):
+                        for a_i in range(len(active_cols)):
+                            var row = active_cols[a_i] * SLOTS
+                            for si in range(SLOTS):
+                                gains[row + si] = 0.0
+                        for b in range(n_blocks):
+                            block_gain[b] = 0.0
+                        _score_likely_read(
+                            paths,
+                            sequences,
+                            members,
+                            current,
+                            s,
+                            e,
+                            top,
+                            length,
+                            site,
+                            block_at,
+                            block_period,
+                            block_copy,
+                            rates,
+                            uniq_k[u],
+                            bands,
+                            forward,
+                            slotted,
+                            backward,
+                            forward_scale,
+                            backward_scale,
+                            copied,
+                            ahead,
+                            gains,
+                            block_gain,
+                        )
+                        var gb = u * gstride
+                        for a_i in range(len(active_cols)):
+                            var row = active_cols[a_i] * SLOTS
+                            for si in range(SLOTS):
+                                u_gains[gb + a_i * SLOTS + si] = gains[row + si]
+                        var bb = u * n_blocks
+                        for b in range(n_blocks):
+                            u_blocks[bb + b] = block_gain[b]
+                    for a_i in range(len(active_cols)):
+                        var row = active_cols[a_i] * SLOTS
+                        for si in range(SLOTS):
+                            gains[row + si] = 0.0
+                    for b in range(n_blocks):
+                        block_gain[b] = 0.0
                     for k in range(count):
-                        var gbase = k * gain_stride
-                        for a_idx in range(len(active_cols)):
-                            var row = active_cols[a_idx] * SLOTS
-                            for slot_i in range(SLOTS):
-                                gains[row + slot_i] += per_read_gains[gbase + a_idx * SLOTS + slot_i]
-                        var bbase = k * block_stride
-                        for b in range(block_stride):
-                            block_gain[b] += per_read_blocks[bbase + b]
+                        var u = member_to_uniq[k]
+                        var gb = u * gstride
+                        for a_i in range(len(active_cols)):
+                            var row = active_cols[a_i] * SLOTS
+                            for si in range(SLOTS):
+                                gains[row + si] += u_gains[gb + a_i * SLOTS + si]
+                        var bb = u * n_blocks
+                        for b in range(n_blocks):
+                            block_gain[b] += u_blocks[bb + b]
                 else:
                     for k in range(count):
                         _score_likely_read(

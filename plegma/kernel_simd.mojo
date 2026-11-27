@@ -43,7 +43,7 @@ def _zero[dt: DType](p: MutPointer[Scalar[dt], _], count: Int):
 
 @inline(.always)
 def _predecessor(
-    pred_rows: List[Int], pred_at: List[Int], choices: List[UInt8], choice_at: List[Int], r: Int, cell: Int, kind: Int
+    pred_rows: List[Int], pred_at: List[Int], choices: List[UInt16], choice_at: List[Int], r: Int, cell: Int, kind: Int
 ) -> Int:
     """The row a move at `cell` of row `r` came from (`kind`: 0 the diagonal, 1 and 2 the deletions)."""
     var which = 0 if choice_at[r] < 0 else Int(choices[choice_at[r] + 3 * cell + kind])
@@ -168,9 +168,9 @@ def _first_equal[dt: DType](h: MutPointer[Scalar[dt], _], span: Int, value: Scal
         if hit.reduce_or():
             return at + Int(hit.select(lane, SIMD[dt, V](Scalar[dt](V))).reduce_min())
         at += V
-    while h[unsafe_offset=at] != value:
+    while at < span and h[unsafe_offset=at] != value:
         at += 1
-    return at
+    return min(at, max(span - 1, 0))
 
 
 @inline(.always)
@@ -185,9 +185,9 @@ def _last_equal[dt: DType](h: MutPointer[Scalar[dt], _], span: Int, value: Scala
             return at + Int(hit.select(lane, SIMD[dt, V](Scalar[dt](-1))).reduce_max())
         at -= V
     var k = min(span, at + V) - 1
-    while h[unsafe_offset=k] != value:
+    while k > 0 and h[unsafe_offset=k] != value:
         k -= 1
-    return k
+    return max(k, 0)
 
 
 @inline(.always)
@@ -234,17 +234,11 @@ def _last[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
 
 @inline(.always)
 def _floor[dt: DType, width: Int](v: SIMD[dt, width]) -> SIMD[dt, width]:
-    """`v` kept at or above the sentinel in 16-bit lanes, where a few gap costs taken from it would wrap."""
-    comptime if dt == DType.int16:
-        return max(v, SIMD[dt, width](_neg[dt]()))
-    else:
-        return v
+    """`v` kept at or above the sentinel so unreached cells stay at `_neg` in both 16-bit and 32-bit lanes."""
+    return max(v, SIMD[dt, width](_neg[dt]()))
 
 
 @inline(.always)
 def _floor[dt: DType](v: Scalar[dt]) -> Scalar[dt]:
     """The scalar `_floor`."""
-    comptime if dt == DType.int16:
-        return max(v, _neg[dt]())
-    else:
-        return v
+    return max(v, _neg[dt]())

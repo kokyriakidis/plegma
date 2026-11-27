@@ -174,6 +174,8 @@ def _groups(
 ) raises:
     """`members` grouped by letters and anchor: the first of each group in `unique` (in the order they come), how
     many it stands for in `weight`, and per sequence the first of its group in `same_as` (itself if not a member)."""
+    unique.clear()
+    weight.clear()
     var at = Dict[String, Int]()
     same_as = List[Int](capacity=len(sequences))
     for r in range(len(sequences)):

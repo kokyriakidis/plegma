@@ -161,129 +161,294 @@ struct _Paths(Movable):
         self.deleted = 0
         self.copying = 0
 
-        # Batch any uncached distinct alignments in parallel when multiple threads are requested.
-        if threads > 1 and count >= 2:
-            var missing = List[Int]()
-            var queued = List[Bool](length=len(sequences), fill=False)
-            for k in range(count):
-                var first = realigned.same_as[members[k]]
-                if not realigned.found[first] and not queued[first]:
-                    queued[first] = True
-                    missing.append(first)
-            var workers = thread_count(threads, len(missing))
-            if workers > 1 and len(missing) >= 2:
-                while len(self.worker_aligners) < workers:
-                    self.worker_aligners.append(Aligner(warm=False))
-                var order = List[UInt64](capacity=len(missing))
-                for idx in range(len(missing)):
-                    order.append((UInt64(len(sequences[missing[idx]])) << 32) | UInt64(idx))
-                sort(order)
-                order.reverse()
-                var results = List[Optional[Alignment]](length=len(missing), fill=None)
-                var failed = List[Bool](length=len(missing), fill=False)
-                var aligners_p = self.worker_aligners.unsafe_ptr()
-                var results_p = results.unsafe_ptr()
-                var failed_p = failed.unsafe_ptr()
-                var taken = Atomic[Int64](0)
-
-                def align_missing(
-                    slot: Int,
-                ) {
-                    mut taken,
-                    imm order,
-                    imm missing,
-                    imm consensus,
-                    imm sequences,
-                    imm anchors,
-                    imm aligners_p,
-                    imm results_p,
-                    imm failed_p,
-                }:
-                    ref local_aligner = aligners_p[unsafe_offset=slot]
-                    while True:
-                        var pos = Int(taken.fetch_add(1))
-                        if pos >= len(order):
-                            return
-                        var idx = Int(order[pos] & 0xFFFFFFFF)
-                        var r = missing[idx]
-                        var anchor = anchors[r] if len(anchors) > 0 else 0
-                        try:
-                            results_p[unsafe_offset=idx] = _align_one(local_aligner, consensus, sequences[r], anchor)
-                        except:
-                            failed_p[unsafe_offset=idx] = True
-
-                spread(align_missing, workers, workers)
-                for idx in range(len(missing)):
-                    var r = missing[idx]
-                    if failed[idx]:
-                        var anchor = anchors[r] if len(anchors) > 0 else 0
-                        realigned.found[r] = _align_one(aligner, consensus, sequences[r], anchor)
-                    else:
-                        realigned.found[r] = results[idx].take()
-
+        # Ensure every distinct member alignment exists (in parallel when >= 2 missing).
+        var uniq_first = List[Int](capacity=count)
+        var uniq_k = List[Int](capacity=count)
+        var uniq_weight = List[Int](capacity=count)
+        var member_to_uniq = List[Int](length=count, fill=0)
+        var seen_uniq = List[Int](length=len(sequences), fill=-1)
+        var missing = List[Int]()
         for k in range(count):
-            # A member standing for `weights[k]` reads alike counts that many times.
             var w = weights[k] if len(weights) > 0 else 1
-            ref seq = sequences[members[k]]
-            var anchor = anchors[members[k]] if len(anchors) > 0 else 0
             var first = realigned.same_as[members[k]]
-            if not realigned.found[first]:
-                realigned.found[first] = _align_one(aligner, consensus, seq, anchor)
-            ref found = realigned.found[first].value()
-            self.total += w * found.cost
-            var base = k * self.stride
-            var i = found.reference_start
-            var j = found.query_start
-            self.span_start[k] = i
-            self.span_end[k] = found.reference_end
-            self.spanned += w * (found.reference_end - found.reference_start)
-            for b in range(i + 1):
-                self.enter[base + b] = Int32(j)
-                self.leave[base + b] = Int32(j)
-            var cigar_bytes = found.cigar.as_bytes()
-            var run_n = 0
-            for ci in range(len(cigar_bytes)):
-                var ch = cigar_bytes[ci]
-                if ch >= 48 and ch <= 57:
-                    run_n = run_n * 10 + Int(ch - 48)
+            var u = seen_uniq[first]
+            if u < 0:
+                u = len(uniq_first)
+                seen_uniq[first] = u
+                uniq_first.append(first)
+                uniq_k.append(k)
+                uniq_weight.append(w)
+                if not realigned.found[first]:
+                    missing.append(first)
+            else:
+                uniq_weight[u] += w
+            member_to_uniq[k] = u
+
+        var n_missing = len(missing)
+        var align_workers = thread_count(threads, n_missing)
+        if align_workers > 1 and n_missing >= 2:
+            while len(self.worker_aligners) < align_workers:
+                self.worker_aligners.append(Aligner(warm=False))
+            var order = List[UInt64](capacity=n_missing)
+            for idx in range(n_missing):
+                order.append((UInt64(len(sequences[missing[idx]])) << 32) | UInt64(idx))
+            sort(order)
+            order.reverse()
+            var results = List[Optional[Alignment]](length=n_missing, fill=None)
+            var failed = List[Bool](length=n_missing, fill=False)
+            var aligners_p = self.worker_aligners.unsafe_ptr()
+            var results_p = results.unsafe_ptr()
+            var failed_p = failed.unsafe_ptr()
+            var taken = Atomic[Int64](0)
+
+            def align_missing(
+                slot: Int,
+            ) {
+                mut taken,
+                imm order,
+                imm missing,
+                imm consensus,
+                imm sequences,
+                imm anchors,
+                imm aligners_p,
+                imm results_p,
+                imm failed_p,
+            }:
+                ref local_aligner = aligners_p[unsafe_offset=slot]
+                while True:
+                    var pos = Int(taken.fetch_add(1))
+                    if pos >= len(order):
+                        return
+                    var idx = Int(order[pos] & 0xFFFFFFFF)
+                    var r = missing[idx]
+                    var anchor = anchors[r] if len(anchors) > 0 else 0
+                    try:
+                        results_p[unsafe_offset=idx] = _align_one(local_aligner, consensus, sequences[r], anchor)
+                    except:
+                        failed_p[unsafe_offset=idx] = True
+
+            spread(align_missing, align_workers, align_workers)
+            for idx in range(n_missing):
+                var r = missing[idx]
+                if failed[idx]:
+                    var anchor = anchors[r] if len(anchors) > 0 else 0
+                    realigned.found[r] = _align_one(aligner, consensus, sequences[r], anchor)
+                else:
+                    realigned.found[r] = results[idx].take()
+        else:
+            for r in missing:
+                var anchor = anchors[r] if len(anchors) > 0 else 0
+                realigned.found[r] = _align_one(aligner, consensus, sequences[r], anchor)
+
+        # Unpack each distinct alignment once (in parallel across threads on large inputs), then copy to duplicates.
+        var n_uniq = len(uniq_first)
+        var unpack_workers = thread_count(threads, n_uniq)
+        var stride = self.stride
+        if unpack_workers > 1 and n_uniq >= 8 and length >= 128:
+            var w_discord = List[Int32](length=unpack_workers * stride, fill=0)
+            var w_cover = List[Int32](length=unpack_workers * stride, fill=0)
+            var w_stats = List[Int](length=unpack_workers * 7, fill=0)
+            var enter_p = self.enter.unsafe_ptr()
+            var leave_p = self.leave.unsafe_ptr()
+            var ss_p = self.span_start.unsafe_ptr()
+            var se_p = self.span_end.unsafe_ptr()
+            var wd_p = w_discord.unsafe_ptr()
+            var wc_p = w_cover.unsafe_ptr()
+            var ws_p = w_stats.unsafe_ptr()
+            var taken = Atomic[Int64](0)
+
+            def unpack_worker(
+                slot: Int,
+            ) {
+                mut taken,
+                imm n_uniq,
+                imm uniq_first,
+                imm uniq_k,
+                imm uniq_weight,
+                imm realigned,
+                imm sequences,
+                imm consensus,
+                imm length,
+                imm stride,
+                imm enter_p,
+                imm leave_p,
+                imm ss_p,
+                imm se_p,
+                imm wd_p,
+                imm wc_p,
+                imm ws_p,
+            }:
+                var dbase = slot * stride
+                var s_total = 0
+                var s_spanned = 0
+                var s_matched = 0
+                var s_substituted = 0
+                var s_inserted = 0
+                var s_deleted = 0
+                var s_copying = 0
+                while True:
+                    var u = Int(taken.fetch_add(1))
+                    if u >= n_uniq:
+                        break
+                    var first = uniq_first[u]
+                    var k = uniq_k[u]
+                    var w = uniq_weight[u]
+                    ref seq = sequences[first]
+                    ref found = realigned.found[first].value()
+                    s_total += w * found.cost
+                    var base = k * stride
+                    var i = found.reference_start
+                    var j = found.query_start
+                    ss_p[unsafe_offset=k] = i
+                    se_p[unsafe_offset=k] = found.reference_end
+                    s_spanned += w * (found.reference_end - found.reference_start)
+                    for b in range(i + 1):
+                        enter_p[unsafe_offset=base + b] = Int32(j)
+                        leave_p[unsafe_offset=base + b] = Int32(j)
+                    var cigar_bytes = found.cigar.as_bytes()
+                    var run_n = 0
+                    for ci in range(len(cigar_bytes)):
+                        var ch = cigar_bytes[ci]
+                        if ch >= 48 and ch <= 57:
+                            run_n = run_n * 10 + Int(ch - 48)
+                            continue
+                        var n = run_n if run_n > 0 else 1
+                        run_n = 0
+                        if ch == 73:  # 'I'
+                            s_inserted += w * n
+                            for _ in range(n):
+                                if (i > 0 and seq[j] == consensus[i - 1]) or (i < length and seq[j] == consensus[i]):
+                                    s_copying += w
+                                wd_p[unsafe_offset=dbase + i] += Int32(w)
+                                j += 1
+                        elif ch == 68:  # 'D'
+                            s_deleted += w * n
+                            for _ in range(n):
+                                leave_p[unsafe_offset=base + i] = Int32(j)
+                                wd_p[unsafe_offset=dbase + i] += Int32(w)
+                                i += 1
+                                enter_p[unsafe_offset=base + i] = Int32(j)
+                        elif ch == 61 or ch == 77:  # '=' or 'M'
+                            s_matched += w * n
+                            for _ in range(n):
+                                leave_p[unsafe_offset=base + i] = Int32(j)
+                                j += 1
+                                i += 1
+                                enter_p[unsafe_offset=base + i] = Int32(j)
+                        elif ch == 88:  # 'X'
+                            s_substituted += w * n
+                            for _ in range(n):
+                                leave_p[unsafe_offset=base + i] = Int32(j)
+                                wd_p[unsafe_offset=dbase + i] += Int32(w)
+                                j += 1
+                                i += 1
+                                enter_p[unsafe_offset=base + i] = Int32(j)
+                    leave_p[unsafe_offset=base + i] = Int32(j)
+                    for b in range(i + 1, stride):
+                        enter_p[unsafe_offset=base + b] = Int32(j)
+                        leave_p[unsafe_offset=base + b] = Int32(j)
+                    for b in range(found.reference_start, i + 1):
+                        wc_p[unsafe_offset=dbase + b] += Int32(w)
+                var sb = slot * 7
+                ws_p[unsafe_offset=sb] = s_total
+                ws_p[unsafe_offset=sb + 1] = s_spanned
+                ws_p[unsafe_offset=sb + 2] = s_matched
+                ws_p[unsafe_offset=sb + 3] = s_substituted
+                ws_p[unsafe_offset=sb + 4] = s_inserted
+                ws_p[unsafe_offset=sb + 5] = s_deleted
+                ws_p[unsafe_offset=sb + 6] = s_copying
+
+            spread(unpack_worker, unpack_workers, unpack_workers)
+            for slot in range(unpack_workers):
+                var dbase = slot * stride
+                for b in range(stride):
+                    self.discord[b] += w_discord[dbase + b]
+                    self.cover[b] += w_cover[dbase + b]
+                var sb = slot * 7
+                self.total += w_stats[sb]
+                self.spanned += w_stats[sb + 1]
+                self.matched += w_stats[sb + 2]
+                self.substituted += w_stats[sb + 3]
+                self.inserted += w_stats[sb + 4]
+                self.deleted += w_stats[sb + 5]
+                self.copying += w_stats[sb + 6]
+        else:
+            for u in range(n_uniq):
+                var first = uniq_first[u]
+                var k = uniq_k[u]
+                var w = uniq_weight[u]
+                ref seq = sequences[first]
+                ref found = realigned.found[first].value()
+                self.total += w * found.cost
+                var base = k * stride
+                var i = found.reference_start
+                var j = found.query_start
+                self.span_start[k] = i
+                self.span_end[k] = found.reference_end
+                self.spanned += w * (found.reference_end - found.reference_start)
+                for b in range(i + 1):
+                    self.enter[base + b] = Int32(j)
+                    self.leave[base + b] = Int32(j)
+                var cigar_bytes = found.cigar.as_bytes()
+                var run_n = 0
+                for ci in range(len(cigar_bytes)):
+                    var ch = cigar_bytes[ci]
+                    if ch >= 48 and ch <= 57:
+                        run_n = run_n * 10 + Int(ch - 48)
+                        continue
+                    var n = run_n if run_n > 0 else 1
+                    run_n = 0
+                    if ch == 73:  # 'I'
+                        self.inserted += w * n
+                        for _ in range(n):
+                            if (i > 0 and seq[j] == consensus[i - 1]) or (i < length and seq[j] == consensus[i]):
+                                self.copying += w
+                            self.discord[i] += Int32(w)
+                            j += 1
+                    elif ch == 68:  # 'D'
+                        self.deleted += w * n
+                        for _ in range(n):
+                            self.leave[base + i] = Int32(j)
+                            self.discord[i] += Int32(w)
+                            i += 1
+                            self.enter[base + i] = Int32(j)
+                    elif ch == 61 or ch == 77:  # '=' or 'M'
+                        self.matched += w * n
+                        for _ in range(n):
+                            self.leave[base + i] = Int32(j)
+                            j += 1
+                            i += 1
+                            self.enter[base + i] = Int32(j)
+                    elif ch == 88:  # 'X'
+                        self.substituted += w * n
+                        for _ in range(n):
+                            self.leave[base + i] = Int32(j)
+                            self.discord[i] += Int32(w)
+                            j += 1
+                            i += 1
+                            self.enter[base + i] = Int32(j)
+                self.leave[base + i] = Int32(j)
+                for b in range(i + 1, stride):
+                    self.enter[base + b] = Int32(j)
+                    self.leave[base + b] = Int32(j)
+                for b in range(self.span_start[k], i + 1):
+                    self.cover[b] += Int32(w)
+
+        # Copy unpacked rows to any duplicate members sharing the same alignment.
+        if n_uniq < count:
+            var enter_p = self.enter.unsafe_ptr()
+            var leave_p = self.leave.unsafe_ptr()
+            for k in range(count):
+                var src_k = uniq_k[member_to_uniq[k]]
+                if src_k == k:
                     continue
-                var n = run_n if run_n > 0 else 1
-                run_n = 0
-                if ch == 73:  # 'I'
-                    self.inserted += w * n
-                    for _ in range(n):
-                        if (i > 0 and seq[j] == consensus[i - 1]) or (i < length and seq[j] == consensus[i]):
-                            self.copying += w
-                        self.discord[i] += Int32(w)
-                        j += 1
-                elif ch == 68:  # 'D'
-                    self.deleted += w * n
-                    for _ in range(n):
-                        self.leave[base + i] = Int32(j)
-                        self.discord[i] += Int32(w)
-                        i += 1
-                        self.enter[base + i] = Int32(j)
-                elif ch == 61 or ch == 77:  # '=' or 'M'
-                    self.matched += w * n
-                    for _ in range(n):
-                        self.leave[base + i] = Int32(j)
-                        j += 1
-                        i += 1
-                        self.enter[base + i] = Int32(j)
-                elif ch == 88:  # 'X'
-                    self.substituted += w * n
-                    for _ in range(n):
-                        self.leave[base + i] = Int32(j)
-                        self.discord[i] += Int32(w)
-                        j += 1
-                        i += 1
-                        self.enter[base + i] = Int32(j)
-            self.leave[base + i] = Int32(j)
-            for b in range(i + 1, self.stride):
-                self.enter[base + b] = Int32(j)
-                self.leave[base + b] = Int32(j)
-            for b in range(self.span_start[k], i + 1):
-                self.cover[b] += Int32(w)
+                self.span_start[k] = self.span_start[src_k]
+                self.span_end[k] = self.span_end[src_k]
+                var dst = k * stride
+                var src = src_k * stride
+                for b in range(stride):
+                    enter_p[unsafe_offset=dst + b] = enter_p[unsafe_offset=src + b]
+                    leave_p[unsafe_offset=dst + b] = leave_p[unsafe_offset=src + b]
 
 
 struct _Bands(Movable):
@@ -464,7 +629,7 @@ struct RepeatMask(Movable):
         self.k = k
         var n = len(sequence)
         self.masked_before = List[Int32](length=n + 1, fill=0)
-        if k <= 0 or n < k:
+        if k <= 0 or k >= 32 or n < k:
             return
         var marked = List[Bool](length=n, fill=False)
         var last = Dict[UInt64, Int]()

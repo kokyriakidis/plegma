@@ -10,7 +10,7 @@ from karan.common import spread, thread_count
 
 from .alphabet import encode_base
 from .cigar import ALIGN_MATCH, INSERTION, MATCH, haplotype_at, query_at
-from .consensus import ConsensusOptions, ConsensusScratch
+from .consensus import ConsensusOptions, ConsensusScratch, _check
 from .homopolymer import STRAND_UNKNOWN, HomopolymerModel, reads_say_one
 from .kernel import BOTH, INSIDE
 from .placement import Clustered, _consensus_of, _placed, alignment_costs
@@ -299,10 +299,23 @@ def _build_pair(
     mut made: List[List[UInt8]],
     mut joined: List[Bool],
 ) raises:
-    """Builds whichever of the two haplotypes `build_mask` requests, concurrently when both run and `threads > 1`."""
+    """Builds whichever of the two haplotypes `build_mask` requests, concurrently when both run and `threads > 1`,
+    splitting threads proportionally to each haplotype's read bases."""
     if options.poa.threads > 1 and build_mask[0] and build_mask[1]:
-        var sub_options = options.copy()
-        sub_options.poa.threads = max(1, options.poa.threads // 2)
+        var total_t = options.poa.threads
+        var bases0 = 0
+        for r in groups[0]:
+            bases0 += len(seqs[r])
+        var bases1 = 0
+        for r in groups[1]:
+            bases1 += len(seqs[r])
+        var total_b = max(1, bases0 + bases1)
+        var t0 = max(1, min(total_t - 1, (total_t * bases0 + total_b // 2) // total_b))
+        var t1 = total_t - t0
+        var sub0 = options.copy()
+        sub0.poa.threads = t0
+        var sub1 = options.copy()
+        sub1.poa.threads = t1
         var built = List[List[UInt8]](length=2, fill=List[UInt8]())
         var built_joined = List[Bool](length=2, fill=True)
         var failed = List[Bool](length=2, fill=False)
@@ -317,7 +330,8 @@ def _build_pair(
             imm groups,
             imm build_anchor,
             imm strand_of,
-            imm sub_options,
+            imm sub0,
+            imm sub1,
             imm homopolymers,
             imm built_p,
             imm joined_p,
@@ -327,7 +341,14 @@ def _build_pair(
             var whole = True
             try:
                 built_p[unsafe_offset=k] = _consensus_of(
-                    local_scratch, seqs, groups[k], build_anchor, strand_of, sub_options, homopolymers, whole
+                    local_scratch,
+                    seqs,
+                    groups[k],
+                    build_anchor,
+                    strand_of,
+                    sub0 if k == 0 else sub1,
+                    homopolymers,
+                    whole,
                 )
                 joined_p[unsafe_offset=k] = whole
             except:
@@ -373,13 +394,11 @@ def phased_consensus(
     homopolymers: HomopolymerModel = HomopolymerModel(),
 ) raises -> Clustered:
     """As `phased_consensus`, reusing `scratch` across calls."""
+    options.check()
     var n = len(seqs)
     if len(haplotypes) != n:
         raise Error(t"{len(haplotypes)} haplotypes for {n} sequences")
-    if len(anchors) != 0 and len(anchors) != n:
-        raise Error(t"{len(anchors)} anchors for {n} sequences")
-    if len(strands) != 0 and len(strands) != n:
-        raise Error(t"{len(strands)} strands for {n} sequences")
+    _check(n, anchors, strands)
     var anchor_of = anchors.copy() if len(anchors) > 0 else List[Int](length=n, fill=BOTH)
     var strand_of = strands.copy() if len(strands) > 0 else List[Int](length=n, fill=STRAND_UNKNOWN)
     var build_anchor = anchor_of.copy()

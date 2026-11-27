@@ -41,17 +41,31 @@ def _commonest(letters: List[List[UInt8]], label: List[Int], k: Int, mode: List[
     """Per column the commonest letter of the rows labelled `k` (the mode's own on a tie; `mode` with no rows)."""
     var out = mode.copy()
     var counts = List[Int](length=256, fill=0)
+    var touched = List[Int](capacity=8)
     for c in range(len(mode)):
-        for b in range(256):
-            counts[b] = 0
+        touched.clear()
         for i in range(len(letters)):
             if label[i] == k:
-                counts[Int(letters[i][c])] += 1
-        counts[Int(MISSING)] = 0
+                var b = Int(letters[i][c])
+                if b == Int(MISSING):
+                    continue
+                if counts[b] == 0:
+                    touched.append(b)
+                counts[b] += 1
+        # Keep ascending byte order on ties (identical to scanning `b in range(256)`).
+        for a in range(1, len(touched)):
+            var key = touched[a]
+            var j = a
+            while j > 0 and touched[j - 1] > key:
+                touched[j] = touched[j - 1]
+                j -= 1
+            touched[j] = key
         var best = Int(mode[c])
-        for b in range(256):
+        for b in touched:
             if counts[b] > counts[best]:
                 best = b
+        for b in touched:
+            counts[b] = 0
         out[c] = UInt8(best)
     return out^
 
@@ -71,29 +85,43 @@ def cluster_rows(rows: List[String], max_clusters: Int, min_freq: Float64, threa
     var columns = List[Int]()
     var weights = List[Int]()
     var counts = List[Int](length=256, fill=0)
+    var touched = List[Int](capacity=8)
     for c in range(width):
-        for b in range(256):
-            counts[b] = 0
+        touched.clear()
         for r in rows:
-            counts[Int(r.as_bytes()[c])] += 1
-        counts[Int(MISSING)] = 0
-        var first = 0
-        var second = 0
-        var first_letter = 0
-        var second_letter = 0
-        for b in range(256):
-            if counts[b] > first:
-                second = first
-                second_letter = first_letter
-                first = counts[b]
-                first_letter = b
-            elif counts[b] > second:
-                second = counts[b]
-                second_letter = b
-        if second >= floor:
-            columns.append(c)
-            var substitution = UInt8(first_letter) != GAP and UInt8(second_letter) != GAP
-            weights.append(SUBSTITUTION_WEIGHT if substitution else 1)
+            var b = Int(r.as_bytes()[c])
+            if b == Int(MISSING):
+                continue
+            if counts[b] == 0:
+                touched.append(b)
+            counts[b] += 1
+        if len(touched) >= 2:
+            for a in range(1, len(touched)):
+                var key = touched[a]
+                var j = a
+                while j > 0 and touched[j - 1] > key:
+                    touched[j] = touched[j - 1]
+                    j -= 1
+                touched[j] = key
+            var first = 0
+            var second = 0
+            var first_letter = 0
+            var second_letter = 0
+            for b in touched:
+                if counts[b] > first:
+                    second = first
+                    second_letter = first_letter
+                    first = counts[b]
+                    first_letter = b
+                elif counts[b] > second:
+                    second = counts[b]
+                    second_letter = b
+            if second >= floor:
+                columns.append(c)
+                var substitution = UInt8(first_letter) != GAP and UInt8(second_letter) != GAP
+                weights.append(SUBSTITUTION_WEIGHT if substitution else 1)
+        for b in touched:
+            counts[b] = 0
     if len(columns) == 0:
         out.append(everyone^)
         return out^
