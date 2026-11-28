@@ -524,7 +524,7 @@ def _swapped(seq: List[UInt8], at: List[Int]) -> List[UInt8]:
     var out = seq.copy()
     var letters = "ACGT".as_bytes()
     for i in at:
-        out[i] = letters[(Int(String("ACGT").find(chr(Int(out[i])))) + 1) % 4]
+        out[i] = letters[(String("ACGT").find(chr(Int(out[i]))).or_else(-1) + 1) % 4]
     return out^
 
 
