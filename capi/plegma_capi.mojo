@@ -239,7 +239,9 @@ def _options_init_sized(settings: Bytes, struct_size: Int):
 
 @export
 def plegma_model_load(
-    path: Optional[Pointer[UInt8, MutUntrackedOrigin]], error: Optional[Pointer[UInt8, MutUntrackedOrigin]], error_size: Int
+    path: Optional[Pointer[UInt8, MutUntrackedOrigin]],
+    error: Optional[Pointer[UInt8, MutUntrackedOrigin]],
+    error_size: Int,
 ) abi("C") -> Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]]:
     if not path:
         _write_error("plegma_model_load: no path", error, error_size)
