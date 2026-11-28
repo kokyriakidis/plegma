@@ -39,7 +39,7 @@ habits:
 - Build and test on xaros: `rsync -az --delete --exclude .pixi --exclude build --exclude .git ~/plegma/
   xaros.tail2f508.ts.net:plegma/` (this carries the submodules' files), then `~/.pixi/bin/pixi run test` there.
   Format there with `pixi run format` (120 columns) and rsync the `.mojo` files back.
-- Toolchain: one Mojo nightly, pinned exactly in `pixi.toml` with its `max` (1.2.0.dev2026102005, the same as sporos
+- Toolchain: one Mojo nightly, pinned exactly in `pixi.toml` with its `max` (1.3.0.dev2026112705, the same as sporos
   and karan). Move it on purpose: change the pin, `pixi lock`, build and test on xaros.
 - `plegma/alphabet.mojo` started as a copy of sporos's; the two may drift.
 - Benchmark with min-of-N timings; other jobs share the machine.
