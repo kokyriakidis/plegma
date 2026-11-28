@@ -497,7 +497,7 @@ def _likely(
             seg_order.reverse()
             var seg_edits = List[_LikelyEdit](length=n_active, fill=_LikelyEdit())
             var seg_edits_p = seg_edits.unsafe_ptr()
-            var pool_p = scratch.likely_workers.unsafe_ptr()
+            var pool = Span(scratch.likely_workers)
             var taken = Atomic[Int64](0)
 
             def score_segments(
@@ -519,10 +519,10 @@ def _likely(
                 imm u_count,
                 imm rates,
                 imm run_gain,
-                imm pool_p,
+                imm pool,
                 imm seg_edits_p,
             }:
-                ref w = pool_p[unsafe_offset=slot]
+                ref w = pool.unsafe_ptr()[unsafe_offset=slot]
                 while True:
                     var pos = Int(taken.fetch_add(1))
                     if pos >= len(seg_order):
@@ -717,7 +717,7 @@ def _likely(
                 seg_rank.append(Int(seg_order[pos] & 0xFFFFFFFF))
             var per_read_gains = List[Float64](length=seg_goff[n_active], fill=0.0)
             var per_read_blocks = List[Float64](length=seg_boff[n_active], fill=0.0)
-            var pool_p = scratch.likely_workers.unsafe_ptr()
+            var pool = Span(scratch.likely_workers)
             var prg_p = per_read_gains.unsafe_ptr()
             var prb_p = per_read_blocks.unsafe_ptr()
             var taken = Atomic[Int64](0)
@@ -748,11 +748,11 @@ def _likely(
                 imm length,
                 imm site,
                 imm rates,
-                imm pool_p,
+                imm pool,
                 imm prg_p,
                 imm prb_p,
             }:
-                ref w = pool_p[unsafe_offset=slot]
+                ref w = pool.unsafe_ptr()[unsafe_offset=slot]
                 while True:
                     var task = Int(taken.fetch_add(1))
                     if task >= total_tasks:

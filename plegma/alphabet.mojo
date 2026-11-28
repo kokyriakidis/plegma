@@ -100,7 +100,7 @@ struct CodeBuffer(Movable, Sized):
         dealloc(self._alloc^)
 
     @inline(.always)
-    def unsafe_ptr(ref self) -> Pointer[UInt8, origin_of(self._alloc._alloc)]:
+    def unsafe_ptr(ref self) -> type_of(self._alloc.unsafe_ptr()):
         return self._alloc.unsafe_ptr()
 
     @inline(.always)

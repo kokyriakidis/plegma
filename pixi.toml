@@ -11,11 +11,11 @@ license-file = "LICENSE"
 # Latest Mojo (nightly channel): the vendored Modular skills track the latest compiler.
 [dependencies]
 # Pinned: nightlies change the language from day to day. Move it on purpose, rebuild and test.
-mojo = "==1.2.0.dev2026102005"
+mojo = "==1.3.0.dev2026112705"
 # karan's GPU paths import max.gpu and max.algorithm; the max nightly of the same day.
-max = "==26.7.0.dev2026102005"
+max = "==26.8.0.dev2026112705"
 # sporos: libdeflate reads gzip/BGZF, libsais builds its FM-index (dlopen).
-libdeflate = ">=1.26,<2"
+libdeflate = ">=1.25,<2"
 libsais = ">=2.12,<3"
 
 [tasks]

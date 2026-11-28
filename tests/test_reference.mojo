@@ -94,7 +94,7 @@ def _long_change_places(rows: List[List[UInt8]], least: Int) -> Int:
     return len(starts)
 
 
-def _b(text: StringSlice) -> List[UInt8]:
+def _b(text: StringSpan) -> List[UInt8]:
     return List[UInt8](text.as_bytes())
 
 

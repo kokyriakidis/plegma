@@ -468,7 +468,7 @@ def polish_with_scratch(
             seg_order.reverse()
             var seg_edits = List[_SegmentEdits](length=n_active, fill=_SegmentEdits())
             var seg_edits_p = seg_edits.unsafe_ptr()
-            var pool_p = scratch.edit_workers.unsafe_ptr()
+            var pool = Span(scratch.edit_workers)
             var taken = Atomic[Int64](0)
 
             def score_edit_segments(
@@ -488,10 +488,10 @@ def polish_with_scratch(
                 imm count,
                 imm one_each,
                 imm mask,
-                imm pool_p,
+                imm pool,
                 imm seg_edits_p,
             }:
-                ref w = pool_p[unsafe_offset=slot]
+                ref w = pool.unsafe_ptr()[unsafe_offset=slot]
                 while True:
                     var pos = Int(taken.fetch_add(1))
                     if pos >= len(seg_order):
@@ -606,7 +606,7 @@ def polish_with_scratch(
             var seg_rank = List[Int](capacity=n_active)
             for pos in range(n_active):
                 seg_rank.append(Int(seg_order[pos] & 0xFFFFFFFF))
-            var pool_p = scratch.edit_workers.unsafe_ptr()
+            var pool = Span(scratch.edit_workers)
             var taken = Atomic[Int64](0)
 
             def score_edit_flat(
@@ -633,9 +633,9 @@ def polish_with_scratch(
                 imm current,
                 imm length,
                 imm site,
-                imm pool_p,
+                imm pool,
             }:
-                ref w = pool_p[unsafe_offset=slot]
+                ref w = pool.unsafe_ptr()[unsafe_offset=slot]
                 w.gains.resize(total_gains, 0)
                 for x in range(total_gains):
                     w.gains[x] = 0

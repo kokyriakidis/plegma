@@ -25,7 +25,7 @@ struct Runs(Movable):
         self.counts = List[Int]()
 
 
-def cigar_runs(cigar: StringSlice) raises -> Runs:
+def cigar_runs(cigar: StringSpan) raises -> Runs:
     """`cigar`'s runs."""
     var runs = Runs()
     var length = 0
@@ -43,14 +43,14 @@ def cigar_runs(cigar: StringSlice) raises -> Runs:
     return runs^
 
 
-def pairing_from_cigar(cigar: StringSlice, q_length: Int, ref_offset: Int = 0) -> List[Int]:
+def pairing_from_cigar(cigar: StringSpan, q_length: Int, ref_offset: Int = 0) -> List[Int]:
     """For each query letter of a global alignment's CIGAR, the reference letter it pairs with (-1: inserted)."""
     var out = List[Int](capacity=q_length)
     append_pairing_from_cigar(cigar, ref_offset, out)
     return out^
 
 
-def append_pairing_from_cigar(cigar: StringSlice, ref_offset: Int, mut out: List[Int]):
+def append_pairing_from_cigar(cigar: StringSpan, ref_offset: Int, mut out: List[Int]):
     """Appends query-to-reference pairings from `cigar` (starting at `ref_offset`) into `out`."""
     var i = ref_offset
     var run_n = 0

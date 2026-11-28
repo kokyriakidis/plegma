@@ -299,21 +299,21 @@ def prefetch_pin_anchors(
         return
     scratch.precomp_letters = scratch.cached_letters.copy()
     scratch.precomp_anchors = List[PinAnchors](length=len(seqs), fill=PinAnchors())
-    var out_p = scratch.precomp_anchors.unsafe_ptr()
+    var out = Span(scratch.precomp_anchors)
     ref letters = scratch.precomp_letters
     ref index = scratch.cached_index
     var taken = Atomic[Int64](0)
 
     def seed_worker(
         slot: Int,
-    ) {mut taken, imm start_idx, imm rem, imm read_ids, imm seqs, imm letters, imm index, imm out_p}:
+    ) {mut taken, imm start_idx, imm rem, imm read_ids, imm seqs, imm letters, imm index, imm out}:
         while True:
             var offset = Int(taken.fetch_add(1))
             if offset >= rem:
                 return
             var r = read_ids[start_idx + offset]
             if len(seqs[r]) < 1 << POSITION_BITS:
-                out_p[unsafe_offset=r] = compute_pin_anchors(letters, index, seqs[r])
+                out.unsafe_ptr()[unsafe_offset=r] = compute_pin_anchors(letters, index, seqs[r])
 
     spread(seed_worker, workers, workers)
 

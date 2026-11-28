@@ -47,7 +47,7 @@ def write_gfa(graph: Graph, shown: List[Int], consensus_path: List[Int], mut tex
             if segment[s] != Int32(k) or s == node:
                 break
             node = s
-        text.write(StringSlice(unsafe_from_utf8=Span(letters)), "\n")
+        text.write(StringSpan(unsafe_from_utf8=Span(letters)), "\n")
     for k in range(len(heads)):
         var e = Int(graph.first_out[last[k]])
         while e >= 0:

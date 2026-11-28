@@ -259,10 +259,10 @@ def _write(var aligned: Aligned, seqs: List[List[UInt8]], options: Options, run_
     if (result == 0 or result == 2) and len(aligned.polished) > 0:
         # The library's consensus: one sequence, or the two sides of an assembly that could not be joined.
         if len(aligned.polished) == 1:
-            text.write(">Consensus_sequence\n", StringSlice(unsafe_from_utf8=Span(aligned.polished[0])), "\n")
+            text.write(">Consensus_sequence\n", StringSpan(unsafe_from_utf8=Span(aligned.polished[0])), "\n")
         else:
-            text.write(">Consensus_sequence_left\n", StringSlice(unsafe_from_utf8=Span(aligned.polished[0])), "\n")
-            text.write(">Consensus_sequence_right\n", StringSlice(unsafe_from_utf8=Span(aligned.polished[1])), "\n")
+            text.write(">Consensus_sequence_left\n", StringSpan(unsafe_from_utf8=Span(aligned.polished[0])), "\n")
+            text.write(">Consensus_sequence_right\n", StringSpan(unsafe_from_utf8=Span(aligned.polished[1])), "\n")
     elif result == 0 or result == 2:
         var clusters = cluster_rows(
             rows, options.max_consensus, options.min_freq, run_threads

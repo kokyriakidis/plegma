@@ -5,7 +5,7 @@ from karan import Aligner, Costs, Mode, Ties
 from plegma.graph import DELETION, INSERTION, Graph, cigar_runs
 
 
-def _bytes(text: StringSlice) -> List[UInt8]:
+def _bytes(text: StringSpan) -> List[UInt8]:
     return List[UInt8](text.as_bytes())
 
 

@@ -3,7 +3,9 @@
 The main `mojo-syntax` skill makes code compile; these rules make it pass
 review. Before submitting or reviewing Mojo, scan the diff for every WRONG
 pattern below. The first five sections are the ones reviewers flag most
-often in agent-written code.
+often in agent-written code. These rules add to the
+[Mojo style guide](https://github.com/modular/modular/blob/main/Mojo/docs/contributing/stdlib/stdlib-code-style.md);
+apply both.
 
 ## 1. Use existing helpers; never open-code them
 
@@ -168,24 +170,37 @@ rebind[TileTensor[dtype, LayoutB, origin]](tile_a)
 - More than one rebind per function, or one you can't justify in a
   sentence, is a red flag.
 
-The same applies to origins: don't call `as_any_origin()` or use
-`ImmutAnyOrigin` without need, and use `TileTensor.as_imm()` rather
-than overriding `mut=False`.
+The same applies to origins: never cast to an any-origin
+(`.as_unsafe_any_origin()`, `unsafe_origin_cast[MutAnyOrigin]`) to make
+types line up (see §7), and use `TileTensor.as_imm()` rather than
+overriding `mut=False`.
 
-## 7. Mark read-only data immutable
+## 7. Leave origins unbound; mark read-only data immutable
 
-Inputs that are never written take immutable origins so the signature
-shows which arguments are outputs. Question every `MutAnyOrigin`.
+An argument's origin is `_` unless something forces a concrete one. `_`
+infers the caller's origin, so lifetimes and exclusivity stay checked.
+Never write `MutAnyOrigin`, `ImmutAnyOrigin`, or their `UnsafeAnyOrigin`
+spellings in new code, and never add `.as_unsafe_any_origin()` at a call
+site to satisfy one; fix the signature instead. Inputs that are never
+written take immutable origins so the signature shows which arguments are
+outputs.
 
 ```mojo
 # WRONG                                        # CORRECT
-src: Pointer[Float32, MutAnyOrigin]            src: ImmPointer[Float32, _]
+src: Pointer[Float32, ImmAnyOrigin]            src: ImmPointer[Float32, _]
+dst: Pointer[Float32, MutAnyOrigin]            dst: MutPointer[Float32, _]
+x: TileTensor[dtype, L, ImmAnyOrigin].         x: ImmTileTensor[dtype, L, _]
+f(p.as_unsafe_any_origin())                    f(p)
 ```
+
+GPU kernel entry points are the exception: `enqueue_function` can't
+infer `_`, so they take `MutUntrackedOrigin` / `ImmUntrackedOrigin`.
+Helpers the kernel calls still take `_`.
 
 A caller holding mutable data doesn't make the parameter mutable. A
 mutable value converts implicitly to an immutable parameter with a
 generic origin (`ImmTileTensor[dtype, L, _]`); with a concrete origin
-such as `ImmutAnyOrigin`, the caller passes `.as_imm()`. Never widen a
+such as `ImmUntrackedOrigin`, the caller passes `.as_imm()`. Never widen a
 read-only parameter to `mut=True` to match a caller.
 
 Loads from immutable data are invariant by default; don't pass
@@ -333,7 +348,9 @@ match x:
     case (0, var x) | (var x, 1):# or-pattern: same names bound on every
     case .Some(0):               #   alternative (payload-less cases bind none)
     case .Some(ref v):           # ref into a mutable payload writes back
-    case var y:                  # owned copy (mutable); bare name is imm
+    case var y:                  # owned, mutable: an unguarded binding moves
+                                 #   an rvalue subject, else copies; bare name
+                                 #   is imm
     case 0 as n:                 # bind the whole subject after testing it
     case _:                      # wildcard; irrefutable, closes the match
 ```
@@ -346,7 +363,7 @@ where the grammar requires it. Compiler-verified matrix:
 | Arm                                   | Compares alone? | Notes |
 |---------------------------------------|-----------------|-------|
 | `case 1:` / `case "a":` / `case True:` | yes | `== 1:` **warns "redundant"** |
-| `case -1:` (negative literal)          | no — error      | write `case == -1:` |
+| `case -1:` / `case -0.5:` (negative literal) | yes | `== -1:` **warns "redundant"** |
 | `case {1, 2}:` (initializer list)      | no — error      | name the subject fields, such as `case {x=1, y=2}:` |
 | `case .Some(0):` / `case DType.int32:` / `case _Ops.BARRIER.value:` | yes | enum tags and any dotted path compare; no `==` |
 | `case LOAD_DRAM:` (bare name)          | **binds**       | even a comptime alias — silently shadows, later arms warn unreachable; write `case == LOAD_DRAM:` |
@@ -402,7 +419,7 @@ of the struct's `__eq__`, plus exhaustive-match diagnostics. Contract members:
 |Member|Contract|
 |---|---|
 |`_enum_case_names`|`ParameterList.of[...].values`: constant names in case-index order.|
-|`_enum_case_types`|`TypeList` values in the same order; `NoneType` for payload-less cases.|
+|`_enum_case_types`|`TypeList` values in the same order: a `Tuple` of each case's payload types, `Tuple[]` for payload-less cases.|
 |`_get_enum_discriminant(self) -> Int`|Map the backing value to its case index.|
 |`_unsafe_get_enum_payload[id: Int](ref self)`|Return `ref[self] TypeList[Trait=AnyType, Self._enum_case_types]()[id]`; payload-less enums `comptime assert False`.|
 
@@ -434,7 +451,7 @@ struct Kind(EnumLike, TrivialRegisterPassable):
     comptime _enum_case_names = ParameterList.of[
         "FIRST".value, "SECOND".value
     ].values
-    comptime _enum_case_types = TypeList.splat[2, NoneType].values
+    comptime _enum_case_types = TypeList.splat[2, Tuple[]].values
 
     def _get_enum_discriminant(self) -> Int:
         return Int(self.value)
@@ -492,29 +509,40 @@ The coverage model (what counts as "covered"):
 payload duplicates and nested open-type literals aren't diagnosed, and
 literal identity is spelling-based (`4` vs `0x4` are different keys).
 
-### `if case` / `while case` / `or_else`
+### `if case` / `guard case` / `while case` / `or_else`
 
-Pick by shape, in order:
+Unwrap an `Optional` or `OptionalReg` with pattern matching or `or_else`,
+not with `.value()` or `.unsafe_value()`, wherever a pattern can express the
+code. Pick by shape, in order:
 
 - **Fallback to a default** → `opt.or_else(default)`. One expression, no
-  branch: `var global_rank = my_rank.or_else(Int(ctx.id()))`. Works on
+  branch: `var global_rank = my_rank.or_else(Int(ctx.device().id))`. Works on
   runtime and comptime Optionals alike. This replaces the
   `opt.value() if opt else default` ternary and the two-line
-  default-then-overwrite dance.
-- **Branch on presence** (use the payload only when it exists, other
-  control flow otherwise) → `if case .Some(x) = opt:`. The pattern is the
-  guard AND the binding.
-- **Dispatch on the payload's shape** (multiple cases, or the None side
-  carries its own logic) → `match opt: case .Some(x): ... case .None: ...`.
-- Presence guaranteed by construction (an enclosing condition already
-  proves it, and absence is a caller bug)? Keep `.value()` — it aborts
-  loudly instead of silently skipping work.
+  default-then-overwrite dance. `or_else` evaluates `default` eagerly, so keep
+  a branch when computing it is expensive or raises.
+- **The empty case leaves the scope** (`return`, `raise`, `continue`,
+  `break`, `abort()`) and the rest of the block uses the payload →
+  `guard case .Some(x) = opt else: <exit>`. The binding stays in scope
+  after the statement, so the normal path stays at the outer indentation.
+  Prefer it over a `match` whose `.None` arm only exits, over
+  `if case ... else: <exit>`, and over `if not opt: <exit>` followed by
+  `.value()`.
+- **Branch on presence** (use the payload only when it exists, then carry on
+  either way) → `if case .Some(x) = opt:`. The pattern is the guard AND the
+  binding.
+- **Dispatch on the payload's shape** (multiple cases, or both sides do work
+  and continue) → `match opt: case .Some(x): ... case .None: ...`.
+- **Presence guaranteed by construction** (absence is a caller bug) →
+  `guard case .Some(x) = opt else: abort("<why it can't be empty>")`, so
+  the invariant is named where it's relied on.
+
 ```mojo
 # WRONG: guard-then-unwrap
-var global_rank = my_rank.value() if my_rank else Int(ctx.id())
+var global_rank = my_rank.value() if my_rank else Int(ctx.device().id)
 
 # CORRECT: fallback is one expression
-var global_rank = my_rank.or_else(Int(ctx.id()))
+var global_rank = my_rank.or_else(Int(ctx.device().id))
 ```
 
 For the branch-on-presence shape, `if case pattern = value:` evaluates the
@@ -536,12 +564,51 @@ if not stored or Int(stored.value()) != Int(record):
 if case .Some(w) = sink_weight:
     sink_logit = w
 
-if case .Some(s) = get_global_or_null(key):
-    if Int(s) != Int(record):
+match get_global_or_null(key):         # absent OR mismatched still raises
+    case .Some(s) if Int(s) == Int(record):
+        use(s)
+    case _:
         raise Error("missing")
 
 while case .Some(item) = get_next():   # consume while it yields
     process(item)
+```
+
+For the early-exit shape, `guard case` keeps the normal path flat:
+
+```mojo
+# WRONG: the rest of the function nests under .Some
+match _memmem(haystack, needle):
+    case .Some(loc):
+        return Int(loc) - Int(self.unsafe_ptr())
+    case .None:
+        return -1
+
+# WRONG: check, then unwrap
+var ptr = handle.get_symbol[NoneType](cstr_name=name)
+if not ptr:
+    raise Error(t"symbol not found: {name}")
+return _DLCallable(ptr.unsafe_value())
+
+# CORRECT
+guard case .Some(loc) = _memmem(haystack, needle) else:
+    return -1
+return Int(loc) - Int(self.unsafe_ptr())
+```
+
+Destructure a tuple payload in the pattern, not in the body:
+
+```mojo
+# WRONG: bind the tuple, then unpack it
+var pair_opt = lookup(key) # Optional[Tuple[Int, List[Int]]]
+if case .Some(pair) = pair_opt:
+    var index: Int
+    index, ref nums = pair
+    use(index, nums)
+
+# CORRECT
+if case .Some((index, nums)) = lookup(key):
+    use(index, nums)
 ```
 
 `if case` composes with the else-arm discipline: an unwrap in one branch of
@@ -549,7 +616,9 @@ a larger conditional chain stays readable as
 `if case .Some(x) = opt: ... elif <other cond>: ...`. Prefer it even when
 the guard is `comptime` (`comptime if case .Some(fn) = wrapper:`).
 
-Both compose with `comptime` — parameters bind as parameters:
+All of these compose with `comptime` — parameters bind as parameters, and
+`comptime guard case .Some(v) = param else:` keeps `v` bound for the rest
+of the block:
 
 ```mojo
 comptime if case == Int = T:
@@ -579,6 +648,11 @@ match point:
   snapshots the subject once.
 - `elif` chains over unrelated expressions stay `if`/`elif`. Parameter
   subjects take `comptime match`.
+- A `match` on an `Optional` whose `.None` arm only exits,
+  `if case ... else: <exit>`, and `if not opt: <exit>` followed by
+  `.value()` all become `guard case`.
+- A `.Some(t)` binding whose tuple is unpacked in the body becomes
+  `.Some((a, b))`.
 - A bare name in a pattern binds; if a comparison was meant, use `== name`
   (enum cases excepted: `case Color.red:` / `case .red:`).
 - Guarded cases don't count toward exhaustiveness; missing *coverage* warns
@@ -600,7 +674,7 @@ match point:
 - `Optional[T]` instead of sentinel defaults.
 - One generic entry point (`is[NVIDIA_GPU]()`) over a growing set of
   `is_xyz()` methods.
-- Take `StringSlice`/`Span`/`Iterable` rather than owning types.
+- Take `StringSpan`/`Span`/`Iterable` rather than owning types.
 - Never accept an argument and silently ignore it on some targets.
 - Keep advanced, low-level functions out of module exports.
 - For `call_location()`, use a thin `@inline(.always)` wrapper that forwards

@@ -92,7 +92,7 @@ def _headers(bytes: Span[UInt8, _]) -> List[String]:
         if trimmed > start and bytes[trimmed - 1] == _RETURN:
             trimmed -= 1
         if fastq or (start < trimmed and bytes[start] == UInt8(ord(">"))):
-            out.append(String(StringSlice(unsafe_from_utf8=bytes[start + 1 : max(trimmed, start + 1)])))
+            out.append(String(StringSpan(unsafe_from_utf8=bytes[start + 1 : max(trimmed, start + 1)])))
         if fastq:
             # The sequence, '+' and quality lines.
             for _ in range(3):

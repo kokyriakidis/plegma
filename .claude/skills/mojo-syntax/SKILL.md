@@ -30,8 +30,9 @@ Compiling isn't the bar for review. Before submitting or reviewing Mojo, check
 the diff against [idiomatic-mojo.md](references/idiomatic-mojo.md): the style
 rules code reviewers flag most often (open-coded helpers, redundant casts,
 over-specified parameters, `IndexList` instead of tuples, missing `comptime`,
-unneeded `rebind`, mutable origins on inputs, single-vendor gates on generic
-kernels).
+unneeded `rebind`, `AnyOrigin` or mutable origins on arguments, single-vendor
+gates on generic kernels). Then check it against every section of the
+[Mojo style guide](https://github.com/modular/modular/blob/main/Mojo/docs/contributing/stdlib/stdlib-code-style.md).
 
 ## Removed syntax — DO NOT generate these
 
@@ -57,15 +58,17 @@ kernels).
 | `from sys import ...`                            | `from std.sys import ...`                                                        |
 | `from os import ...`                             | `from std.os import ...`                                                         |
 | `from pathlib import ...`                        | `from std.pathlib import ...`                                                    |
-| `s[i]`                                           | `s[byte=i]` — returns `StringSlice`; wrap in `String()` if needed                |
+| `s[i]`                                           | `s[byte=i]` — returns `StringSpan`; wrap in `String()` if needed                 |
 | `s[0:10]`, `s[:5]`                               | No slice syntax on String — use `s.codepoint_slices()` or Python FFI             |
 | `constrained(cond, msg)`                         | `comptime assert cond, msg`                                                      |
 | `DynamicVector[T]`                               | `List[T]`                                                                        |
 | `InlinedFixedVector[T, N]`                       | `Array[T, N]`                                                                    |
 | `Tensor[T]`                                      | Not in stdlib (use SIMD, List, Pointer)                                          |
+| `UnsafePointer[T, O]`                            | `Pointer[T, O]`                                                                  |
 | `MutUnsafePointer` / `ImmUnsafePointer`          | `MutPointer` / `ImmPointer`                                                      |
-| `OptionalUnsafePointer`                          | `OptionalPointer`                                                                |
-| `escaping` closures                              | Unified closures (`def(...) -> T`, captures in `{}`); `capturing[_]` still valid |
+| `OptionalUnsafePointer`, `OptionalPointer`       | `Optional[Pointer[T, origin]]` (also `Optional[MutPointer[...]]` / `ImmPointer`) |
+| `escaping` closures                              | Unified closures (`def(...) -> T`, captures in `{}`)                             |
+| `capturing`, `@__parameter`, `@__copy_capture`   | Capture list `{imm}` / `{var x}` / `{mut x}`; pass the closure as a value        |
 | `__del__(deinit self)`                           | `__deinit__(deinit self)`                                                        |
 
 ## `var` is required for every new declaration
@@ -256,11 +259,10 @@ import std.random
 ```
 
 Prelude auto-imports (no import needed): `Int`, `String`, `Bool`, `List`,
-`Dict`, `Optional`, `SIMD`, `Float32`, `Float64`, `UInt8`, `Pointer`,
-`OptionalPointer`, `alloc`, `Span`, `Error`, `DType`, `Writable`, `Writer`,
-`Copyable`, `Movable`, `Equatable`, `Hashable`, `rebind`, `print`, `range`,
-`len`, and more. `Layout` and `dealloc` are **not** in the prelude — import them
-from `std.memory`.
+`Dict`, `Optional`, `SIMD`, `Float32`, `Float64`, `UInt8`, `Pointer`, `alloc`,
+`Span`, `Error`, `DType`, `Writable`, `Writer`, `Copyable`, `Movable`,
+`Equatable`, `Hashable`, `rebind`, `print`, `range`, `len`, and more. `Layout`
+and `dealloc` are **not** in the prelude — import them from `std.memory`.
 
 `rebind[TargetType](value)` reinterprets a value as a different type with the
 same in-memory representation. Useful when compile-time type expressions are
@@ -315,20 +317,18 @@ For-in: `for item in col:` (immutable) / `for ref item in col:` (mutable).
 | Type                          | Use                                                      |
 |-------------------------------|----------------------------------------------------------|
 | `Pointer[T, mut=M, origin=O]` | Safe, non-nullable. Deref with `p[]`.                    |
-| `OptionalPointer[T, origin]`  | Nullable pointer — `Optional[Pointer[...]]`.             |
+| `Optional[Pointer[T, O]]`     | Nullable pointer; `None` is the null niche.              |
 | `Allocation[T]`               | Owning handle returned by `alloc`. Explicitly destroyed. |
 | `Span(list)`                  | Non-owning contiguous view.                              |
 | `OwnedPointer[T]`             | Unique ownership (like Rust `Box`).                      |
 | `ArcPointer[T]`               | Reference-counted shared ownership.                      |
 
-`UnsafePointer` is a deprecated alias of `Pointer` — it still compiles and
-warns. The other legacy aliases were **removed** and are hard errors (see the
-table at the top). Most of the pointer API is being renamed alongside
-`UnsafePointer`; those old spellings still compile but warn:
+`UnsafePointer` and the other legacy pointer aliases were **removed** and are
+hard errors (see the table at the top). Most of the pointer API was renamed
+alongside them; those old spellings still compile but warn:
 
 | Deprecated                | Replacement                             |
 |---------------------------|-----------------------------------------|
-| `UnsafePointer[T, O]`     | `Pointer[T, O]`                         |
 | `alloc[T](n)`             | `alloc(Layout[T](length=n))`             |
 | `p.free()`                | `dealloc(allocation^)`                  |
 | `p[i]`                    | `p[unsafe_offset=i]`                    |
@@ -377,12 +377,10 @@ A container that already tracks its own capacity may instead store a
 `ThinAllocation` and supply the `Layout` again at `dealloc` time. That is
 what `List` does; it is an optimization, not the default shape.
 
-When a struct field does hold a raw `Pointer`, its `origin` parameter must be
-specified; use `MutUntrackedOrigin` for owned heap data.
-
 `Pointer` is **non-null by design** — `Bool(p)` is unavailable, not merely
-deprecated. For nullable storage, use `OptionalPointer[T, origin]` (same layout;
-`None` is the null niche).
+deprecated. For nullable storage, use `Optional[Pointer[T, origin]]` (same
+layout; `None` is the null niche). An `_` origin nested inside it, as in
+`Optional[MutPointer[T, _]]`, makes the function generic over the origin.
 
 ## Origin system (not "lifetime")
 
@@ -392,9 +390,45 @@ Mojo tracks reference provenance with **origins**, not "lifetimes":
 struct Span[mut: Bool, //, T: AnyType, origin: Origin[mut=mut]]: ...
 ```
 
-Key types: `Origin`, `MutOrigin`, `ImmOrigin`, `MutAnyOrigin`,
-`ImmutAnyOrigin`, `MutUntrackedOrigin`, `ImmUntrackedOrigin`,
-`ImmStaticOrigin`. Use `origin_of(value)` to get a value's origin.
+Key types: `Origin`, `MutOrigin`, `ImmOrigin`, `MutUntrackedOrigin`,
+`ImmUntrackedOrigin`, `ImmStaticOrigin`. Use `origin_of(value)` to get a
+value's origin.
+
+**Never write `AnyOrigin` or `UnsafeAnyOrigin`** in any spelling
+(`MutAnyOrigin`, `ImmutAnyOrigin`, `MutUnsafeAnyOrigin`, ...), and never call
+`.as_unsafe_any_origin()`. They are an unsafe escape hatch slated for removal:
+they turn off exclusivity checking and keep every value in scope alive. Leave
+an argument's origin unbound with `_`, which infers the caller's origin:
+
+```mojo
+# WRONG
+def add(dst: Pointer[UInt32, MutUnsafeAnyOrigin], src: Pointer[UInt32, MutAnyOrigin]): ...
+# CORRECT — `_` infers the origin; read-only inputs are `Imm`
+def add(dst: MutPointer[UInt32, _], src: ImmPointer[UInt32, _]): ...
+def total[LT: TensorLayout](x: ImmTileTensor[.float32, LT, _]) -> Float32: ...
+```
+
+Where `_` can't be used, name a concrete origin, still never an any-origin:
+
+| Case                                          | Origin                                                                    |
+|-----------------------------------------------|---------------------------------------------------------------------------|
+| GPU kernel passed to `enqueue_function`       | `MutUntrackedOrigin` / `ImmUntrackedOrigin` (see GPU skill)               |
+| Nested pointer (`_` inside `_` is rejected)   | Inferred param: `def f[o: ImmOrigin](p: ImmPointer[ImmPointer[T, o], _])` |
+| Struct field borrowing a Mojo value           | An `origin` struct parameter                                              |
+| Struct field pointing at heap/device/C memory | `MutUntrackedOrigin` / `ImmUntrackedOrigin`                               |
+
+Replacing AnyOrigin can expose a latent lifetime bug: wrong results, usually
+no crash. A live any-origin value keeps every value in scope alive, so code
+that hides a pointer to `x` from the checker (stored in an any- or
+untracked-origin field, laundered through `unsafe_from_address=Int(...)`, or
+cast with `.as_unsafe_any_origin()`) only worked by accident. Once origins are
+threaded through, `x` is destroyed after its last *visible* use. Confirm with
+`_ = x` after the real last use; fix by tying the pointer (origin parameter on
+the struct, `Pointer(to=x)` with no cast), never by restoring AnyOrigin.
+Origins don't reorder loads or stores, so don't blame aliasing. The one
+codegen effect is mutability: on GPU, loads through an `ImmPointer` or
+immutable `TileTensor` are invariant by default, so don't read memory other
+threads rewrite through one.
 
 ## Testing
 
@@ -434,10 +468,16 @@ for key in my_dict:
 var nums = List[Int](1, 2, 3)
 
 # CORRECT — bracket literals
-var nums = [1, 2, 3]                              # List[Int]
+var nums: List = [1, 2, 3]                        # List[Int]; element type inferred
 var nums: List[Float32] = [1.0, 2.0, 3.0]         # explicit element type
+var fixed = [1, 2, 3]                             # Array[Int, 3]: fixed size, no append
+var evens = [x * 2 for x in range(3)]             # comprehension: List[Int]
 var scores = {"alice": 95, "bob": 87}              # Dict[String, Int]
 ```
+
+An unannotated list literal is an `Array`, and an unannotated `[]` is an
+error. A `List` parameter or return type gives the same context as an
+annotation.
 
 `List[T]` rejects negative indices at compile time — use `lst[len(lst) - 1]`,
 not `lst[-1]`. (Library types may still support it.)
@@ -466,7 +506,7 @@ var x = values[i][T].copy()          # or `^` to transfer
 | `@staticmethod`                                  | Static method                           |
 | `@deprecated("msg")`                             | Deprecation warning                     |
 | `@doc_hidden`                                    | Hide from docs                          |
-| `@explicit_destroy`                              | Linear type (no implicit destruction)   |
+| `@explicit_destroy("msg")` (deprecated)          | Add `else "msg"` to the `Deinitable` conformance: `not Deinitable else "msg"`, `Deinitable where cond else "msg"` |
 
 ## Contextual member references — prefer `.member`
 
@@ -481,7 +521,7 @@ v.cast[.float32]()
 ctx.enqueue_create_buffer[.int32](num_rows)
 unsafe_stack_allocation[1, Int32, address_space=.SHARED]()
 
-def f[dtype: DType = .float32](x: TileTensor[.bfloat16, L, MutAnyOrigin]): ...
+def f[dtype: DType = .float32](x: TileTensor[.bfloat16, L, _]): ...
 ```
 
 Works for any type's `comptime` aliases and static methods, including chains
@@ -556,8 +596,8 @@ auto-imported and need no import statement.
 Byte indexing requires keyword syntax: `s[byte=idx]` (not `s[idx]`). `len(s)` is
 deprecated on `String` — use `s.byte_length()` or `s.count_codepoints()`.
 
-`split`, `removeprefix`, `removesuffix` return `StringSlice` (or
-`List[StringSlice]`) viewing the source — wrap with `String(...)` to
+`split`, `removeprefix`, `removesuffix` return `StringSpan` (or
+`List[StringSpan]`) viewing the source — wrap with `String(...)` to
 materialize an owned `String`.
 
 ### String indexing (common error)
@@ -568,7 +608,7 @@ var ch = s[0]
 var sub = s[0:10]
 
 # CORRECT — byte-level access
-var ch = s[byte=0]              # returns StringSlice
+var ch = s[byte=0]              # returns StringSpan
 var ch_str = String(s[byte=0])  # if you need a String
 
 # CORRECT — iterate codepoints for truncation
@@ -595,7 +635,7 @@ for cp_slice in s.codepoint_slices():
 for cp in s.codepoints():
     print(Int(cp))      # Codepoint is a Unicode scalar value type
 
-# StaticString = StringSlice with static origin (zero-allocation)
+# StaticString = StringSpan with static origin (zero-allocation)
 comptime GREETING: StaticString = "Hello, World"
 
 # t-strings for interpolation (lazy, type-safe)
@@ -624,33 +664,56 @@ except err:                               # err is Int
 
 `match` / `comptime match` / `if case` / `while case` are stabilized — see
 [idiomatic-mojo.md §10](references/idiomatic-mojo.md) for the pattern forms
-and when to prefer them over `elif` chains. Async is spelled `__async def`
-and `__await` (bare `async`/`await` still parse but warn that async is
-unstable); support is unfinished and its types are private — do not write
-async Mojo yet.
+and when to prefer them over `elif` chains.
+
+Unwrap `Optional`/`OptionalReg` with a pattern, not `.value()` /
+`.unsafe_value()`. [§10](references/idiomatic-mojo.md) says which form fits:
+
+```mojo
+# WRONG
+if not opt:
+    return -1
+use(opt.value())
+# CORRECT
+guard case .Some(x) = opt else:     # else must exit
+    return -1
+use(x)                                # x stays bound to the end of the block
+if case .Some(x) = opt:               # use it only if present
+    use(x)
+var n = opt.or_else(0)                # default
+```
+
+Async is spelled `__async def` and `__await` (bare `async`/`await` still
+parse but warn that async is unstable); support is unfinished and its types
+are private — do not write async Mojo yet.
 
 ## Function types and closures
 
-No lambda. Closures use bare `def` with a capture list in `{}` after the arg
-list. `escaping` is removed; `capturing[_]` is still valid on parametric
-closure-type params:
+A closure is a nested `def` or a one-expression `lambda`, with any capture
+list in `{}` after the arg list. `escaping`, `capturing`, `@__parameter`, and
+`@__copy_capture` are removed:
 
 ```mojo
-comptime MyFn = def(Int) -> None                  # unified value type
-def runner[f: def(Int) capturing[_] -> None](): ...  # parametric form
+comptime MyFn = def(Int) -> None                  # closure trait
+def runner[F: def(Int) -> None](f: F): ...        # closures are values
+def apply[f: def(Int) thin -> Int](): ...         # comptime fn: must be thin
 
 def closure(i: Int) {mut count, imm ptr, var x}:  # captures: mut/imm/var
     count += ptr[i] + x^                          # `^` at use site, not in `{}`
 
-vectorize[simd_width](size, closure)              # runtime-arg overload
+vectorize[simd_width](size, closure)
+
+var inc = lambda (x: Int) -> Int: x + 1           # body is one expression
+filter(items, lambda (x: Int) {lo} -> Bool: x > lo)  # captures before `->`
 ```
 
+A `lambda` without `-> T` returns `None`, so a body with a value is an error.
+
 `imm` is default. `var x` is owned — transfer with `x^` at the use site.
-Prefer unified closures with a capture list. Do not use `@__parameter` /
-`@parameter` on nested closures in new or migrated code — the legacy form is
-slated for removal. Pass closures as runtime arguments (`f(my_closure)`)
-where possible; if an API requires a comptime `capturing[_]` function, use
-`def … capturing` without `@__parameter`, or migrate that API.
+A closure with captures is a runtime value, so pass it as an argument
+(`f(my_closure)`). Only a `thin` function or lambda can be a compile-time
+parameter: no captures, and no capture list other than `{}`. A written `{imm}`
+or `{mut}` makes a lambda capturing even when it uses no outer variable.
 
 ## Type hierarchy
 

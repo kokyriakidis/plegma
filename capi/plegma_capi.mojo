@@ -77,7 +77,7 @@ def _c_string_length(pointer: Bytes) -> Int:
     return n
 
 
-def _write_error(message: String, error: OptionalPointer[UInt8, MutUntrackedOrigin], error_size: Int):
+def _write_error(message: String, error: Optional[Pointer[UInt8, MutUntrackedOrigin]], error_size: Int):
     """`message` into the caller's buffer, cut to fit, NUL-ended (nothing without a buffer)."""
     if not error or error_size <= 0:
         return
@@ -239,8 +239,8 @@ def _options_init_sized(settings: Bytes, struct_size: Int):
 
 @export
 def plegma_model_load(
-    path: OptionalPointer[UInt8, MutUntrackedOrigin], error: OptionalPointer[UInt8, MutUntrackedOrigin], error_size: Int
-) abi("C") -> OptionalPointer[HomopolymerModel, MutUntrackedOrigin]:
+    path: Optional[Pointer[UInt8, MutUntrackedOrigin]], error: Optional[Pointer[UInt8, MutUntrackedOrigin]], error_size: Int
+) abi("C") -> Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]]:
     if not path:
         _write_error("plegma_model_load: no path", error, error_size)
         return None
@@ -253,11 +253,11 @@ def plegma_model_load(
 
 @export
 def plegma_model_parse(
-    text: OptionalPointer[UInt8, MutUntrackedOrigin],
+    text: Optional[Pointer[UInt8, MutUntrackedOrigin]],
     length: Int,
-    error: OptionalPointer[UInt8, MutUntrackedOrigin],
+    error: Optional[Pointer[UInt8, MutUntrackedOrigin]],
     error_size: Int,
-) abi("C") -> OptionalPointer[HomopolymerModel, MutUntrackedOrigin]:
+) abi("C") -> Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]]:
     if length < 0 or length >= _TOO_MANY:
         _write_error("plegma_model_parse: length out of range", error, error_size)
         return None
@@ -272,7 +272,7 @@ def plegma_model_parse(
 
 
 @export
-def plegma_model_free(model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin]) abi("C"):
+def plegma_model_free(model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]]) abi("C"):
     if model:
         _free_model(model.value())
 
@@ -283,7 +283,7 @@ def plegma_scratch_create() abi("C") -> Scratch:
 
 
 @export
-def plegma_scratch_free(scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin]) abi("C"):
+def plegma_scratch_free(scratch: Optional[Pointer[ConsensusScratch, MutUntrackedOrigin]]) abi("C"):
     if scratch:
         _free_scratch(scratch.value())
 
@@ -296,10 +296,10 @@ def _letter(c: UInt8) -> UInt8:
     return 0x4E
 
 
-comptime Sequences = OptionalPointer[OptionalPointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin]
-comptime Lengths = OptionalPointer[Int, MutUntrackedOrigin]
-comptime Values = OptionalPointer[Int32, MutUntrackedOrigin]
-comptime Settings = OptionalPointer[UInt8, MutUntrackedOrigin]
+comptime Sequences = Optional[Pointer[Optional[Pointer[UInt8, MutUntrackedOrigin]], MutUntrackedOrigin]]
+comptime Lengths = Optional[Pointer[Int, MutUntrackedOrigin]]
+comptime Values = Optional[Pointer[Int32, MutUntrackedOrigin]]
+comptime Settings = Optional[Pointer[UInt8, MutUntrackedOrigin]]
 
 
 comptime _TOO_MANY = 1 << 40
@@ -338,13 +338,13 @@ def _reads(
 
 
 def _consensus(
-    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    scratch: Optional[Pointer[ConsensusScratch, MutUntrackedOrigin]],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
     anchors: Values,
     strands: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
 ) raises -> List[List[UInt8]]:
     # Not reserved for `count`: `_reads` checks it first (a size_t of -1 would abort the allocation).
@@ -363,13 +363,13 @@ def _consensus(
 
 
 def _clustered(
-    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    scratch: Optional[Pointer[ConsensusScratch, MutUntrackedOrigin]],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
     anchors: Values,
     strands: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     max_clusters: Int,
     min_freq: Float64,
@@ -398,13 +398,13 @@ def _clustered(
 
 @export
 def plegma_consensus_with_scratch(
-    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    scratch: Optional[Pointer[ConsensusScratch, MutUntrackedOrigin]],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
     anchors: Values,
     strands: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
     var result = Result()
@@ -420,25 +420,25 @@ def plegma_consensus_with_scratch(
 @export
 def plegma_consensus(
     count: Int,
-    sequences: OptionalPointer[OptionalPointer[UInt8, MutUntrackedOrigin], MutUntrackedOrigin],
-    lengths: OptionalPointer[Int, MutUntrackedOrigin],
-    anchors: OptionalPointer[Int32, MutUntrackedOrigin],
-    strands: OptionalPointer[Int32, MutUntrackedOrigin],
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
-    settings: OptionalPointer[UInt8, MutUntrackedOrigin],
+    sequences: Optional[Pointer[Optional[Pointer[UInt8, MutUntrackedOrigin]], MutUntrackedOrigin]],
+    lengths: Optional[Pointer[Int, MutUntrackedOrigin]],
+    anchors: Optional[Pointer[Int32, MutUntrackedOrigin]],
+    strands: Optional[Pointer[Int32, MutUntrackedOrigin]],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
+    settings: Optional[Pointer[UInt8, MutUntrackedOrigin]],
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
     return plegma_consensus_with_scratch(None, count, sequences, lengths, anchors, strands, model, settings)
 
 
 @export
 def plegma_clustered_consensus_with_scratch(
-    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    scratch: Optional[Pointer[ConsensusScratch, MutUntrackedOrigin]],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
     anchors: Values,
     strands: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     max_clusters: Int32,
     min_freq: Float32,
@@ -472,7 +472,7 @@ def plegma_clustered_consensus(
     lengths: Lengths,
     anchors: Values,
     strands: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     max_clusters: Int32,
     min_freq: Float32,
@@ -483,14 +483,14 @@ def plegma_clustered_consensus(
 
 
 def _phased(
-    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    scratch: Optional[Pointer[ConsensusScratch, MutUntrackedOrigin]],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
     anchors: Values,
     strands: Values,
     haplotypes: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     mut result: Result,
 ) raises:
@@ -540,14 +540,14 @@ def _held(got: Clustered, mut result: Result):
 
 @export
 def plegma_phased_consensus_with_scratch(
-    scratch: OptionalPointer[ConsensusScratch, MutUntrackedOrigin],
+    scratch: Optional[Pointer[ConsensusScratch, MutUntrackedOrigin]],
     count: Int,
     sequences: Sequences,
     lengths: Lengths,
     anchors: Values,
     strands: Values,
     haplotypes: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
     var result = Result()
@@ -568,7 +568,7 @@ def plegma_phased_consensus(
     anchors: Values,
     strands: Values,
     haplotypes: Values,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
 ) abi("C") -> Pointer[Result, MutUntrackedOrigin]:
     return plegma_phased_consensus_with_scratch(
@@ -588,8 +588,8 @@ struct _Locus(Copyable, Movable):
     var haplotypes: Values
 
 
-comptime Loci = OptionalPointer[_Locus, MutUntrackedOrigin]
-comptime ResultOut = OptionalPointer[Pointer[Result, MutUntrackedOrigin], MutUntrackedOrigin]
+comptime Loci = Optional[Pointer[_Locus, MutUntrackedOrigin]]
+comptime ResultOut = Optional[Pointer[Pointer[Result, MutUntrackedOrigin], MutUntrackedOrigin]]
 
 
 def _error_box(message: String) -> Pointer[Result, MutUntrackedOrigin]:
@@ -623,7 +623,7 @@ def _run_batch(
     kind: Int,
     batch_size: Int,
     loci: Loci,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     max_clusters: Int,
     min_freq: Float64,
@@ -728,7 +728,7 @@ def _run_batch(
 def plegma_consensus_batch(
     batch_size: Int,
     loci: Loci,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     results: ResultOut,
 ) abi("C"):
@@ -739,7 +739,7 @@ def plegma_consensus_batch(
 def plegma_clustered_consensus_batch(
     batch_size: Int,
     loci: Loci,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     max_clusters: Int32,
     min_freq: Float32,
@@ -752,7 +752,7 @@ def plegma_clustered_consensus_batch(
 def plegma_phased_consensus_batch(
     batch_size: Int,
     loci: Loci,
-    model: OptionalPointer[HomopolymerModel, MutUntrackedOrigin],
+    model: Optional[Pointer[HomopolymerModel, MutUntrackedOrigin]],
     settings: Settings,
     results: ResultOut,
 ) abi("C"):
@@ -761,9 +761,9 @@ def plegma_phased_consensus_batch(
 
 @export
 def plegma_result_members(
-    result: OptionalPointer[Result, MutUntrackedOrigin],
+    result: Optional[Pointer[Result, MutUntrackedOrigin]],
     part: Int,
-    reads: OptionalPointer[OptionalPointer[Int32, MutUntrackedOrigin], MutUntrackedOrigin],
+    reads: Optional[Pointer[Optional[Pointer[Int32, MutUntrackedOrigin]], MutUntrackedOrigin]],
 ) abi("C") -> Int:
     if not result or part < 0 or part >= len(result.value()[].members):
         if reads:
@@ -777,10 +777,10 @@ def plegma_result_members(
 
 @export
 def plegma_result_cigar(
-    result: OptionalPointer[Result, MutUntrackedOrigin],
+    result: Optional[Pointer[Result, MutUntrackedOrigin]],
     index: Int,
-    placement: OptionalPointer[Int64, MutUntrackedOrigin],
-) abi("C") -> OptionalPointer[UInt8, MutUntrackedOrigin]:
+    placement: Optional[Pointer[Int64, MutUntrackedOrigin]],
+) abi("C") -> Optional[Pointer[UInt8, MutUntrackedOrigin]]:
     if not result or index < 0 or index >= len(result.value()[].cigars):
         return None
     ref held = result.value()[]
@@ -791,14 +791,14 @@ def plegma_result_cigar(
 
 
 @export
-def plegma_result_parts(result: OptionalPointer[Result, MutUntrackedOrigin]) abi("C") -> Int:
+def plegma_result_parts(result: Optional[Pointer[Result, MutUntrackedOrigin]]) abi("C") -> Int:
     return len(result.value()[].parts) if result else 0
 
 
 @export
 def plegma_result_sequence(
-    result: OptionalPointer[Result, MutUntrackedOrigin], part: Int, length: OptionalPointer[Int, MutUntrackedOrigin]
-) abi("C") -> OptionalPointer[UInt8, MutUntrackedOrigin]:
+    result: Optional[Pointer[Result, MutUntrackedOrigin]], part: Int, length: Optional[Pointer[Int, MutUntrackedOrigin]]
+) abi("C") -> Optional[Pointer[UInt8, MutUntrackedOrigin]]:
     if not result or part < 0 or part >= len(result.value()[].parts):
         if length:
             length.value()[] = 0
@@ -818,14 +818,14 @@ def plegma_result_sequence(
 
 @export
 def plegma_result_error(
-    result: OptionalPointer[Result, MutUntrackedOrigin]
-) abi("C") -> OptionalPointer[UInt8, MutUntrackedOrigin]:
+    result: Optional[Pointer[Result, MutUntrackedOrigin]]
+) abi("C") -> Optional[Pointer[UInt8, MutUntrackedOrigin]]:
     if not result or len(result.value()[].error) == 0:
         return None
     return result.value()[].error.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
 
 @export
-def plegma_result_free(result: OptionalPointer[Result, MutUntrackedOrigin]) abi("C"):
+def plegma_result_free(result: Optional[Pointer[Result, MutUntrackedOrigin]]) abi("C"):
     if result:
         _free_result(result.value())

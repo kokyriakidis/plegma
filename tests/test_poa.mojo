@@ -35,7 +35,7 @@ def _mutated(seq: List[UInt8], rate: Float64) -> List[UInt8]:
     return out^
 
 
-def _b(text: StringSlice) -> List[UInt8]:
+def _b(text: StringSpan) -> List[UInt8]:
     return List[UInt8](text.as_bytes())
 
 

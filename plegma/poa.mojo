@@ -419,7 +419,7 @@ def _align_snapshot_batch(
         sort(order)
         order.reverse()
         var failed = List[Bool](length=count, fill=False)
-        var pool_p = aligner.scratch.workers.unsafe_ptr()
+        var pool = Span(aligner.scratch.workers)
         var nodes_p = out_nodes.unsafe_ptr()
         var flipped_p = out_flipped.unsafe_ptr()
         var seqs_p = out_seqs.unsafe_ptr()
@@ -452,13 +452,13 @@ def _align_snapshot_batch(
             imm check_strand,
             imm path0_len,
             imm graph_len,
-            imm pool_p,
+            imm pool,
             imm nodes_p,
             imm flipped_p,
             imm seqs_p,
             imm failed_p,
         }:
-            ref w = pool_p[unsafe_offset=slot]
+            ref w = pool.unsafe_ptr()[unsafe_offset=slot]
             w.row_of.resize(graph_len, -1)
             while True:
                 var pos = Int(taken.fetch_add(1))

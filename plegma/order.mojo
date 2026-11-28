@@ -131,7 +131,7 @@ def guide_order(seqs: List[List[UInt8]], k: Int = 19, w: Int = 10, threads: Int 
                 similar[i * n + j] = value
                 similar[j * n + i] = value
 
-    def ahead(i: Int, j: Int) capturing -> Bool:
+    def ahead(i: Int, j: Int) {imm seqs} -> Bool:
         """Whether `i` goes before `j` of a pair."""
         return _before(seqs[i], seqs[j])
 
